@@ -1,0 +1,4 @@
+/target
+/vendor/ffmpeg/*.zip
+/vendor/ffmpeg/ffmpeg.exe
+/vendor/ffmpeg/ffprobe.exe
