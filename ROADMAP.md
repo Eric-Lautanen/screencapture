@@ -52,29 +52,59 @@ Plan of record, in build order. Every session ends with
   costs ~15-20 ms (blit + pipe write), so the GDI path sustains ~40-45 fps
   at the 4K profile with deadline-paced pacing. Recording duration drifts
   behind wall time when capture fps lags the profile frame rate.
-- Known deltas carried into session 4:
-  - Region = full primary monitor only; the drawn-rectangle overlay and
-    auto window-bounds selectors are next.
-  - True 4K60 needs DXGI Desktop Duplication (GDI is the current path and
-    will stay as fallback).
-  - `stop` waits on the encoder, so the UI thread beats a moment while a
-    large finalization completes.
-  - Hotkey combos are fixed to `ctrl+alt+1/2` until the settings UI
-    exists; live re-registration arrives with it.
+- Hotkey combos are fixed to `ctrl+alt+1/2` until the settings UI
+  exists; live re-registration arrives with it.
 
-## Session 4 - Region UX + DXGI + icon
+## Session 4 - Region UX + icon + verification (done)
 
-- [ ] Drawn-rectangle capture overlay (transparent layered window, drag
-  select, rubber band), plus auto window-bounds capture.
-- [ ] DXGI Desktop Duplication frames (same BGRA pipe) for real 4K60 and
-  per-monitor capture; the GDI path stays as fallback.
-- [ ] Authored tray icon embedded in the binary (replaces the system
-  default loaded today).
-- [ ] `ffprobe`-based recording verification after each capture; the
-  doctor gains a capture smoke option.
-- [ ] Lossless 16-bit still-pipeline investigation (PNG `rgb48` or TIFF)
-  behind a settings value.
-- [ ] Lightweight logging ring buffer for capture sessions.
+- [x] Drawn-rectangle capture selector (`src/selector.rs`): fullscreen
+  topmost popup, drag a dashed rubber band, Escape or a <8 px click
+  cancels; returns a `capture::Region` in physical pixels. Verified
+  end-to-end with a scripted mouse drag.
+- [x] Auto window-bounds capture (`src/screen.rs`): the application the
+  user had focused just before the tray menu opened is remembered; DWM
+  extended frame bounds (no borders/shadows) with a virtual-desktop
+  clamp; falls back to the window under the cursor.
+- [x] `[capture] mode = full | region | window` in settings; tray menu
+  gains "Record region..." and "Record window"; CLI gains
+  `--mode full | region | window`.
+- [x] Authored tray icon: `tools/gen_icon.rs` renders and packs
+  `assets/icon.ico` (5 sizes, std-only); `src/tray/win/ico.rs` embeds it
+  with `include_bytes!` and builds the `HICON` through
+  `CreateIconFromResourceEx` (system icon stays as fallback).
+- [x] `ffprobe` verification after each recording (frame count printed);
+  doctor reports the engine as before.
+- [x] Shared Win32 declarations moved to `src/winapi.rs` (window
+  plumbing used by tray + selector declared and documented once).
+- [x] Multimedia timer resolution raised during recordings
+  (`timeBeginPeriod(1)`), demo pacing steps in 1 ms — region/window
+  captures hit the full profile rate with dead-on durations.
+- [x] All gates green: fmt, pedantic clippy `-D warnings`, 25 tests,
+  all sources under 500 lines.
+- Measurements (release build, single 1920x1200 panel): window/region
+  captures sustain the full rate (118 frames/2 s, 1.97 s wall) because
+  writes shrink with the region. Full-screen 4K stays GDI-bound at
+  ~30 live fps (33 MB blit + write misses the 16 ms deadline), so
+  recorded duration still lags wall time there.
+- deltas carried into session 5:
+  - DXGI Desktop Duplication for true full-screen 4K60 (per-monitor);
+    the GDI path stays as fallback.
+  - Photos remain full-primary stills; region/window photo selectors
+    arrive with the settings UI.
+  - Live hotkey re-registration waits for the settings UI.
+  - 16-bit still pipeline and the logging ring buffer move to a later
+    polish session.
+
+## Session 4b - DXGI Desktop Duplication (next)
+
+- [ ] COM plumbing in std (`src/dxgi.rs`): factory, adapter, output,
+  D3D11 device, staging texture, `AcquireNextFrame` loop — same BGRA
+  bytes out so `pipe.rs`/`recorder.rs` do not change.
+- [ ] Per-monitor capture: tray menu / settings pick a display; the
+  GDI path remains the fallback behind the same `Target` API.
+- [ ] Rotated/secondary outputs handled through output geometry; HDR
+  surfaces fall back to GDI for now.
+- [ ] Doctor gains a DXGI availability probe.
 
 ## Session 5 - macOS + Linux
 

@@ -16,8 +16,10 @@ mod pipe;
 mod recorder;
 mod recording;
 mod screen;
+mod selector;
 mod settings;
 mod tray;
+mod winapi;
 
 fn main() -> std::process::ExitCode {
     // Opt into physical-pixel geometry before any screen coordinate is read.

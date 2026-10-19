@@ -2,6 +2,7 @@
 //! command dispatch (single construct per run, all on the pump thread).
 
 mod ffi;
+mod ico;
 mod menu;
 
 use std::cell::RefCell;
@@ -9,7 +10,7 @@ use std::thread_local;
 
 use self::ffi::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GETMESSAGE_QUIT, GetMessageW, Guid, Hicon, Hwnd, IDI_APPLICATION, KillTimer, LoadIconW, Lparam,
+    GETMESSAGE_QUIT, GetForegroundWindow, GetMessageW, Guid, Hicon, Hwnd, KillTimer, Lparam,
     Lresult, Msg, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NotifyIconDataW, Point,
     PostQuitMessage, RegisterClassExW, RegisterHotKey, SetTimer, Shell_NotifyIconW,
     TranslateMessage, UnregisterClassW, UnregisterHotKey, WM_COMMAND, WM_CREATE, WM_DESTROY,
@@ -38,6 +39,8 @@ const TOOLTIP: &str = "screencapture";
 const ID_RECORD: Wparam = 1;
 const ID_PHOTO: Wparam = 2;
 const ID_AUTOSTART: Wparam = 3;
+const ID_RECORD_REGION: Wparam = 4;
+const ID_RECORD_WINDOW: Wparam = 5;
 const ID_PROFILE_BASE: Wparam = 100;
 const ID_EXIT: Wparam = 200;
 
@@ -48,6 +51,9 @@ thread_local! {
     static HANDLER: RefCell<Handler> = const { RefCell::new(None) };
     static WINDOW: RefCell<Option<Hwnd>> = const { RefCell::new(None) };
     static BINDINGS: RefCell<Vec<Binding>> = const { RefCell::new(Vec::new()) };
+    /// The window focused just before the tray menu opened, so "record
+    /// window" targets the application the user was working in.
+    static PREVIOUS_FOREGROUND: RefCell<Option<usize>> = const { RefCell::new(None) };
 }
 
 type Handler = Option<Box<dyn FnMut(Event)>>;
@@ -128,6 +134,11 @@ pub(super) fn set_frame_timer(interval_ms: Option<u32>) {
             unsafe { KillTimer(window, TIMER_ID) };
         }
     }
+}
+
+/// The window handle stashed by [`stash_foreground`], as plain bits.
+pub(super) fn previous_foreground() -> Option<usize> {
+    PREVIOUS_FOREGROUND.with_borrow(|slot| *slot)
 }
 
 fn register_hotkeys(window: Hwnd) {
@@ -213,7 +224,12 @@ unsafe extern "system" fn on_message(
         return add_icon(window);
     }
     if message == TRAY_CALLBACK {
-        if l_param == WM_LBUTTONUP || l_param == WM_RBUTTONUP {
+        // Mouse-up notifications arrive in `l_param` as small positives.
+        let clicks = u32::try_from(l_param).unwrap_or(0);
+        if clicks == WM_LBUTTONUP || clicks == WM_RBUTTONUP {
+            // Remember what the user had focused before our menu took
+            // focus; "record window" needs that application.
+            stash_foreground();
             // SAFETY: `window` is the tray window owned by the pump thread.
             unsafe {
                 menu::show(window);
@@ -248,6 +264,8 @@ unsafe extern "system" fn on_message(
 fn dispatch_command(command: Wparam, window: Hwnd) -> Lresult {
     match command & 0xffff {
         ID_RECORD => emit(Event::Record),
+        ID_RECORD_REGION => emit(Event::RecordRegion),
+        ID_RECORD_WINDOW => emit(Event::RecordWindow),
         ID_PHOTO => emit(Event::Photo),
         ID_AUTOSTART => emit(Event::ToggleAutostart),
         ID_EXIT => {
@@ -290,11 +308,22 @@ fn emit(event: Event) {
     });
 }
 
-fn add_icon(window: Hwnd) -> Lresult {
-    let icon = {
-        // SAFETY: a null module plus a numeric id loads a shared system icon.
-        unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION as *const u16) }
+/// Note the currently focused window into `PREVIOUS_FOREGROUND`, exposed
+/// through [`super::previous_foreground`] for window-mode captures.
+fn stash_foreground() {
+    // SAFETY: reads the foreground handle only; nothing is stored.
+    let window = unsafe { GetForegroundWindow() };
+    let value = if window.is_null() {
+        None
+    } else {
+        Some(window as usize)
     };
+    PREVIOUS_FOREGROUND.with_borrow_mut(|slot| *slot = value);
+}
+
+fn add_icon(window: Hwnd) -> Lresult {
+    // SAFETY: builds the authored icon on the tray's own thread.
+    let icon = unsafe { ico::app_or_fallback() };
     let mut data = icon_data(window, icon);
     set_tip(&mut data.tip, TOOLTIP);
     // SAFETY: `data` is a local, fully initialized struct bound to `window`.

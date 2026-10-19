@@ -11,6 +11,35 @@ use crate::ffmpeg::Binary;
 use crate::pipe::{self, Feed, Stream};
 use crate::recording::Profile;
 
+/// Multimedia timer period requested per recording (millisec).
+const FAST_PERIOD_MS: u32 = 1;
+
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn timeBeginPeriod(period: u32) -> u32;
+    fn timeEndPeriod(period: u32) -> u32;
+}
+
+/// Coarse-timer boost: Windows clocks sleeps and `SetTimer` at ~15.6 ms
+/// unless the multimedia period is lowered; active for the recorder's
+/// whole life so pacing deadlines stay honest.
+struct FastTimer;
+
+impl FastTimer {
+    fn begin() -> Self {
+        // SAFETY: parameterless period request; symmetric end in `Drop`.
+        unsafe { timeBeginPeriod(FAST_PERIOD_MS) };
+        Self
+    }
+}
+
+impl Drop for FastTimer {
+    fn drop(&mut self) {
+        // SAFETY: symmetric release of the period requested above.
+        unsafe { timeEndPeriod(FAST_PERIOD_MS) };
+    }
+}
+
 /// Everything needed to start one recording.
 #[derive(Clone, Debug)]
 pub struct Plan {
@@ -32,6 +61,8 @@ pub struct Plan {
 pub struct Recorder {
     target: Target,
     feed: Feed,
+    /// Held so the fast multimedia timer drops exactly with the recording.
+    _timer: FastTimer,
     /// Destination file for this recording.
     pub output: PathBuf,
 }
@@ -51,6 +82,7 @@ impl Recorder {
         if !region.is_sane() {
             return Err(io::Error::other("capture region is empty"));
         }
+        let timer = FastTimer::begin();
         let target = Target::new(region, plan.cursor)?;
         let output = plan.media_dir.join(format!(
             "screencapture-{}.{ext}",
@@ -72,6 +104,7 @@ impl Recorder {
         Ok(Self {
             target,
             feed,
+            _timer: timer,
             output,
         })
     }

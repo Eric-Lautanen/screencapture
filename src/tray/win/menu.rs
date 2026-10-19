@@ -5,7 +5,9 @@ use super::ffi::{
     MF_STRING, Point, PostMessageW, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON,
     TrackPopupMenu, WM_NULL, Wparam,
 };
-use super::{ID_AUTOSTART, ID_EXIT, ID_PHOTO, ID_PROFILE_BASE, ID_RECORD};
+use super::{
+    ID_AUTOSTART, ID_EXIT, ID_PHOTO, ID_PROFILE_BASE, ID_RECORD, ID_RECORD_REGION, ID_RECORD_WINDOW,
+};
 use crate::recording::Profile;
 
 /// Build the popup menu at the cursor and let the window collect the picks.
@@ -21,6 +23,8 @@ pub(super) unsafe fn show(window: Hwnd) {
         return;
     }
     add_text(menu, ID_RECORD, "Record");
+    add_text(menu, ID_RECORD_REGION, "Record region...");
+    add_text(menu, ID_RECORD_WINDOW, "Record window");
     add_text(menu, ID_PHOTO, "Photo");
     add_text(menu, ID_AUTOSTART, "Autostart");
     add_separator(menu);

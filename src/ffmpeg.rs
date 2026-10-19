@@ -9,6 +9,10 @@ use std::process::{Command, Stdio};
 const ENGINE_FILE: &str = "ffmpeg.exe";
 #[cfg(not(windows))]
 const ENGINE_FILE: &str = "ffmpeg";
+#[cfg(windows)]
+const PROBE_FILE: &str = "ffprobe.exe";
+#[cfg(not(windows))]
+const PROBE_FILE: &str = "ffprobe";
 
 /// A located `FFmpeg` executable.
 #[derive(Clone, Debug)]
@@ -58,4 +62,50 @@ pub fn discover(configured: Option<&Path>) -> Option<Binary> {
     candidates
         .into_iter()
         .find_map(|(path, verify)| (!verify || path.is_file()).then_some(Binary { path }))
+}
+
+/// A located `ffprobe` beside the engine, for post-capture verification.
+pub struct Probe {
+    /// Absolute path or bare command name, as with the engine.
+    pub path: PathBuf,
+}
+
+impl Binary {
+    /// The probe executable expected beside this engine.
+    #[must_use]
+    pub fn probe(&self) -> Probe {
+        Probe {
+            path: self.path.with_file_name(PROBE_FILE),
+        }
+    }
+}
+
+impl Probe {
+    /// Frames `ffprobe` reports for `target` (0 for uncountable streams).
+    ///
+    /// # Errors
+    /// Fails when the probe cannot run or refuses the file.
+    pub fn frames(&self, target: &Path) -> io::Result<u64> {
+        let output = Command::new(&self.path)
+            .arg("-v")
+            .arg("error")
+            .arg("-show_entries")
+            .arg("stream=nb_frames")
+            .arg("-of")
+            .arg("csv=p=0")
+            .arg(target)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?
+            .wait_with_output()?;
+        if !output.status.success() {
+            return Err(io::Error::other("ffprobe refused the file"));
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        Ok(text
+            .lines()
+            .find_map(|line| line.trim().parse::<u64>().ok())
+            .unwrap_or(0))
+    }
 }
