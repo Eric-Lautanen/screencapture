@@ -15,14 +15,26 @@ use crate::hotkeys;
 use crate::instance::{Acquire, acquire};
 use crate::pipe::{self, Stream};
 use crate::recorder::{Plan, Recorder};
-use crate::recording::{self, Profile};
+use crate::recording::Profile;
 use crate::screen;
-use crate::settings::{self, Loaded};
+use crate::selector;
+use crate::settings::{self, CaptureMode, Loaded};
 use crate::tray::{self, Event};
 
 /// Mutable application state the tray handler drives.
 struct Runtime {
+    /// Engine used by the active recording, kept for ffprobe verification.
+    engine: Option<ffmpeg::Binary>,
     recorder: Option<Recorder>,
+}
+
+impl Runtime {
+    fn new() -> Self {
+        Self {
+            engine: None,
+            recorder: None,
+        }
+    }
 }
 
 /// Run the tray application until the user exits.
@@ -46,7 +58,7 @@ pub fn run(config: Option<&Path>) -> ExitCode {
         eprintln!("warn  autostart: {error}");
     }
     let bindings = hotkeys::bindings((loaded.settings.hotkey, loaded.settings.photo));
-    let mut runtime = Runtime { recorder: None };
+    let mut runtime = Runtime::new();
     let result = tray::run(
         move |event| handle(&mut loaded, &mut runtime, event),
         &bindings,
@@ -63,6 +75,12 @@ pub fn run(config: Option<&Path>) -> ExitCode {
 fn handle(loaded: &mut Loaded, runtime: &mut Runtime, event: Event) {
     match event {
         Event::Record => record(loaded, runtime),
+        Event::RecordRegion => select_and_record(loaded, runtime),
+        Event::RecordWindow => begin(
+            loaded,
+            runtime,
+            screen::window_region(tray::previous_foreground()),
+        ),
         Event::Photo => photo(loaded),
         Event::Tick => tick(runtime),
         Event::ToggleAutostart => toggle_autostart(loaded),
@@ -76,23 +94,79 @@ fn record(loaded: &mut Loaded, runtime: &mut Runtime) {
         stop_recording(runtime);
         return;
     }
+    match loaded.settings.capture_mode {
+        CaptureMode::Full => begin(loaded, runtime, full_region()),
+        CaptureMode::Region => select_and_record(loaded, runtime),
+        CaptureMode::Window => begin(
+            loaded,
+            runtime,
+            screen::window_region(tray::previous_foreground()),
+        ),
+    }
+}
+
+/// Interactive path: draw a rectangle, then record inside it.
+fn select_and_record(loaded: &mut Loaded, runtime: &mut Runtime) {
+    match selector::draw() {
+        Ok(selector::Outcome::Region(region)) => begin(loaded, runtime, Ok(region)),
+        Ok(selector::Outcome::Cancelled) => eprintln!("record: selection cancelled"),
+        Err(error) => eprintln!("error: cannot open the region selector: {error}"),
+    }
+}
+
+/// The primary display as a capture region.
+fn full_region() -> io::Result<Region> {
+    let display = screen::primary()?;
+    Ok(Region {
+        x: display.x,
+        y: display.y,
+        width: display.width,
+        height: display.height,
+    })
+}
+
+/// Begin encoding `region`, replacing any recording already running.
+/// Unreachable regions simply report and keep the previous state.
+fn begin(loaded: &mut Loaded, runtime: &mut Runtime, region: Result<Region, io::Error>) {
+    let region = match region {
+        Ok(region) => region,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return;
+        }
+    };
+    stop_recording(runtime);
     if let Err(error) = std::fs::create_dir_all(&loaded.settings.media_dir) {
         eprintln!("error: cannot create media directory: {error}");
         return;
     }
-    match start_recording(loaded) {
-        Ok(recorder) => runtime.recorder = Some(recorder),
+    match start_recording(loaded, sane_region(region)) {
+        Ok((recorder, engine)) => {
+            runtime.recorder = Some(recorder);
+            runtime.engine = Some(engine);
+        }
         Err(error) => eprintln!("error: cannot start recording: {error}"),
     }
 }
 
-fn start_recording(loaded: &Loaded) -> io::Result<Recorder> {
+/// Clamp insane region extents so the engine never sees absurd frame sizes.
+/// Clamp insane region extents so the engine never sees absurd frame sizes.
+fn sane_region(region: Region) -> Region {
+    const MAX_EDGE: u32 = 7680;
+    Region {
+        x: region.x,
+        y: region.y,
+        width: region.width.clamp(1, MAX_EDGE),
+        height: region.height.clamp(1, MAX_EDGE),
+    }
+}
+
+fn start_recording(loaded: &Loaded, region: Region) -> io::Result<(Recorder, ffmpeg::Binary)> {
     let binary = engine(loaded)?;
-    let display = screen::primary()?;
     let profile = loaded.settings.profile;
     let plan = Plan {
-        origin: (display.x, display.y),
-        size: (display.width, display.height),
+        origin: (region.x, region.y),
+        size: (region.width, region.height),
         profile,
         codec: loaded.settings.codec,
         cursor: loaded.settings.cursor,
@@ -101,14 +175,16 @@ fn start_recording(loaded: &Loaded) -> io::Result<Recorder> {
     let recorder = Recorder::start(&binary, &plan)?;
     tray::set_frame_timer(Some(frame_interval_ms(profile.fps)));
     eprintln!(
-        "record: {} ({}x{} @ {} fps, {} to stop)",
+        "record: {} ({}x{} from {},{} @ {} fps, {} to stop)",
         recorder.output.display(),
-        display.width,
-        display.height,
+        region.width,
+        region.height,
+        region.x,
+        region.y,
         profile.fps,
         loaded.settings.hotkey,
     );
-    Ok(recorder)
+    Ok((recorder, binary))
 }
 
 fn tick(runtime: &mut Runtime) {
@@ -124,14 +200,31 @@ fn tick(runtime: &mut Runtime) {
     }
 }
 
-/// Stop an active recording; called from the stop paths and on exit.
+/// Stop an active recording, then verify the finished file with ffprobe.
 fn stop_recording(runtime: &mut Runtime) {
-    if let Some(recorder) = runtime.recorder.take() {
-        tray::set_frame_timer(None);
-        match recorder.stop() {
-            Ok(path) => eprintln!("record: saved {}", path.display()),
-            Err(error) => eprintln!("error: cannot finalize recording: {error}"),
-        }
+    let Some(recorder) = runtime.recorder.take() else {
+        return;
+    };
+    tray::set_frame_timer(None);
+    match recorder.stop() {
+        Ok(path) => report_frames(runtime, &path),
+        Err(error) => eprintln!("error: cannot finalize recording: {error}"),
+    }
+}
+
+fn report_frames(runtime: &mut Runtime, path: &Path) {
+    let probe = runtime.engine.as_ref().map(ffmpeg::Binary::probe);
+    match probe {
+        Some(probe) => match probe.frames(path) {
+            Ok(frames) => eprintln!("record: saved {} ({frames} frames)", path.display()),
+            Err(error) => {
+                eprintln!(
+                    "record: saved {} (probe check failed: {error})",
+                    path.display()
+                );
+            }
+        },
+        None => eprintln!("record: saved {}", path.display()),
     }
 }
 
@@ -226,14 +319,20 @@ fn sync_autostart(loaded: &mut Loaded) -> Result<(), std::io::Error> {
 
 /// Record for `seconds` from the command line; doubles as the headless
 /// smoke test for the whole capture pipeline (no tray, no single-instance).
-pub fn record_demo(config: Option<&Path>, seconds: u32) -> ExitCode {
+/// `mode` overrides the configured capture mode when given.
+pub fn record_demo(config: Option<&Path>, seconds: u32, mode: Option<CaptureMode>) -> ExitCode {
     let loaded = settings::load(config);
     for problem in &loaded.problems {
         eprintln!("warn  settings: {problem}");
     }
-    match demo_recording(&loaded, loaded.settings.profile, seconds) {
-        Ok(path) => {
+    let mode = mode.unwrap_or(loaded.settings.capture_mode);
+    match demo_recording(&loaded, mode, seconds) {
+        Ok(Some(path)) => {
             println!("recorded: {}", path.display());
+            ExitCode::SUCCESS
+        }
+        Ok(None) => {
+            eprintln!("record: selection cancelled");
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -243,38 +342,48 @@ pub fn record_demo(config: Option<&Path>, seconds: u32) -> ExitCode {
     }
 }
 
+/// One timed recording against the current (or overridden) capture mode.
+/// `Ok(None)` means the interactive selection was cancelled.
 fn demo_recording(
     loaded: &Loaded,
-    profile: recording::Profile,
+    mode: CaptureMode,
     seconds: u32,
-) -> io::Result<std::path::PathBuf> {
+) -> io::Result<Option<std::path::PathBuf>> {
+    let region = match mode {
+        CaptureMode::Full => full_region(),
+        CaptureMode::Region => match selector::draw()? {
+            selector::Outcome::Region(region) => Ok(region),
+            selector::Outcome::Cancelled => return Ok(None),
+        },
+        CaptureMode::Window => screen::window_region(None),
+    }?;
     let binary = engine(loaded)?;
-    let display = screen::primary()?;
     let plan = Plan {
-        origin: (display.x, display.y),
-        size: (display.width, display.height),
-        profile,
+        origin: (region.x, region.y),
+        size: (region.width, region.height),
+        profile: loaded.settings.profile,
         codec: loaded.settings.codec,
         cursor: loaded.settings.cursor,
         media_dir: loaded.settings.media_dir.clone(),
     };
     let mut recorder = Recorder::start(&binary, &plan)?;
     let budget = Duration::from_secs(u64::from(seconds));
-    let interval = Duration::from_millis(u64::from(frame_interval_ms(profile.fps)));
+    let interval = Duration::from_millis(u64::from(frame_interval_ms(loaded.settings.profile.fps)));
     let started = std::time::Instant::now();
     let mut deadline = started;
     while started.elapsed() < budget {
         recorder.tick()?;
         deadline += interval;
-        let now = std::time::Instant::now();
-        // Sleep only while ahead of the frame deadline; each tick may already
-        // have consumed most of it.
-        if deadline > now {
-            std::thread::sleep(deadline - now);
+        // Sleep in fine steps so the deadline is not ground under the
+        // coarse OS sleep quantum.
+        while deadline > std::time::Instant::now() {
+            std::thread::sleep(STEP);
         }
     }
-    recorder.stop()
+    recorder.stop().map(Some)
 }
+
+const STEP: Duration = Duration::from_millis(1);
 
 /// Take one still photo from the command line; smoke-tests the photo path.
 pub fn photo_demo(config: Option<&Path>) -> ExitCode {

@@ -21,6 +21,17 @@ pub enum Hotkey {
     Photo,
 }
 
+/// Where a recording's frame comes from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CaptureMode {
+    /// The whole primary display.
+    Full,
+    /// Draw a rectangle on screen first (interactive).
+    Region,
+    /// A window's bounds, auto-detected at record time.
+    Window,
+}
+
 impl Hotkey {
     /// Parse a normalized hotkey string such as `ctrl+alt+1`.
     #[must_use]
@@ -29,6 +40,29 @@ impl Hotkey {
             "ctrl+alt+1" => Some(Self::Record),
             "ctrl+alt+2" => Some(Self::Photo),
             _ => None,
+        }
+    }
+}
+
+impl CaptureMode {
+    /// Parse a settings value (case-insensitive).
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.to_ascii_lowercase().as_str() {
+            "full" | "fullscreen" => Some(Self::Full),
+            "region" | "draw" => Some(Self::Region),
+            "window" | "app" => Some(Self::Window),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for CaptureMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Full => write!(formatter, "full"),
+            Self::Region => write!(formatter, "region"),
+            Self::Window => write!(formatter, "window"),
         }
     }
 }
@@ -49,6 +83,8 @@ pub struct Settings {
     pub profile: Profile,
     /// Video codec used for recordings.
     pub codec: Video,
+    /// Where the recording frame comes from.
+    pub capture_mode: CaptureMode,
     /// Start/stop-recording hotkey.
     pub hotkey: Hotkey,
     /// Save-a-still hotkey.
@@ -130,6 +166,9 @@ fn template(media: &Path) -> String {
             "record = ctrl+alt+1\n",
             "photo = ctrl+alt+2\n",
             "\n",
+            "[capture]\n",
+            "mode = full\n",
+            "\n",
             "[recording]\n",
             "profile = uhd-4k60\n",
             "codec = x264\n",
@@ -152,6 +191,8 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
     let hotkey = hotkey_raw.and_then(Hotkey::parse);
     let photo_raw = document.value("hotkeys", "photo").and_then(Value::as_str);
     let photo = photo_raw.and_then(Hotkey::parse);
+    let mode_raw = document.value("capture", "mode").and_then(Value::as_str);
+    let mode = mode_raw.and_then(CaptureMode::parse);
     let profile_raw = document
         .value("recording", "profile")
         .and_then(Value::as_str);
@@ -165,6 +206,9 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
     if photo_raw.is_some() && photo.is_none() {
         problems.push(format!("invalid photo hotkey; using {}", Hotkey::Photo));
     }
+    if mode_raw.is_some() && mode.is_none() {
+        problems.push(format!("invalid capture mode; using {}", CaptureMode::Full));
+    }
     if profile_raw.is_some() && profile.is_none() {
         problems.push(format!("invalid profile; using {}", recording::DEFAULT.id));
     }
@@ -174,6 +218,7 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
     let settings = Settings {
         profile: profile.unwrap_or(recording::DEFAULT),
         codec: codec.unwrap_or(Video::DEFAULT),
+        capture_mode: mode.unwrap_or(CaptureMode::Full),
         hotkey: hotkey.unwrap_or(Hotkey::Record),
         photo: photo.unwrap_or(Hotkey::Photo),
         autostart: document
@@ -206,7 +251,7 @@ fn engine_path(document: &Document) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Document, Hotkey, default_document, read_document};
+    use super::{CaptureMode, Document, Hotkey, default_document, read_document};
 
     #[test]
     fn builtin_template_round_trips_through_defaults() {
@@ -215,6 +260,7 @@ mod tests {
         assert_eq!(settings.profile.id, "uhd-4k60");
         assert_eq!(settings.hotkey, Hotkey::Record);
         assert_eq!(settings.photo, Hotkey::Photo);
+        assert_eq!(settings.capture_mode, CaptureMode::Full);
         assert!(settings.autostart);
         assert!(!settings.cursor);
         assert!(settings.engine.is_none());
@@ -222,6 +268,14 @@ mod tests {
         let reparsed =
             Document::from_text(&document.to_text()).expect("rendered text must reparse");
         assert_eq!(document, reparsed);
+    }
+
+    #[test]
+    fn capture_mode_parses_and_falls_back() {
+        assert_eq!(CaptureMode::parse("REGION"), Some(CaptureMode::Region));
+        assert_eq!(CaptureMode::parse("window"), Some(CaptureMode::Window));
+        assert_eq!(CaptureMode::parse("full"), Some(CaptureMode::Full));
+        assert_eq!(CaptureMode::parse("whatever"), None);
     }
 
     #[test]

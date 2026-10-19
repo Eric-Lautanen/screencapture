@@ -5,8 +5,12 @@ use crate::recording::Profile;
 /// Actions the tray asks the application to perform.
 #[derive(Clone, Copy, Debug)]
 pub enum Event {
-    /// Start or stop a recording.
+    /// Start or stop a recording, honoring the configured capture mode.
     Record,
+    /// Start a recording from a rectangle the user draws on screen.
+    RecordRegion,
+    /// Start a recording of the application the user was just working in.
+    RecordWindow,
     /// Capture a still photo.
     Photo,
     /// The frame timer fired; capture and encode one frame.
@@ -64,6 +68,17 @@ pub fn set_frame_timer(interval_ms: Option<u32>) {
     {
         let _ = interval_ms;
     }
+}
+
+/// The window handle the user had focused just before the tray menu
+/// opened, as a plain integer (Windows handle bits). "Record window"
+/// targets that application.
+#[must_use]
+pub fn previous_foreground() -> Option<usize> {
+    #[cfg(windows)]
+    return win::previous_foreground();
+    #[cfg(not(windows))]
+    None
 }
 
 #[cfg(windows)]

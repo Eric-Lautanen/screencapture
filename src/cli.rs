@@ -4,6 +4,7 @@ use std::io::{Write, stdout};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use crate::settings::CaptureMode;
 use crate::{app, doctor};
 
 /// Display identity used by version output and diagnostics.
@@ -14,7 +15,8 @@ screencapture - 4K screen recorder and still-image capture
 
 USAGE:
     screencapture              start the tray application
-    screencapture --record S   record the screen for S seconds, then exit
+    screencapture --record S   record for S seconds, then exit
+    screencapture --record S --mode full | region | window
     screencapture --photo      take one still photo, then exit
     screencapture --check      diagnose install path, settings, and engine
     screencapture --init       write the default settings file if missing
@@ -42,10 +44,11 @@ enum Command {
     Run,
 }
 
-/// A parsed command with an optional explicit settings path.
+/// A parsed command with optional settings path and capture-mode override.
 struct Invocation {
     command: Command,
     config: Option<PathBuf>,
+    mode: Option<CaptureMode>,
 }
 
 /// Parse `args` and dispatch; returns the process exit code.
@@ -64,6 +67,7 @@ fn parse(args: &[String]) -> Result<Invocation, String> {
     let mut invocation = Invocation {
         command: Command::Run,
         config: None,
+        mode: None,
     };
     let mut items = args.iter().peekable();
     while let Some(arg) = items.next().map(String::as_str) {
@@ -73,6 +77,15 @@ fn parse(args: &[String]) -> Result<Invocation, String> {
                     return Err("--config requires a file path".into());
                 };
                 invocation.config = Some(PathBuf::from(value));
+            }
+            "--mode" => {
+                let Some(value) = items.next().map(String::as_str) else {
+                    return Err("--mode requires full, region, or window".into());
+                };
+                match CaptureMode::parse(value) {
+                    Some(mode) => invocation.mode = Some(mode),
+                    None => return Err(format!("unknown mode '{value}' (full, region, window)")),
+                }
             }
             "--check" => invocation.command = Command::Check,
             "--init" => invocation.command = Command::InitConfig,
@@ -104,7 +117,9 @@ fn dispatch(invocation: &Invocation) -> ExitCode {
         }
         Command::Check => doctor::check(invocation.config.as_deref()),
         Command::InitConfig => doctor::init_config(invocation.config.as_deref()),
-        Command::Record { seconds } => app::record_demo(invocation.config.as_deref(), seconds),
+        Command::Record { seconds } => {
+            app::record_demo(invocation.config.as_deref(), seconds, invocation.mode)
+        }
         Command::Photo => app::photo_demo(invocation.config.as_deref()),
         Command::Run => app::run(invocation.config.as_deref()),
     }
