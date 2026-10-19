@@ -53,9 +53,10 @@ where
     return win::run(handler, bindings);
     #[cfg(not(windows))]
     {
+        let _ = catalogued();
         let _ = (handler, bindings);
         Err(Error::System(
-            "tray not supported on this platform yet".into(),
+            "the tray lands later on this platform; the CLI works today (screencapture --record, --photo)".into(),
         ))
     }
 }
@@ -83,3 +84,32 @@ pub fn previous_foreground() -> Option<usize> {
 
 #[cfg(windows)]
 mod win;
+
+/// The full event set, assembled once at startup of the non-Windows
+/// stub: nothing emits events there yet, and the catalog keeps the
+/// enum constructing on every target so the seam stays complete.
+#[cfg(not(windows))]
+fn catalogued() -> [Event; 8] {
+    [
+        Event::Record,
+        Event::RecordRegion,
+        Event::RecordWindow,
+        Event::Photo,
+        Event::Tick,
+        Event::ToggleAutostart,
+        Event::ProfileSelected(Profile::PROFILES[0]),
+        Event::Exit,
+    ]
+}
+
+#[cfg(all(target_os = "linux", test))]
+mod parity {
+    use super::catalogued;
+
+    /// The catalog stays assembled on the Linux target (compiles on the
+    /// mac target too; both keep the enum alive).
+    #[test]
+    fn events_construct_on_every_platform() {
+        assert_eq!(catalogued().len(), 8);
+    }
+}

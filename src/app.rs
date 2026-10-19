@@ -17,6 +17,7 @@ use crate::pipe::{self, Stream};
 use crate::recorder::{Plan, Recorder};
 use crate::recording::Profile;
 use crate::screen;
+#[cfg(windows)]
 use crate::selector;
 use crate::settings::{self, CaptureMode, Loaded};
 use crate::tray::{self, Event};
@@ -105,13 +106,36 @@ fn record(loaded: &mut Loaded, runtime: &mut Runtime) {
     }
 }
 
-/// Interactive path: draw a rectangle, then record inside it.
+/// Interactive path: draw a rectangle, then record inside it. Windows
+/// runs the on-screen rubber-band overlay; elsewhere the capability is
+/// reported honestly so the user can record the full screen instead.
 fn select_and_record(loaded: &mut Loaded, runtime: &mut Runtime) {
-    match selector::draw() {
-        Ok(selector::Outcome::Region(region)) => begin(loaded, runtime, Ok(region)),
-        Ok(selector::Outcome::Cancelled) => eprintln!("record: selection cancelled"),
+    match draw_region() {
+        Ok(Some(region)) => begin(loaded, runtime, Ok(region)),
+        Ok(None) => eprintln!("record: selection cancelled"),
         Err(error) => eprintln!("error: cannot open the region selector: {error}"),
     }
+}
+
+/// The drawn rectangle, or `None` when the user cancelled.
+///
+/// # Errors
+/// Fails when the platform cannot present the selection overlay.
+#[cfg(windows)]
+fn draw_region() -> io::Result<Option<Region>> {
+    match selector::draw() {
+        Ok(selector::Outcome::Region(region)) => Ok(Some(region)),
+        Ok(selector::Outcome::Cancelled) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(not(windows))]
+fn draw_region() -> io::Result<Option<Region>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "region drawing needs the Windows overlay for now; record the full screen instead",
+    ))
 }
 
 /// The primary display as a capture region.
@@ -351,9 +375,9 @@ fn demo_recording(
 ) -> io::Result<Option<std::path::PathBuf>> {
     let region = match mode {
         CaptureMode::Full => full_region(),
-        CaptureMode::Region => match selector::draw()? {
-            selector::Outcome::Region(region) => Ok(region),
-            selector::Outcome::Cancelled => return Ok(None),
+        CaptureMode::Region => match draw_region()? {
+            Some(region) => Ok(region),
+            None => return Ok(None),
         },
         CaptureMode::Window => screen::window_region(None),
     }?;

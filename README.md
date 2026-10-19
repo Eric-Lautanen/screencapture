@@ -50,11 +50,17 @@ src/main.rs       entry point (opts into per-monitor DPI awareness)
 src/cli.rs        argument parsing and dispatch
 src/app.rs        tray runtime wiring, recording/photo commands
 src/winapi.rs     shared Win32 declarations (windows, cursors, messages)
-src/capture.rs    GDI frame capture (top-down BGRA, cached DIB target)
+src/capture/      frame capture backends behind one Target API (top-down
+                  BGRA): Windows GDI blit, macOS CoreGraphics compositor
+                  draw, Linux X11 root images
+src/dylib.rs      runtime library loading on Unix (mirror of the dxgi loader)
+src/coregraphics.rs  CoreGraphics C surface (loads by name, SDK-verified)
+src/xlib.rs       libX11 C surface (loads by soname, header-verified)
 src/dxgi/         Desktop Duplication capture: COM ABI shapes, protocol,
                   engine loads, output policy, cursor compositing, and
                   session recovery (factory > adapter > output > duplication)
-src/screen.rs     monitor + window geometry in physical pixels
+src/screen/       monitor + window geometry in physical pixels
+                  (Windows enumeration; one logical display elsewhere)
 src/selector.rs   fullscreen drawn-rectangle capture selector (drag)
 src/clock.rs      UTC timestamp math for output file names
 src/pipe.rs       BGRA frame feed into FFmpeg (records and photos)
@@ -65,7 +71,7 @@ src/settings.rs   typed settings view with safe defaults
 src/recording.rs  capture profiles (1080p30 ... 4K60, 4K120)
 src/encoder.rs    codec selection (x264 today; VP9/AV1/hardware tomorrow)
 src/ffmpeg.rs     locate and drive the bundled FFmpeg engine
-src/autostart.rs  login autostart (Windows registry; stubs elsewhere)
+src/autostart.rs  login autostart (registry / LaunchAgent / XDG entry)
 src/instance.rs   single-instance guard
 src/doctor.rs     `--check` / `--init` diagnostics
 src/paths.rs      cross-platform filesystem locations
@@ -111,6 +117,22 @@ extended frame bounds); both are one menu entry or `--mode` away.
 Finished recordings are verified with bundled `ffprobe`. A dedicated
 encoder module (`src/encoder.rs`) isolates x264 so a later codec swap
 (VP9/AV1/hardware) needs only edits there.
+
+Session 5 brought best-effort macOS and Linux capture: every frame
+backend lives behind one `Target` API (`src/capture/`), with macOS
+drawing the compositor's window-list image into a premultiplied-BGRA
+bitmap context (Retina scales device pixels through the region math) and
+Linux reading `XGetImage` roots off libX11 (loaded by soname, alpha
+repaired per frame). Login autostart writes the macOS `LaunchAgent`
+plist and the freedesktop `.desktop` entry; the single-instance guard
+holds an advisory file lock on Unix. Windows-only capabilities answer
+with clean messages elsewhere (region selector, window picking, tray,
+hotkeys, and cursor compositing, which X11 leaves for a session with a
+live desktop). Wayland is explicitly unsupported. None of the mac/Linux
+code has run on real hardware yet: it is header-verified (Apple SDK and
+xorgproto/Xlib.h) and compiles clean per-target (`cargo clippy --target
+aarch64-apple-darwin` / `x86_64-unknown-linux-gnu`), with runtime
+hardening expected from CI and user reports.
 
 Measured on the reference panel (1920x1200, 4K profile): full-screen
 capture tracks wall time through Desktop Duplication (250 frames /

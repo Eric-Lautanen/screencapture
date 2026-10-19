@@ -1,50 +1,22 @@
-//! Display, monitor, and window geometry in physical pixels (DPI aware).
+//! Windows geometry: `EnumDisplayMonitors` listing plus a DWM-aware
+//! window picker. Coordinates are physical pixels because the process
+//! opts into per-monitor DPI awareness (see `capture::prepare`).
 
 use std::ffi::c_void;
 use std::io;
 
 use crate::capture::Region;
+use crate::screen::Display;
 use crate::winapi::{
     GetCursorPos, GetSystemMetrics, Point, Rect, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
     SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
-/// One attached display: origin plus size in physical pixels.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Display {
-    /// Origin x (the primary display is at 0).
-    pub x: i32,
-    /// Origin y.
-    pub y: i32,
-    /// Width in physical pixels.
-    pub width: u32,
-    /// Height in physical pixels.
-    pub height: u32,
-}
-
-/// The display at the origin (0,0), else the first display found.
-///
-/// # Errors
-/// Returns an error when no display is attached.
-pub fn primary() -> io::Result<Display> {
-    let mut list = displays();
-    match list
-        .iter()
-        .position(|display| display.x == 0 && display.y == 0)
-    {
-        Some(index) => Ok(list.swap_remove(index)),
-        None => list
-            .pop()
-            .ok_or_else(|| io::Error::other("no attached display found")),
-    }
-}
-
-/// All attached displays. Coordinates are physical pixels because the
-/// process opts into per-monitor DPI awareness (see `capture::prepare`).
+/// All attached displays in enumeration order.
 #[must_use]
-pub fn displays() -> Vec<Display> {
+pub fn list() -> Vec<Display> {
     let mut found = Vec::new();
-    let parameter = &raw mut found;
+    let parameter = std::ptr::from_mut(&mut found);
     // SAFETY: `parameter` points to a live local `Vec`; the callback runs
     // synchronously inside this call on this thread.
     unsafe {
@@ -219,21 +191,4 @@ fn virtual_desktop() -> (i32, i32, i32, i32) {
         )
     };
     (left, top, left + width, top + height)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{displays, primary};
-
-    #[test]
-    fn primary_works_or_fails_cleanly() {
-        let all = displays();
-        assert!((!all.is_empty() && primary().is_ok()) || (all.is_empty() && primary().is_err()));
-        if let Ok(display) = primary() {
-            assert!(display.width > 0 && display.height > 0);
-            let is_origin = display.x == 0 && display.y == 0;
-            let is_first = all.first() == Some(&display);
-            assert!(is_origin || is_first);
-        }
-    }
 }

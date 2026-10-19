@@ -36,7 +36,8 @@ pub fn media_dir() -> Option<PathBuf> {
     }
 }
 
-fn home_dir() -> Option<PathBuf> {
+/// The user's home directory, when the platform exports one.
+pub(crate) fn home_dir() -> Option<PathBuf> {
     let key = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     env::var_os(key).map(PathBuf::from)
 }

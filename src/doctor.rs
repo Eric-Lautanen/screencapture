@@ -127,6 +127,7 @@ const ENGINE_HINT: &str = "ffmpeg/ffmpeg";
 /// Informational capture-backends line: desktop duplication when the
 /// compositor cooperates, which is the fast 4K path. A miss is not an
 /// unhealthy install; the GDI fallback records everything, just slower.
+#[cfg(windows)]
 fn check_capture() {
     match crate::dxgi::probe() {
         Ok((width, height)) => {
@@ -134,6 +135,20 @@ fn check_capture() {
         }
         Err(reason) => {
             println!("        capture: GDI fallback only ({reason})");
+        }
+    }
+}
+
+/// Capture-backends line outside Windows: the native compositor or server
+/// backend IS the fast path, so its absence is an unhealthy install.
+#[cfg(not(windows))]
+fn check_capture() {
+    match crate::capture::probe() {
+        Ok((label, width, height)) => {
+            println!("{OK_TAG}capture: {label} ({width}x{height})");
+        }
+        Err(reason) => {
+            println!("{FAIL_TAG}capture: {reason}");
         }
     }
 }
