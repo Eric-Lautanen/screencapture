@@ -95,16 +95,41 @@ Plan of record, in build order. Every session ends with
   - 16-bit still pipeline and the logging ring buffer move to a later
     polish session.
 
-## Session 4b - DXGI Desktop Duplication (next)
+## Session 4b - DXGI Desktop Duplication (done)
 
-- [ ] COM plumbing in std (`src/dxgi.rs`): factory, adapter, output,
-  D3D11 device, staging texture, `AcquireNextFrame` loop — same BGRA
-  bytes out so `pipe.rs`/`recorder.rs` do not change.
-- [ ] Per-monitor capture: tray menu / settings pick a display; the
-  GDI path remains the fallback behind the same `Target` API.
-- [ ] Rotated/secondary outputs handled through output geometry; HDR
-  surfaces fall back to GDI for now.
-- [ ] Doctor gains a DXGI availability probe.
+- [x] COM plumbing in std Rust (`src/dxgi/{mod,abi,com,ffi,structs}.rs`):
+  `dxgi.dll` + `d3d11.dll` loaded by name, manual v-tables for factory /
+  adapter / output / output1 / duplication / resource / device / context,
+  all slot orders and GUIDs verified against the mingw-w64 WIDL headers
+  plus live v-table dumps; every declared slot participates in one
+  integrity check before the first call.
+- [x] Capture loop: `DuplicateOutput` on the output whose desktop
+  coordinates equal the plan region, `AcquireNextFrame(0)` per tick
+  (timeout keeps the previous frame, so pacing never depends on the
+  compositor), GPU `CopyResource` into a CPU-readable staging texture,
+  row-pitch compaction into the same tight BGRA layout the pipe expects
+  (`pipe.rs`/`encoder.rs` untouched).
+- [x] Policy: duplication carries a plan only when the region is exactly
+  one unrotated output, no cursor is requested, and the panel produces
+  plain BGRA — HDR, rotations, partial regions, and pointer drawing stay
+  GDI behind the same `Source::frame()` contract; pipeline failures fall
+  back with a printed reason.
+- [x] Doctor reports the duplication probe (`ok capture: desktop
+  duplication (WxH)`) without failing otherwise-unhealthy installs.
+- [x] All gates green: fmt, pedantic clippy `-D warnings`, 28 tests, all
+  sources under 500 lines (`dxgi/ffi.rs` split into abi/com/ffi/structs).
+- Measurements (debug build, single 1920x1200 panel, 60 fps profile):
+  full-screen 4K output now tracks wall time — 250 frames / 4.17 s wall
+  at 60/1 (GDI baseline was ~30 live fps, the exact hole this closes).
+  Window/region recording behavior is unchanged and verified (GDI
+  fallback with a printed reason, 72 frames/1.2 s in the same test run).
+- deltas carried into the next sessions:
+  - Session-recovery on `DXGI_ERROR_ACCESS_LOST` (mode switches mid
+    recording currently stop with a clear error).
+  - Per-display picking (tray menu/settings) waits for the settings UI;
+    CLI uses the primary output for now.
+  - Cursor overlay through `GetFramePointerShape` when duplication is the
+    source, still deferred with the settings UI polish.
 
 ## Session 5 - macOS + Linux
 

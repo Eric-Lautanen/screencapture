@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use crate::capture::{Region, Target};
 use crate::clock;
+use crate::dxgi::Duplicator;
 use crate::encoder::Video;
 use crate::ffmpeg::Binary;
 use crate::pipe::{self, Feed, Stream};
@@ -59,12 +60,35 @@ pub struct Plan {
 
 /// An active recording: grab frames and encode them.
 pub struct Recorder {
-    target: Target,
+    source: Source,
     feed: Feed,
     /// Held so the fast multimedia timer drops exactly with the recording.
     _timer: FastTimer,
     /// Destination file for this recording.
     pub output: PathBuf,
+}
+
+/// The frame source behind one recording. Desktop duplication serves
+/// whole-screen grabs; every other plan (partial regions, window bounds,
+/// cursor drawing) stays GDI by design.
+enum Source {
+    /// Compositor frames, lent to the encoder cheaply.
+    Duplication(Duplicator),
+    /// GDI blits, the universal fallback.
+    Blit(Target),
+}
+
+impl Source {
+    /// One frame, valid until the next call.
+    ///
+    /// # Errors
+    /// Fails when blit or duplication refuses; GDI is the recovery path.
+    fn frame(&mut self) -> io::Result<&[u8]> {
+        match self {
+            Self::Duplication(duplication) => duplication.frame(),
+            Self::Blit(target) => target.frame(),
+        }
+    }
 }
 
 impl Recorder {
@@ -83,7 +107,7 @@ impl Recorder {
             return Err(io::Error::other("capture region is empty"));
         }
         let timer = FastTimer::begin();
-        let target = Target::new(region, plan.cursor)?;
+        let source = pick_source(&region, plan)?;
         let output = plan.media_dir.join(format!(
             "screencapture-{}.{ext}",
             clock::stamp(),
@@ -102,7 +126,7 @@ impl Recorder {
         );
         let feed = Feed::spawn(binary, &args)?;
         Ok(Self {
-            target,
+            source,
             feed,
             _timer: timer,
             output,
@@ -110,13 +134,13 @@ impl Recorder {
     }
 
     /// Capture and enqueue one frame; the frame is lent straight from the
-    /// capture bitmap, so nothing is copied twice.
+    /// capture surface, so nothing is copied twice.
     ///
     /// # Errors
-    /// Fails when the blit refuses, the frame is unavailable, or the engine
+    /// Fails when the frame refuses, the frame is unavailable, or the engine
     /// stopped consuming frames.
     pub fn tick(&mut self) -> io::Result<()> {
-        let frame = self.target.frame()?;
+        let frame = self.source.frame()?;
         self.feed.frame(frame)
     }
 
@@ -130,6 +154,24 @@ impl Recorder {
         self.feed.finish()?;
         Ok(output)
     }
+}
+
+/// Choose the frame source: desktop duplication when the plan fits it and
+/// the compositor cooperates, the GDI blit otherwise.
+///
+/// # Errors
+/// Propagates the GDI setup failure; duplication failures only demote the
+/// plan to GDI after a printed notice.
+fn pick_source(region: &Region, plan: &Plan) -> io::Result<Source> {
+    if crate::dxgi::eligible(*region, plan.cursor) {
+        match Duplicator::open(*region) {
+            Ok(duplication) => return Ok(Source::Duplication(duplication)),
+            Err(reason) => {
+                eprintln!("capture: desktop duplication unavailable ({reason}); using GDI");
+            }
+        }
+    }
+    Ok(Source::Blit(Target::new(*region, plan.cursor)?))
 }
 
 /// Scale the capture to the profile resolution whenever they differ.
