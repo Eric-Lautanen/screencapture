@@ -52,7 +52,8 @@ src/app.rs        tray runtime wiring, recording/photo commands
 src/winapi.rs     shared Win32 declarations (windows, cursors, messages)
 src/capture.rs    GDI frame capture (top-down BGRA, cached DIB target)
 src/dxgi/         Desktop Duplication capture: COM ABI shapes, protocol,
-                  engine loads (factory > adapter > output > duplication)
+                  engine loads, output policy, cursor compositing, and
+                  session recovery (factory > adapter > output > duplication)
 src/screen.rs     monitor + window geometry in physical pixels
 src/selector.rs   fullscreen drawn-rectangle capture selector (drag)
 src/clock.rs      UTC timestamp math for output file names
@@ -98,9 +99,13 @@ global hotkeys, and the recording pipeline — frames stream into FFmpeg
 for H.264/MP4 records and lossless PNG stills, driven by the tray menu,
 hotkeys, or `--record`/`--photo`. Frame capture picks Desktop Duplication
 (COM built by hand in std Rust, `src/dxgi/`) when the plan is one whole
-unrotated output with no cursor drawing, and falls back to GDI `BitBlt`
-for regions, windows, and everything the compositor refuses, printing the
-reason. Region capture drags a rectangle on a fullscreen selector and
+unrotated output — with the cursor composited in software from the
+duplication pointer stream when asked for (`src/dxgi/cursor.rs`) — and
+falls back to GDI `BitBlt` for regions, windows, and everything the
+compositor refuses, printing the reason. A lost duplication session
+(display mode switches, competing capture apps) is rebuilt mid-recording;
+the recording holds its last frame until the service returns. Region
+capture drags a rectangle on a fullscreen selector and
 window capture auto-detects the focused application's bounds (DWM
 extended frame bounds); both are one menu entry or `--mode` away.
 Finished recordings are verified with bundled `ffprobe`. A dedicated
@@ -108,10 +113,10 @@ encoder module (`src/encoder.rs`) isolates x264 so a later codec swap
 (VP9/AV1/hardware) needs only edits there.
 
 Measured on the reference panel (1920x1200, 4K profile): full-screen
-capture now tracks wall time through Desktop Duplication (250 frames /
+capture tracks wall time through Desktop Duplication (250 frames /
 4.17 s at 60/1 in the reference run, where GDI alone sustained ~30 live
 fps because a 33 MB `BitBlt` + pipe write misses the 16 ms frame
-deadline). Window/region-sized captures hit the full profile rate
-(59.9 fps measured, durations dead-on). See `ROADMAP.md` for what
-remains: 16-bit stills, a logging ring buffer, duplication session
-recovery, and shipping installers.
+deadline), and an interrupted session recovers and still closes honest
+(500 frames / 8.33 s after a mid-flight duplication steal). See
+`ROADMAP.md` for what remains: 16-bit stills, a logging ring buffer,
+per-display picking, and shipping installers.

@@ -163,8 +163,8 @@ impl Recorder {
 /// Propagates the GDI setup failure; duplication failures only demote the
 /// plan to GDI after a printed notice.
 fn pick_source(region: &Region, plan: &Plan) -> io::Result<Source> {
-    if crate::dxgi::eligible(*region, plan.cursor) {
-        match Duplicator::open(*region) {
+    if crate::dxgi::eligible(*region) {
+        match Duplicator::open(*region, plan.cursor) {
             Ok(duplication) => return Ok(Source::Duplication(duplication)),
             Err(reason) => {
                 eprintln!("capture: desktop duplication unavailable ({reason}); using GDI");
