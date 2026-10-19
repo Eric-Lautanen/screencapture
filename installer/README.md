@@ -6,21 +6,38 @@ uninstall entries.
 
 ## Prerequisites
 
-1. NSIS 3.x (MUI2 ships with it): <https://nsis.sourceforge.io/>
+1. NSIS 3.x with MUI2 (verified with the **3.13** portable zip,
+   SHA-1 `db14f8af2ea346b786c6ae19343f61aaf5e09b8e`): pull
+   `nsis-3.13.zip` from the SourceForge `nsis` project (mirror redirect
+   gets in the way of some fetchers; a direct
+   `https://<mirror>.dl.sourceforge.net/project/nsis/NSIS%203/3.13/nsis-3.13.zip?download=1`
+   works). 3.13's `DefaultLangCode` era aside, no extra plugins needed.
 2. The bundled engine unpacked at `vendor/ffmpeg/`
    (`ffmpeg.exe`, `ffprobe.exe`, `ffmpeg.LICENSE.txt`, `engine.sha256`).
-   The record is written automatically by `target\release\screencapture.exe --check`
-   the first time the engine is in place.
-3. `docs\FFMPEG-LICENSE.md` records the GPL engine decision and the upstream
-   source URL (kept in the payload for the license/source offer).
+   The record is written automatically by
+   `target\release\screencapture.exe --check` the first time the engine
+   is in place.
+3. `docs\FFMPEG-LICENSE.md` records the GPL engine decision and the
+   upstream source URL (kept in the payload for the license/source
+   offer).
 
 ## Build
 
+The script defines `ROOT` itself (overridable):
+
 ```powershell
 cargo build --release
-makensis -DROOT=. installer/nsis/screencapture.nsi  # from the repo root
+& <nsis>\bin\makensis.exe "/DROOT=$PWD" installer\nsis\screencapture.nsi
 ```
 
-The installer smoke test (run, install, `--check` from the install directory,
-uninstall) is run whenever NSIS is available; the script stays the plan of
-record between tests.
+Verified on this machine with NSIS 3.13 (portable): compile clean,
+output `installer\screencapture-setup.exe` (~122 MB; the engine block
+compresses ~330 MB to ~128 MB). Full interactive install/uninstall
+runs need a GUI session and an elevation prompt; silent runs claim
+admin (`RequestExecutionLevel admin`), so they belong in CI (`Actions`)
+once repo packaging lands there.
+
+## Notes
+
+- Uninstall keeps user settings and recordings (intentional).
+- `EstimatedSize` is computed at install time with `${GetSize}`.
