@@ -75,7 +75,8 @@ src/hotkeys.rs    global hotkey bindings (`RegisterHotKey` table)
 src/config.rs     std-only settings file format (ordered key = value)
 src/settings.rs   typed settings view with safe defaults
 src/recording.rs  capture profiles (1080p30 ... 4K60, 4K120)
-src/encoder.rs    codec selection (x264 today; VP9/AV1/hardware tomorrow)
+src/encoder.rs    codec selection (x264 default; AMF/QSV/NVENC/Media
+                  Foundation hardware choices probe + fall back)
 src/ffmpeg.rs     locate and drive the bundled FFmpeg engine
 src/autostart.rs  login autostart (registry / LaunchAgent / XDG entry)
 src/instance.rs   single-instance guard
@@ -110,6 +111,18 @@ that asset and copying `bin/ffmpeg.exe` and `bin/ffprobe.exe`; then run
 Licensing: `docs/FFMPEG-LICENSE.md`.
 
 ## Status
+
+Session 8 added hardware encoders: settings accept
+`codec = amf | qsv | nvenc | mf` (AMD, Intel Quick Sync, NVIDIA NVENC, and
+Windows Media Foundation) beside the universal `x264` default. Every
+hardware choice is probed with its exact ffmpeg argument set (a short
+synthetic encode through the engine) before each recording starts, so a
+machine without the accelerator demotes to x264 with a printed notice
+instead of dying frame by frame; `--check` prints the availability of all
+five encoders and marks the configured one. Verified live on the AMD 780M
+reference box: `amf` and `mf` ready (x264 ready by definition), `qsv` and
+`nvenc` answered `not usable`, an `amf` config recorded fine, and the
+`nvenc` config printed the fallback notice and still recorded.
 
 Session 7 added per-display picking (the top deferred item): full captures
 record the display chosen by `[capture] display` (`primary` default, or a

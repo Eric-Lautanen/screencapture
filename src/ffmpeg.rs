@@ -5,6 +5,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use crate::recording::Profile;
+
 #[cfg(windows)]
 const ENGINE_FILE: &str = "ffmpeg.exe";
 #[cfg(not(windows))]
@@ -37,6 +39,34 @@ impl Binary {
             .wait_with_output()?;
         let text = String::from_utf8_lossy(&output.stdout);
         Ok(text.lines().next().unwrap_or("").trim().to_owned())
+    }
+
+    /// True when the engine can complete a short synthetic encode with
+    /// `video`'s exact argument set: an accelerator is present, the driver
+    /// loads, and every tuner option is accepted. Hardware choices run
+    /// this before their first recording so an unusable unit demotes to
+    /// x264 instead of failing frame by frame.
+    #[must_use]
+    pub fn supports_encoder(&self, video: crate::encoder::Video, profile: &Profile) -> bool {
+        let mut command = Command::new(&self.path);
+        command
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=duration=0.2:size=320x240:rate=10",
+            ])
+            .args(video.args(profile))
+            .args(["-f", "null", "-"]);
+        let status = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        matches!(status, Ok(status) if status.success())
     }
 }
 
