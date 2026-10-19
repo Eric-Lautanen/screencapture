@@ -5,7 +5,9 @@
 //! pinning positions, and every declared slot participates in the integrity
 //! check that runs before the first call goes through.
 
-use crate::dxgi::structs::{DuplDesc, FrameInfo, Guid, Mapped, OutputDesc, Tex2dDesc};
+use crate::dxgi::structs::{
+    DuplDesc, FrameInfo, Guid, Mapped, OutputDesc, PointerShapeInfo, Tex2dDesc,
+};
 use std::ffi::c_void;
 
 // ---------------------------------------------------------------------------
@@ -170,7 +172,7 @@ interfaces! {
             acquire_next_frame: Acquire,
             get_frame_dirty_rects: Reserved,
             get_frame_move_rects: Reserved,
-            get_frame_pointer_shape: Reserved,
+            get_frame_pointer_shape: TakeShape,
             map_desktop_surface: Reserved,
             un_map_desktop_surface: Reserved,
             release_frame: ReleaseFrame,
@@ -250,6 +252,13 @@ type Describe = unsafe extern "system" fn(*mut c_void, *mut OutputDesc);
 type DescribeOutputs = unsafe extern "system" fn(*mut c_void, *mut DuplDesc);
 type Acquire = unsafe extern "system" fn(*mut c_void, u32, *mut FrameInfo, *mut *mut c_void) -> i32;
 type ReleaseFrame = unsafe extern "system" fn(*mut c_void) -> i32;
+type TakeShape = unsafe extern "system" fn(
+    *mut c_void,
+    u32,
+    *mut c_void,
+    *mut u32,
+    *mut PointerShapeInfo,
+) -> i32;
 type Duplicate = unsafe extern "system" fn(*mut c_void, *mut c_void, *mut *mut c_void) -> i32;
 type StageTexture = unsafe extern "system" fn(
     *mut c_void,

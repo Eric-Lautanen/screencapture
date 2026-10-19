@@ -23,8 +23,12 @@ const fn hresult(raw: u32) -> i32 {
 pub const S_OK: i32 = 0;
 /// `DXGI_ERROR_NOT_FOUND`: no more outputs on the adapter.
 pub const NOT_FOUND: i32 = hresult(0x887A_0002);
+/// `DXGI_ERROR_ACCESS_LOST`: the duplication session is invalid.
+pub const ACCESS_LOST: i32 = hresult(0x887A_0026);
 /// `DXGI_ERROR_WAIT_TIMEOUT`: no new desktop frame during the wait.
 pub const WAIT_TIMEOUT: i32 = hresult(0x887A_0027);
+/// `DXGI_ERROR_NOT_CURRENTLY_AVAILABLE`: another stream owns duplication.
+pub const NOT_CURRENTLY_AVAILABLE: i32 = hresult(0x887A_0028);
 
 /// `DXGI_FORMAT_B8G8R8A8_UNORM`: the capture layout, byte per BGRA.
 pub const B8G8R8A8: u32 = 0x57;
@@ -159,10 +163,26 @@ pub struct DuplDesc {
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct PointerPosition {
-    /// Screen point.
+    /// Screen point, relative to the duplicated output's top-left.
     pub position: Point,
     /// Whether the pointer sits on this output.
     pub visible: i32,
+}
+
+/// `DXGI_OUTDUPL_POINTER_SHAPE_INFO` (`dxgi1_2.h`).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct PointerShapeInfo {
+    /// `DXGI_OUTDUPL_POINTER_SHAPE_TYPE_*`.
+    pub kind: u32,
+    /// Bitmap width in pixels.
+    pub width: u32,
+    /// Bitmap height in pixels (double for the monochrome pair).
+    pub height: u32,
+    /// Bytes per row of the shape bitmap.
+    pub pitch: u32,
+    /// Offset of the click point inside the bitmap.
+    pub hotspot: Point,
 }
 
 /// `DXGI_OUTDUPL_FRAME_INFO` (the two timestamps are `LARGE_INTEGER`).

@@ -123,13 +123,53 @@ Plan of record, in build order. Every session ends with
   at 60/1 (GDI baseline was ~30 live fps, the exact hole this closes).
   Window/region recording behavior is unchanged and verified (GDI
   fallback with a printed reason, 72 frames/1.2 s in the same test run).
-- deltas carried into the next sessions:
-  - Session-recovery on `DXGI_ERROR_ACCESS_LOST` (mode switches mid
-    recording currently stop with a clear error).
+- deltas from 4b (closed in session 4c below, except the last):
+  - ~~Session-recovery on `DXGI_ERROR_ACCESS_LOST`~~ done in 4c.
+  - ~~Cursor overlay through `GetFramePointerShape`~~ done in 4c.
   - Per-display picking (tray menu/settings) waits for the settings UI;
     CLI uses the primary output for now.
-  - Cursor overlay through `GetFramePointerShape` when duplication is the
-    source, still deferred with the settings UI polish.
+
+## Session 4c - DXGI hardening: session recovery + cursor compositing (done)
+
+- [x] `DXGI_ERROR_ACCESS_LOST` session recovery: a lost session (mode
+  switch, desktop transition, a second duplicator stealing the output) is
+  dropped and rebuilt in place — the recording pauses on its last frame
+  meanwhile and only stops when the duplication service never comes back
+  (60 retries, 20 ms apart). Rebuilds re-run the factory > adapter >
+  output chain against the *current* display arrangement, keep the device,
+  and re-verify the mode shape in BGRA before swapping the new session
+  in. Live smoke: concurrent `--check` probe stealing duplication at
+  ~3 s into an 8 s recording — the recording survived and closed
+  wall-honest (500 frames / 8.33 s at 60/1).
+- [x] Cursor compositing through `src/dxgi/cursor.rs` (pure math, unit
+  tested): the duplication pointer stream (`DXGI_OUTDUPL_FRAME_INFO` +
+  `GetFramePointerShape`, slot 11) feeds a software compositor following
+  the documented semantics cross-checked against Microsoft's duplication
+  sample — monochrome AND/XOR masks MSB-first, masked-color XOR rule,
+  straight-alpha color blend, top-left anchoring, edge clipping. Pointer
+  pose comes from each acquired frame, and on quiet screens (no acquire)
+  from the shell's cursor state (`GetCursorInfo`, desktop-to-output
+  conversion via the output origin). Verified visually: an extracted
+  frame shows the composited arrow at the reported pose.
+- [x] Policy change: a requested cursor no longer demotes a plan to GDI —
+  duplication now carries full-screen cursor plans by drawing the pointer
+  in software, so the fast path applies in both runtime cursor settings
+  (still-unit-fallbacks: partial regions, HDR, rotation). Quiet-screen
+  shape seeding uses the documented size-probe protocol when no pointer
+  update was announced, so the bitmap is always in hand.
+- [x] Module split: selection/validation helpers moved to
+  `src/dxgi/policy.rs` (`pick_output`, `matches_area`, `shape_of`,
+  v-table `surface` preflight, error surfaces) to keep every file under
+  the 500-line cap.
+- [x] All gates green: fmt, pedantic clippy `-D warnings`, 33 tests,
+  longest file 440 lines.
+- deltas not carried (closed by this session): session recovery and the
+  duplication cursor overlay. Still deferred: per-display picking,
+  16-bit stills, logging ring buffer, region/window photos, live hotkey
+  re-registration, multi-monitor cursor anchoring check (the pointer
+  position is documented output-relative; a secondary-panel run should
+  confirm driver conformance), monochrome/XOR cursor shapes only
+  exercised by unit test (live cursors here were COLOR type).
 
 ## Session 5 - macOS + Linux
 

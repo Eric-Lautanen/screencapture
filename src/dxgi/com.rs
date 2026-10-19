@@ -9,8 +9,8 @@ use crate::dxgi::abi::{
     ResourceVt, TextureVt,
 };
 use crate::dxgi::structs::{
-    B8G8R8A8, CPU_READ, DuplDesc, MAP_READ, Mapped, OutputDesc, S_OK, STAGING, SampleDesc,
-    Tex2dDesc, WAIT_TIMEOUT,
+    B8G8R8A8, CPU_READ, DuplDesc, FrameInfo, MAP_READ, Mapped, OutputDesc, S_OK, STAGING,
+    SampleDesc, Tex2dDesc, WAIT_TIMEOUT,
 };
 
 /// Error code used when interface memory stopped presenting a v-table; the
@@ -24,6 +24,19 @@ pub struct Com<T: Complete> {
 }
 
 impl<T: Complete> Com<T> {
+    /// An empty handle: holding nothing, dropping releases nothing. Used to
+    /// park a stale session before its replacement is created, because the
+    /// driver refuses a second duplication while the first one lives.
+    ///
+    /// # Safety
+    /// Always safe as a value; calls through it answer `ADRIFT`.
+    #[must_use]
+    pub fn vacant() -> Self {
+        Self {
+            connection: std::ptr::null_mut(),
+        }
+    }
+
     /// Adopt a freshly created interface whose creation already rejected
     /// null answers.
     ///
@@ -63,6 +76,9 @@ impl<T: Complete> Com<T> {
 
     /// The interface memory when it still presents a v-table.
     fn view(&self) -> Option<&T> {
+        if self.connection.is_null() {
+            return None;
+        }
         // SAFETY: `connection` is a live interface pointer whose first word
         // is the v-table; reading it touches no state of its own.
         unsafe { (*self.connection).as_ref() }
@@ -203,10 +219,14 @@ impl Com<DuplicationVt> {
 
     /// `AcquireNextFrame`: wait up to `wait` ms for a desktop update.
     ///
+    /// Returns the acquired desktop resource (none on timeout) alongside
+    /// the frame metadata, which carries pointer position and the pending
+    /// pointer-shape budget.
+    ///
     /// # Errors
-    /// Fails with raw `HRESULT` for session-breaking conditions; `None`
-    /// means the wait expired with nothing new.
-    pub fn acquire(&self, wait: u32) -> Result<Option<Com<ResourceVt>>, i32> {
+    /// Fails with raw `HRESULT` for session-breaking conditions; a `None`
+    /// resource means the wait expired with nothing new.
+    pub fn acquire(&self, wait: u32) -> Result<(Option<Com<ResourceVt>>, FrameInfo), i32> {
         let mut resources: *mut c_void = std::ptr::null_mut();
         let mut info = zeroed_info();
         let Some(table) = self.view() else {
@@ -224,12 +244,42 @@ impl Com<DuplicationVt> {
             )
         };
         if hr == WAIT_TIMEOUT {
-            return Ok(None);
+            return Ok((None, info));
         }
         if hr != S_OK || resources.is_null() {
             return Err(hr);
         }
-        Ok(Some(Com::own(resources)))
+        Ok((Some(Com::own(resources)), info))
+    }
+
+    /// `GetFramePointerShape` with an empty buffer: the size-probe leg of
+    /// the protocol. When the driver holds a shape to hand over it answers
+    /// with the required byte count, which the real fetch then allocates.
+    ///
+    /// # Errors
+    /// Fails with the raw `HRESULT` when no shape is offered (including
+    /// the trivial "nothing pending" case).
+    pub fn pointer_shape_size(&self) -> Result<u32, i32> {
+        let mut info = crate::dxgi::structs::PointerShapeInfo::default();
+        let mut required: u32 = 0;
+        let Some(table) = self.view() else {
+            return Err(ADRIFT);
+        };
+        let fetch = table.get_frame_pointer_shape;
+        // SAFETY: live interface; the empty buffer is the documented probe.
+        let hr = unsafe {
+            fetch(
+                self.connection.cast::<c_void>(),
+                0,
+                std::ptr::null_mut(),
+                &raw mut required,
+                &raw mut info,
+            )
+        };
+        if required == 0 {
+            return Err(hr);
+        }
+        Ok(required)
     }
 
     /// `ReleaseFrame`: hand the acquired desktop transaction back.
@@ -244,6 +294,41 @@ impl Com<DuplicationVt> {
         // SAFETY: live interface; slot 14 takes exactly this.
         let hr = unsafe { release(self.connection.cast::<c_void>()) };
         (hr == S_OK).then_some(()).ok_or(hr)
+    }
+
+    /// `GetFramePointerShape`: copy the pending cursor bitmap into `shape`.
+    /// The driver only owes bytes while `AcquireNextFrame` reported a
+    /// nonzero `PointerShapeBufferSize`.
+    ///
+    /// # Errors
+    /// Fails with the raw `HRESULT`; `ACCESS_LOST` is routine here and the
+    /// caller just keeps the previous shape.
+    pub fn pointer_shape(
+        &self,
+        shape: &mut [u8],
+    ) -> Result<crate::dxgi::structs::PointerShapeInfo, i32> {
+        let mut info = crate::dxgi::structs::PointerShapeInfo::default();
+        let mut required: u32 = 0;
+        let Some(table) = self.view() else {
+            return Err(ADRIFT);
+        };
+        let fetch = table.get_frame_pointer_shape;
+        let budget: u32 = shape.len().try_into().map_err(|_| ADRIFT)?;
+        // SAFETY: live interface; the buffer is ours with the promised
+        // length, and slot 11 takes exactly these five arguments.
+        let hr = unsafe {
+            fetch(
+                self.connection.cast::<c_void>(),
+                budget,
+                shape.as_mut_ptr().cast::<c_void>(),
+                &raw mut required,
+                &raw mut info,
+            )
+        };
+        if hr != S_OK {
+            return Err(hr);
+        }
+        Ok(info)
     }
 }
 
