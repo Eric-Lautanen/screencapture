@@ -9,12 +9,14 @@ use std::thread_local;
 
 use self::ffi::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GETMESSAGE_QUIT, GetMessageW, Guid, Hicon, Hwnd, IDI_APPLICATION, LoadIconW, Lparam, Lresult,
-    Msg, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NotifyIconDataW, Point,
-    PostQuitMessage, RegisterClassExW, Shell_NotifyIconW, TranslateMessage, UnregisterClassW,
-    WM_COMMAND, WM_CREATE, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_USER, WndClassExW, Wparam,
+    GETMESSAGE_QUIT, GetMessageW, Guid, Hicon, Hwnd, IDI_APPLICATION, KillTimer, LoadIconW, Lparam,
+    Lresult, Msg, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NotifyIconDataW, Point,
+    PostQuitMessage, RegisterClassExW, RegisterHotKey, SetTimer, Shell_NotifyIconW,
+    TranslateMessage, UnregisterClassW, UnregisterHotKey, WM_COMMAND, WM_CREATE, WM_DESTROY,
+    WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WM_USER, WndClassExW, Wparam,
 };
 use super::{Error, Event};
+use crate::hotkeys::Binding;
 use crate::recording::Profile;
 
 /// Tray notification callback message id (custom to this window).
@@ -39,8 +41,13 @@ const ID_AUTOSTART: Wparam = 3;
 const ID_PROFILE_BASE: Wparam = 100;
 const ID_EXIT: Wparam = 200;
 
+/// Frame-timer id for `WM_TIMER`.
+const TIMER_ID: usize = 1;
+
 thread_local! {
     static HANDLER: RefCell<Handler> = const { RefCell::new(None) };
+    static WINDOW: RefCell<Option<Hwnd>> = const { RefCell::new(None) };
+    static BINDINGS: RefCell<Vec<Binding>> = const { RefCell::new(Vec::new()) };
 }
 
 type Handler = Option<Box<dyn FnMut(Event)>>;
@@ -59,11 +66,12 @@ fn static_wide(text: &str) -> *const u16 {
 ///
 /// # Errors
 /// Returns an error when Windows refuses the window class or window.
-pub(super) fn run<F>(handler: F) -> Result<(), Error>
+pub(super) fn run<F>(handler: F, bindings: &[Binding]) -> Result<(), Error>
 where
     F: FnMut(Event) + 'static,
 {
     HANDLER.with(|slot| *slot.borrow_mut() = Some(Box::new(handler)));
+    BINDINGS.with(|slot| *slot.borrow_mut() = bindings.to_vec());
 
     let class_name = static_wide(CLASS_NAME);
     let instance = module_handle();
@@ -96,10 +104,52 @@ where
         let _ = unsafe { UnregisterClassW(class_name, instance) };
         return Err(Error::System("CreateWindowExW failed".into()));
     }
+    WINDOW.with(|slot| *slot.borrow_mut() = Some(window));
+    register_hotkeys(window);
     pump();
+    WINDOW.with(|slot| *slot.borrow_mut() = None);
     // SAFETY: `class_name` is the leaked static name registered above.
     let _ = unsafe { UnregisterClassW(class_name, instance) };
     Ok(())
+}
+
+/// Turn `Option<u32>` into timer state: `None` kills the frame timer.
+pub(super) fn set_frame_timer(interval_ms: Option<u32>) {
+    let Some(window) = WINDOW.with_borrow(|slot| *slot) else {
+        return;
+    };
+    match interval_ms {
+        Some(ms) => {
+            // SAFETY: the timer hangs off our own hidden window.
+            unsafe { SetTimer(window, TIMER_ID, ms, std::ptr::null()) };
+        }
+        None => {
+            // SAFETY: removing the timer registered on our own window.
+            unsafe { KillTimer(window, TIMER_ID) };
+        }
+    }
+}
+
+fn register_hotkeys(window: Hwnd) {
+    for binding in BINDINGS.with_borrow(Vec::clone) {
+        // SAFETY: registrations live on our own window and are removed on
+        // `WM_DESTROY`.
+        let registered =
+            unsafe { RegisterHotKey(window, binding.id, binding.modifiers, binding.key) };
+        if registered == 0 {
+            eprintln!(
+                "warn  hotkey id {} registration failed (already in use?)",
+                binding.id
+            );
+        }
+    }
+}
+
+fn unregister_hotkeys(window: Hwnd) {
+    for binding in BINDINGS.with_borrow(Vec::clone) {
+        // SAFETY: symmetric teardown of the registration made at startup.
+        unsafe { UnregisterHotKey(window, binding.id) };
+    }
 }
 
 fn module_handle() -> *mut std::ffi::c_void {
@@ -174,9 +224,18 @@ unsafe extern "system" fn on_message(
     if message == WM_COMMAND {
         return dispatch_command(w_param & 0xffff, window);
     }
+    if message == WM_TIMER && w_param == TIMER_ID {
+        emit(Event::Tick);
+        return 0;
+    }
+    if message == WM_HOTKEY {
+        dispatch_hotkey(w_param);
+        return 0;
+    }
     if message == WM_DESTROY {
         // SAFETY: standard teardown path on the pump thread.
         unsafe {
+            unregister_hotkeys(window);
             remove_icon(window);
             PostQuitMessage(0);
         }
@@ -207,6 +266,20 @@ fn dispatch_command(command: Wparam, window: Hwnd) -> Lresult {
         _ => {}
     }
     0
+}
+
+fn dispatch_hotkey(id: Wparam) {
+    let role = BINDINGS.with_borrow(|slot| {
+        slot.iter()
+            .find(|binding| binding.id == i32::try_from(id).unwrap_or(0))
+            .map(|binding| binding.role)
+    });
+    if let Some(role) = role {
+        emit(match role {
+            crate::hotkeys::Role::Record => Event::Record,
+            crate::hotkeys::Role::Photo => Event::Photo,
+        });
+    }
 }
 
 fn emit(event: Event) {

@@ -20,7 +20,9 @@ engine.
 ## Commands
 
 ```
-screencapture              start the tray application (not yet built)
+screencapture              start the tray application
+screencapture --record S   record the screen for S seconds, then exit
+screencapture --photo      take one still photo, then exit
 screencapture --check      diagnose install path, settings, and engine
 screencapture --init       write the default settings file if missing
 screencapture --config P   use a specific settings file
@@ -28,13 +30,23 @@ screencapture --version    print the version
 screencapture --help       print help
 ```
 
+`--record` and `--photo` run the same capture pipelines as the tray, so
+they double as headless smoke tests; verify their output with the bundled
+`vendor/ffmpeg/ffprobe.exe`.
+
 ## Layout
 
 ```
 Cargo.toml        crate manifest (edition 2024, warnings denied)
-src/main.rs       entry point
+src/main.rs       entry point (opts into per-monitor DPI awareness)
 src/cli.rs        argument parsing and dispatch
-src/app.rs        tray runtime wiring (instance guard, settings sync)
+src/app.rs        tray runtime wiring, recording/photo commands
+src/capture.rs    GDI frame capture (top-down BGRA, cached DIB target)
+src/screen.rs     monitor enumeration in physical pixels
+src/clock.rs      UTC timestamp math for output file names
+src/pipe.rs       BGRA frame feed into FFmpeg (records and photos)
+src/recorder.rs   recording session lifecycle (start/tick/stop)
+src/hotkeys.rs    global hotkey bindings (`RegisterHotKey` table)
 src/config.rs     std-only settings file format (ordered key = value)
 src/settings.rs   typed settings view with safe defaults
 src/recording.rs  capture profiles (1080p30 ... 4K60, 4K120)
@@ -45,7 +57,8 @@ src/instance.rs   single-instance guard
 src/doctor.rs     `--check` / `--init` diagnostics
 src/paths.rs      cross-platform filesystem locations
 src/tray/mod.rs   tray API (events shared by all platforms)
-src/tray/win/     Win32 FFI, message loop, tray icon, popup menus
+src/tray/win/     Win32 FFI, message loop, tray icon, popup menus,
+                  frame timer, and registered hotkeys
 vendor/ffmpeg/    the bundled engine (gitignored binaries, licensed GPLv3+)
 target/           build output (gitignored)
 ```
@@ -64,9 +77,13 @@ that asset and copying `bin/ffmpeg.exe` and `bin/ffprobe.exe`.
 
 ## Status
 
-Sessions 1 and 2 are done: settings persistence and capture profiles, the
+Sessions 1 to 3 are done: settings persistence and capture profiles, the
 bundled FFmpeg engine, diagnostics, the Windows tray (icon, menu, message
-loop, autostart registry sync, single-instance guard), and a dedicated
-encoder module (`src/encoder.rs`) that isolates x264 so a later codec swap
-(VP9/AV1/hardware) needs only edits there. See `ROADMAP.md` for what
-remains.
+loop, autostart sync, single-instance guard), global hotkeys, and the real
+recording pipeline — GDI `BitBlt` frames stream into FFmpeg for
+H.264/MP4 records and lossless PNG stills, driven by the tray menu,
+hotkeys, or `--record`/`--photo`. A dedicated encoder module
+(`src/encoder.rs`) isolates x264 so a later codec swap (VP9/AV1/hardware)
+needs only edits there. See `ROADMAP.md` for what remains: region-drawing
+and window auto-select, DXGI Desktop Duplication for true 4K60, an
+authored tray icon, and shipping installers.

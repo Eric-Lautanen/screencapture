@@ -25,6 +25,8 @@ pub(super) const WM_NULL: u32 = 0x0000;
 pub(super) const WM_USER: u32 = 0x0400;
 pub(super) const WM_LBUTTONUP: Lparam = 0x0202;
 pub(super) const WM_RBUTTONUP: Lparam = 0x0205;
+pub(super) const WM_TIMER: u32 = 0x0113;
+pub(super) const WM_HOTKEY: u32 = 0x0312;
 
 // Notification-area constants (shellapi.h).
 pub(super) const NIM_ADD: u32 = 0x0000;
@@ -72,6 +74,11 @@ unsafe extern "system" {
     pub(super) fn PostQuitMessage(exit_code: i32);
     pub(super) fn DestroyWindow(window: Hwnd) -> Bool;
     pub(super) fn PostMessageW(window: Hwnd, message: u32, wparam: Wparam, lparam: Lparam) -> Bool;
+    pub(super) fn SetTimer(window: Hwnd, id: usize, interval_ms: u32, proc: *const c_void)
+    -> usize;
+    pub(super) fn KillTimer(window: Hwnd, id: usize) -> Bool;
+    pub(super) fn RegisterHotKey(window: Hwnd, id: i32, modifiers: u32, key: u32) -> Bool;
+    pub(super) fn UnregisterHotKey(window: Hwnd, id: i32) -> Bool;
 }
 
 #[link(name = "shell32")]
