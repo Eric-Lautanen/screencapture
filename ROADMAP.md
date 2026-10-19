@@ -171,15 +171,68 @@ Plan of record, in build order. Every session ends with
   confirm driver conformance), monochrome/XOR cursor shapes only
   exercised by unit test (live cursors here were COLOR type).
 
-## Session 5 - macOS + Linux
+## Session 5 - macOS + Linux (blind, header-verified)
 
-- [ ] macOS: ScreenCaptureKit via direct FFI bindings, menu-bar equivalent
-  of tray, `Mal`-style launch-agent autostart.
-- [ ] Linux: X11/Wayland (portal) capture, `org.kde.StatusNotifierItem`
-  tray, desktop autostart entry.
-- [ ] Platform parity tests and doctor coverage on all three OSes.
+- [x] Fact check pass before any code: Apple SDK headers verified every
+  CoreGraphics symbol in use (`CGWindowListCreateImage` signature and
+  top-left point space, `CGBitmapContextCreate` layout params,
+  `CG*CTM`/draw/gstate calls, `CGMainDisplayID`/`CGDisplayBounds`/
+  `CGDisplayPixelsWide/High`); note `kCGWindowImageShouldBeOpaque`
+  is `(1 << 1)` and `kCGWindowImageBestResolution` is `(1 << 3)` —
+  both confirmed from `CGWindow.h`, not memory. X11 facts verified
+  from libX11 `Xlib.h` + xorgproto `X.h` (which moved out of libX11's
+  tree — hence the 404s): `ZPixmap = 2`, `AllPlanes = ~0UL`,
+  `XGetImage` signature, the full `XImage` record layout, and
+  `f.destroy_image` as function-table entry 1.
+- [x] Platform seams: `capture.rs` and `screen.rs` became directories
+  (`mod.rs` + `win.rs`/`mac.rs`/`linux.rs`); `Target`/`prepare`/window
+  geometry are platform-neutral; `dxgi`, `winapi`, `selector` are
+  cfg-gated; `recorder.rs` keeps duplication as the Windows-only fast
+  source; non-Windows region records use the native backend.
+- [x] New C surfaces loading by name at runtime (mirroring the dxgi
+  loader, module parked loaded for the process life): `src/dylib.rs`
+  (dlopen/dlsym, `#[link(name = "dl")]` holds on both Unices),
+  `src/coregraphics.rs` (18 exports), `src/xlib.rs` (7 exports).
+- [x] macOS backend: compositor draws the window-list image (opaque +
+  best-resolution options) into a cached premultiplied-BGRA bitmap
+  context; CTM flip keeps rows top-down; region pixels map to
+  screen-space points through the main display scale. Cursor overlay is
+  not composited on this route (documented no-op); multi-display
+  origins deferred (needs a Mac-verified session for the rounding
+  policy); Retina capture carries device pixels via
+  `kCGWindowImageBestResolution`.
+- [x] Linux backend: one `XGetImage` per frame off the root drawable in
+  `ZPixmap`; layout asserted to 32-bit little-endian true color; the
+  server's zeroed alpha byte is forced opaque per frame so PNG stills
+  stay visible. Wayland answers a clean unsupported message (no X
+  server).
+- [x] Doctor parity: `--check` reports the native backend and geometry
+  on every platform; a missing backend is a FAIL outside Windows
+  (inside Windows a duplication miss is a GDI-fallback notice).
+- [x] Unix autostart: macOS `LaunchAgent` plist (`dev.screencapture`)
+  and freedesktop `.desktop` entry, file-presence registration,
+  XML/Exec escaping, `XDG_CONFIG_HOME` honored; unit-tested with
+  explicit-home resolution paths (stay runnable in CI where no user
+  agent dir exists... tests use only path math plus temp fixtures).
+- [x] Unix single-instance guard via `std::fs` advisory file lock
+  (stable File::try_lock in this toolchain): a leftover file is never
+  a stale lock because the OS frees the lock at process death; handle
+  parked for the process lifetime like the Windows mutex.
+- [x] Windows-only capabilities degrade with actionable text on
+  mac/Linux: region selector, window picker, tray, hotkeys, and
+  `previous_foreground`; `--record`/`--photo` full-screen run
+  everywhere.
+- [x] Runtime behavior: cursor drawing, tray, and region/window capture
+  remain Windows-only this session (see deferred list); mac/Linux code
+  has NOT executed — hardening confirmed by cross-target pedantic
+  clippy (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`) plus user
+  reports, with GitHub Actions expected to carry it from here.
+- Verified live post-split (this Windows box): `--check` reports
+  `desktop duplication (1920x1200)`, a 2 s `--record 2` lands a probe-
+  verified MP4, fmt/pedantic clippy/33 tests green, per-target clippy
+  green on both non-Windows targets.
 
-## Session 6 - Ship it
+## Session 6 - Ship it (Windows half next, testable here)
 
 - [ ] FFmpeg licensing decision for the *baked-in* engine: GPL build keeps
   x264 for free use; LGPL build (no x264; VP9/AV1/HW) if the app ships

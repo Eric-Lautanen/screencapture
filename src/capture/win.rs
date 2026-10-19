@@ -1,29 +1,12 @@
-//! GDI frame capture: one `Target` per recording keeps screen DC, memory
-//! DC, and a top-down BGRA DIB alive; frames reuse the cached bitmap.
+//! GDI frame capture: one backend per recording keeps the screen DC,
+//! memory DC, and a top-down BGRA DIB alive; frames reuse the cached
+//! bitmap. This is the slow-but-always-available Windows path behind
+//! desktop duplication.
 
 use std::ffi::c_void;
 use std::io;
 
-/// Region on screen: origin and extent in physical pixels.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Region {
-    /// Origin x.
-    pub x: i32,
-    /// Origin y.
-    pub y: i32,
-    /// Width in pixels.
-    pub width: u32,
-    /// Height in pixels.
-    pub height: u32,
-}
-
-impl Region {
-    /// Whether this region could ever contain pixels.
-    #[must_use]
-    pub fn is_sane(self) -> bool {
-        self.width > 0 && self.height > 0
-    }
-}
+use super::Region;
 
 const SRCCOPY: u32 = 0x00CC_0020;
 const CAPTUREBLT: u32 = 0x4000_0000;
@@ -37,15 +20,12 @@ type Bool = i32;
 
 #[link(name = "user32")]
 unsafe extern "system" {
-    fn GetDC(window: *mut c_void) -> Hdc;
-    fn ReleaseDC(window: *mut c_void, dc: Hdc) -> i32;
-    fn SetProcessDpiAwarenessContext(context: *mut c_void) -> Bool;
+    fn SetProcessDpiAwarenessContext(value: *mut c_void) -> Bool;
 }
 
 #[link(name = "gdi32")]
 unsafe extern "system" {
     fn CreateCompatibleDC(dc: Hdc) -> Hdc;
-    fn DeleteDC(dc: Hdc) -> Bool;
     fn CreateDIBSection(
         dc: Hdc,
         info: *const BitmapInfo,
@@ -54,29 +34,22 @@ unsafe extern "system" {
         section: *mut c_void,
         offset: u32,
     ) -> Hbitmap;
+    fn DeleteDC(dc: Hdc) -> i32;
+    fn DeleteObject(object: Hbitmap) -> i32;
     fn SelectObject(dc: Hdc, object: Hbitmap) -> Hbitmap;
-    fn DeleteObject(object: Hbitmap) -> Bool;
     fn BitBlt(
-        dest: Hdc,
-        dest_x: i32,
-        dest_y: i32,
+        destination: Hdc,
+        x: i32,
+        y: i32,
         width: i32,
         height: i32,
         source: Hdc,
         source_x: i32,
         source_y: i32,
-        raster: u32,
-    ) -> Bool;
+        operation: u32,
+    ) -> i32;
 }
 
-/// `BITMAPINFOHEADER` plus the one color-slot in `BITMAPINFO`.
-#[repr(C)]
-struct BitmapInfo {
-    header: BitmapInfoHeader,
-    colors: [u32; 1],
-}
-
-/// `BITMAPINFOHEADER` to the Win32 ABI.
 #[repr(C)]
 struct BitmapInfoHeader {
     size: u32,
@@ -92,16 +65,22 @@ struct BitmapInfoHeader {
     colors_important: u32,
 }
 
+#[repr(C)]
+struct BitmapInfo {
+    header: BitmapInfoHeader,
+    colors: [u32; 1],
+}
+
 /// Opt into per-monitor DPI awareness so screen coordinates are physical
 /// pixels; call once at startup, before any geometry work.
-pub fn prepare() {
+pub fn prepare_dpi() {
     // SAFETY: passing a well-known negative context constant; failure only
     // means legacy DPI behavior.
     unsafe { SetProcessDpiAwarenessContext(CONTEXT_PER_MONITOR_AWARE_V2 as *mut c_void) };
 }
 
-/// A capture target bound to one region.
-pub struct Target {
+/// One GDI capture backend bound to one region.
+pub struct Backend {
     region: Region,
     screen_dc: Hdc,
     memory_dc: Hdc,
@@ -112,22 +91,20 @@ pub struct Target {
     raster: u32,
 }
 
-impl Target {
-    /// Capture a frame from `region` into a reusable BGRA bitmap.
-    /// `include_cursor` draws the mouse pointer into every frame.
+impl Backend {
+    /// Set up the blit chain for `region`; a refused handle fails here
+    /// rather than mid-recording.
     ///
     /// # Errors
     /// Fails when any GDI handle for the setup is refused.
-    pub fn new(region: Region, include_cursor: bool) -> io::Result<Self> {
-        if !region.is_sane() {
-            return Err(io::Error::other("capture region is empty"));
-        }
+    pub fn open(region: Region, include_cursor: bool) -> io::Result<Self> {
         // SAFETY: null window DC is the screen DC; released in `Drop`.
         let screen_dc = unsafe { GetDC(std::ptr::null_mut()) };
         if screen_dc.is_null() {
             return Err(io::Error::other("GetDC for the screen failed"));
         }
         let Some(setup) = build_bitmap(screen_dc, region) else {
+            // SAFETY: the screen DC is ours exclusively.
             let _ = unsafe { ReleaseDC(std::ptr::null_mut(), screen_dc) };
             return Err(io::Error::other("GDI bitmap setup failed"));
         };
@@ -143,17 +120,17 @@ impl Target {
         })
     }
 
-    /// Perform one blit and lend the BGRA bytes; layout is top-down rows of
-    /// `W * 4` bytes. The data lives in our DIB and is valid until the next
-    /// blit, so callers must write it out before capturing again.
+    /// Perform one blit and lend the BGRA bytes; layout is top-down rows
+    /// of `width * 4` bytes. The data lives in our DIB and is valid until
+    /// the next blit.
     ///
     /// # Errors
     /// Fails when `BitBlt` refuses the blit.
     pub fn frame(&self) -> io::Result<&[u8]> {
         let width = i32::try_from(self.region.width).map_err(invalid_region)?;
         let height = i32::try_from(self.region.height).map_err(invalid_region)?;
-        // SAFETY: handles belong to this target; coordinates describe the
-        // region recorded at construction.
+        // SAFETY: handles belong to this backend; coordinates describe
+        // the region recorded at construction.
         let blit_ok = unsafe {
             BitBlt(
                 self.memory_dc,
@@ -176,6 +153,12 @@ impl Target {
         }
         Ok(unsafe { std::slice::from_raw_parts(self.bits.cast::<u8>(), len) })
     }
+}
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn GetDC(window: *mut c_void) -> Hdc;
+    fn ReleaseDC(window: *mut c_void, dc: Hdc) -> i32;
 }
 
 fn invalid_region(_error: std::num::TryFromIntError) -> io::Error {
@@ -227,7 +210,7 @@ fn build_bitmap(screen_dc: Hdc, region: Region) -> Option<Setup> {
     let bitmap = unsafe {
         CreateDIBSection(
             memory_dc,
-            &raw const info,
+            std::ptr::from_ref(&info),
             DIB_RGB_COLORS,
             &raw mut bits,
             std::ptr::null_mut(),
@@ -259,7 +242,7 @@ fn stride_for(width: u32) -> usize {
     usize::try_from(width).unwrap_or(0) * 4
 }
 
-impl Drop for Target {
+impl Drop for Backend {
     fn drop(&mut self) {
         // SAFETY: release in reverse creation order; DCs and bitmap are
         // ours exclusively.
@@ -267,26 +250,15 @@ impl Drop for Target {
             let _ = SelectObject(self.memory_dc, self.previous_bitmap);
             let _ = DeleteObject(self.bitmap);
             let _ = DeleteDC(self.memory_dc);
-            let _ = ReleaseDC(std::ptr::null_mut(), self.screen_dc);
         }
+        // SAFETY: the screen DC came from our own `GetDC`.
+        unsafe { ReleaseDC(std::ptr::null_mut(), self.screen_dc) };
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Region, Target, stride_for};
-
-    #[test]
-    fn empty_regions_are_refused() {
-        let region = Region {
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 100,
-        };
-        assert!(!region.is_sane());
-        assert!(Target::new(region, false).is_err());
-    }
+    use super::stride_for;
 
     #[test]
     fn stride_is_bgra_row_bytes() {

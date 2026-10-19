@@ -1,5 +1,5 @@
-//! Login autostart. Windows adds a `HKCU\...\Run` value; other platforms
-//! land with their native mechanism in later sessions.
+//! Login autostart: the Windows `HKCU\...\Run` value, the macOS
+//! `LaunchAgent` plist, and the freedesktop XDG autostart entry.
 
 use std::io;
 
@@ -12,7 +12,8 @@ pub fn registered() -> bool {
 /// Enable or disable launch-at-login.
 ///
 /// # Errors
-/// Propagates platform errors (registry writes on Windows).
+/// Propagates platform errors (registry on Windows; file operations on
+/// macOS and Linux).
 pub fn set(enable: bool) -> io::Result<()> {
     native::set(enable)
 }
@@ -201,18 +202,196 @@ mod native {
     }
 }
 
-#[cfg(not(windows))]
+/// Registration for the two Unix mechanisms below: the macOS `LaunchAgent`
+/// plist (`Library/LaunchAgents`) and the freedesktop XDG autostart entry
+/// (`.config/autostart`). Both are plain files the desktop reads on
+/// login, so registration is file presence and toggling is write/remove.
+#[cfg(unix)]
 mod native {
+    use std::fs;
     use std::io;
+    use std::path::{Path, PathBuf};
 
-    pub(super) fn registered() -> bool {
-        false
+    use crate::paths;
+
+    /// Reverse-DNS label `launchd` also reads from the plist file name.
+    const LABEL: &str = "dev.screencapture";
+
+    /// XDG entry name before the `.desktop` suffix.
+    const ENTRY: &str = "screencapture";
+
+    /// macOS user agent directory (launchd's login scan point).
+    const LAUNCH_AGENTS: &str = "Library/LaunchAgents";
+
+    /// Whether launch-at-login is currently registered.
+    #[must_use]
+    pub fn registered() -> bool {
+        match layout() {
+            Some((home, xdg_config)) => document_path(&home, xdg_config.as_deref()).exists(),
+            None => false,
+        }
     }
 
-    pub(super) fn set(_enable: bool) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "autostart lands with the tray on this platform",
-        ))
+    /// Enable or disable launch-at-login.
+    ///
+    /// # Errors
+    /// Propagates filesystem errors; a missing home directory fails with
+    /// a resolution notice.
+    pub fn set(enable: bool) -> io::Result<()> {
+        let Some((home, xdg_config)) = layout() else {
+            return Err(io::Error::other("cannot resolve the user directory"));
+        };
+        let path = document_path(&home, xdg_config.as_deref());
+        if enable {
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let program = std::env::current_exe()?;
+            fs::write(&path, document(&program))?;
+        } else {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    /// The home directory plus the absolute `XDG_CONFIG_HOME` override.
+    fn layout() -> Option<(PathBuf, Option<PathBuf>)> {
+        let home = paths::home_dir()?;
+        let xdg = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|value| value.is_absolute());
+        Some((home, xdg))
+    }
+
+    /// The autostart document for this platform's mechanism.
+    fn document_path(home: &Path, xdg_config: Option<&Path>) -> PathBuf {
+        if cfg!(target_os = "macos") {
+            home.join(LAUNCH_AGENTS).join(format!("{LABEL}.plist"))
+        } else {
+            let default = home.join(".config");
+            let config = xdg_config.unwrap_or(&default);
+            config.join("autostart").join(format!("{ENTRY}.desktop"))
+        }
+    }
+
+    /// The registration document text for the current platform.
+    fn document(program: &Path) -> String {
+        if cfg!(target_os = "macos") {
+            agent_plist(program)
+        } else {
+            desktop_entry(program)
+        }
+    }
+
+    /// The `LaunchAgent` document registering `program` at login.
+    fn agent_plist(program: &Path) -> String {
+        format!(
+            concat!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+                "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" ",
+                "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
+                "<plist version=\"1.0\">\n",
+                "<dict>\n",
+                "  <key>Label</key>\n  <string>{}</string>\n",
+                "  <key>ProgramArguments</key>\n  <array>\n",
+                "    <string>{}</string>\n  </array>\n",
+                "  <key>RunAtLoad</key>\n  <true/>\n",
+                "</dict>\n</plist>\n"
+            ),
+            LABEL,
+            xml_text(&program.to_string_lossy())
+        )
+    }
+
+    /// XML character data: escape the delimiters markup otherwise eats.
+    fn xml_text(raw: &str) -> String {
+        raw.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+
+    /// The freedesktop autostart entry registering `program` at login.
+    fn desktop_entry(program: &Path) -> String {
+        format!(
+            concat!(
+                "[Desktop Entry]\n",
+                "Type=Application\n",
+                "Name=Screencapture\n",
+                "Comment=Start the Screencapture tray app at login\n",
+                "Exec={}\n",
+                "Terminal=false\n",
+                "Categories=Utility;Video\n",
+                "X-GNOME-Autostart-enabled=true\n"
+            ),
+            exec_value(&program.to_string_lossy())
+        )
+    }
+
+    /// An `Exec=` value per the desktop entry spec: shell-level quoting
+    /// with backslash escapes around the whole program path.
+    fn exec_value(raw: &str) -> String {
+        let escaped = raw.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("\"{escaped}\"")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{agent_plist, desktop_entry, document_path, exec_value, xml_text};
+        use std::path::{Path, PathBuf};
+
+        #[test]
+        fn the_plist_registers_at_run_load() {
+            let text = agent_plist(Path::new("/opt/app/screencapture"));
+            assert!(text.starts_with("<?xml version=\"1.0\""));
+            assert!(text.contains("<string>dev.screencapture</string>"));
+            assert!(text.contains("<string>/opt/app/screencapture</string>"));
+            assert!(text.contains("<key>RunAtLoad</key>"));
+        }
+
+        #[test]
+        fn the_plist_path_lives_in_launch_agents() {
+            let path = document_path(Path::new("/Users/ericl"), None);
+            assert_eq!(
+                path,
+                PathBuf::from("/Users/ericl/Library/LaunchAgents/dev.screencapture.plist")
+            );
+        }
+
+        #[test]
+        fn xml_delimiters_are_escaped() {
+            assert_eq!(xml_text("a&b<c>"), "a&amp;b&lt;c&gt;");
+        }
+
+        #[test]
+        fn the_desktop_entry_quotes_exec() {
+            let text = desktop_entry(Path::new("/opt/app/screencapture"));
+            assert!(text.contains("Exec=\"/opt/app/screencapture\""));
+            assert!(text.contains("X-GNOME-Autostart-enabled=true"));
+        }
+
+        #[test]
+        fn exec_values_escape_quotes_and_backslashes() {
+            assert_eq!(
+                exec_value("/opt/with \"spaces\"/app"),
+                "\"/opt/with \\\"spaces\\\"/app\""
+            );
+        }
+
+        #[test]
+        fn the_xdg_path_honors_the_config_home() {
+            let home = Path::new("/home/ericl");
+            assert_eq!(
+                document_path(home, None),
+                PathBuf::from("/home/ericl/.config/autostart/screencapture.desktop")
+            );
+            assert_eq!(
+                document_path(home, Some(Path::new("/custom/xdg"))),
+                PathBuf::from("/custom/xdg/autostart/screencapture.desktop")
+            );
+        }
     }
 }
