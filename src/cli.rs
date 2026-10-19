@@ -130,13 +130,13 @@ fn dispatch(invocation: &Invocation) -> ExitCode {
         }
         Command::Check => doctor::check(invocation.config.as_deref()),
         Command::InitConfig => doctor::init_config(invocation.config.as_deref()),
-        Command::Record { seconds } => app::record_demo(
+        Command::Record { seconds } => app::demo::record_demo(
             invocation.config.as_deref(),
             seconds,
             invocation.mode,
             invocation.display,
         ),
-        Command::Photo => app::photo_demo(invocation.config.as_deref(), invocation.display),
+        Command::Photo => app::demo::photo_demo(invocation.config.as_deref(), invocation.display),
         Command::Run => app::run(invocation.config.as_deref()),
     }
 }

@@ -96,6 +96,7 @@ fn check_settings(config: Option<&Path>) -> bool {
             .map_or_else(|| "bundled".to_owned(), |path| path.display().to_string())
     );
     println!("        autostart os-level: {}", autostart::registered());
+    check_log_file(&loaded.settings.media_dir);
     loaded.problems.is_empty()
 }
 
@@ -147,6 +148,21 @@ fn report_codecs(binary: &ffmpeg::Binary, loaded: &settings::Loaded) {
             variant.name()
         );
     }
+}
+
+/// The tray keeps recent diagnostics in a log file in the media
+/// directory; report it, hits only (size just counts lines).
+fn check_log_file(media_dir: &Path) {
+    let file = media_dir.join(crate::log::FILE_NAME);
+    let Ok(text) = std::fs::read_to_string(&file) else {
+        println!("log file: none yet under {}", media_dir.display());
+        return;
+    };
+    println!(
+        "{OK_TAG}log file: {} ({} lines)",
+        file.display(),
+        text.lines().count()
+    );
 }
 
 fn check_engine(config: Option<&Path>) -> bool {

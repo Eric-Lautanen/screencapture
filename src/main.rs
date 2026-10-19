@@ -17,6 +17,7 @@ mod encoder;
 mod ffmpeg;
 mod hotkeys;
 mod instance;
+mod log;
 mod paths;
 mod pipe;
 mod recorder;
