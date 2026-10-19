@@ -323,3 +323,31 @@ Plan of record, in build order. Every session ends with
 - Deferred in this space: HEVC hardware variants (driver coverage too
   murky to blind-ship), quality-rate-control parity mapping per vendor
   (needs a quality-comparison session with frames to look at).
+
+## Session 9 - Caps and visibility: app split + log ring
+
+- [x] `src/app.rs` split at 478/500 lines: tray runtime stays in
+  `app/mod.rs` (416 lines), the headless `--record`/`--photo`
+  pipelines moved to `src/app/demo.rs` (133 lines); helpers stay
+  module-private and reachable from the sibling by Rust's default
+  visibility, zero public API churn.
+- [x] Diagnostics ring (`src/log.rs`, unit-tested): `note(tag, msg)`
+  mirrors the console line into a thread-safe 64-entry ring with
+  timestamps; `flush_to(media_dir)` appends the ring to
+  `screencapture.log` (file restarts past 512 KiB; IO failures silent).
+- [x] Tray wiring: settings-load warnings, autostart conflicts, region
+  errors, record start/stop (frame counts), photo results, tick
+  failures (with immediate flush), encoder demotions, and settings
+  saves all flow through the ring; stop + exit + tick-failure flush
+  points. Reflections on the channels: the tray handler owns both
+  settings and runtime, so the startup clones the log directory for
+  the final flush after the loop ends.
+- [x] Demo wiring: headless records log start/saved lines and flush, so
+  even CLI runs leave a retrievable trail.
+- [x] Doctor: `--check` prints `log file: <path> (N lines)` or `none
+  yet`; the log check lives in the settings block (media dir known).
+- [x] Also cleaned: duplicated `sane_region` doc comment; runtime
+  carries `media_dir` for spot flushes.
+- [x] Gates: fmt, pedantic clippy `-D warnings` (native + both cross
+  targets), 43 tests; live smoke wrote the two-line log correctly and
+  `--check` reported it.

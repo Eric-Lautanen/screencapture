@@ -55,6 +55,7 @@ build.rs          std-only Windows resource glue (bakes assets/icon.ico
 src/main.rs       entry point (opts into per-monitor DPI awareness)
 src/cli.rs        argument parsing and dispatch
 src/app.rs        tray runtime wiring, recording/photo commands
+src/app/demo.rs   headless `--record`/`--photo` pipelines (CLI smoke)
 src/winapi.rs     shared Win32 declarations (windows, cursors, messages)
 src/capture/      frame capture backends behind one Target API (top-down
                   BGRA): Windows GDI blit, macOS CoreGraphics compositor
@@ -82,6 +83,8 @@ src/autostart.rs  login autostart (registry / LaunchAgent / XDG entry)
 src/instance.rs   single-instance guard
 src/doctor.rs     `--check` / `--init` diagnostics
 src/paths.rs      cross-platform filesystem locations
+src/log.rs        diagnostics ring + `screencapture.log` upkeep (trays
+                  run console-less; recent notes stay retrievable)
 src/sha256.rs     pure-std SHA-256 (engine integrity record upkeep)
 src/tray/mod.rs   tray API (events shared by all platforms)
 src/tray/win/     Win32 FFI, message loop, tray icon, popup menus,
@@ -111,6 +114,16 @@ that asset and copying `bin/ffmpeg.exe` and `bin/ffprobe.exe`; then run
 Licensing: `docs/FFMPEG-LICENSE.md`.
 
 ## Status
+
+Session 9 split `src/app.rs` (it had grown to 478 of the 500-line cap):
+the headless `--record`/`--photo` paths moved to `src/app/demo.rs`, and a
+diagnostics ring (`src/log.rs`) now captures what console-less tray runs
+used to lose: lifecycle and error notes (timestamped) live in a 64-entry
+ring that flushes to `screencapture.log` inside the media directory at
+every recording stop, on exit, and on tick failures; the file restarts
+once it passes 512 KiB. `--check` reports the log file. Live-verified:
+a demo record wrote both lifecycle lines to the log and the check line
+shows the path and line count.
 
 Session 8 added hardware encoders: settings accept
 `codec = amf | qsv | nvenc | mf` (AMD, Intel Quick Sync, NVIDIA NVENC, and
