@@ -44,6 +44,19 @@ pub fn primary() -> io::Result<Display> {
     }
 }
 
+/// One display by 1-based enumeration order (matches the tray's
+/// "Display N" entries).
+///
+/// # Errors
+/// Returns an error when the number is not currently attached.
+pub fn display_at(number: u32) -> io::Result<Display> {
+    let all = displays();
+    let index = usize::try_from(number - 1).unwrap_or(usize::MAX);
+    all.into_iter()
+        .nth(index)
+        .ok_or_else(|| io::Error::other(format!("display {number} is not attached")))
+}
+
 /// Every attached display in enumeration order.
 #[must_use]
 pub fn displays() -> Vec<Display> {
@@ -76,7 +89,7 @@ pub fn window_region(preferred: Option<usize>) -> Result<Region, io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{displays, primary};
+    use super::{display_at, displays, primary};
 
     #[test]
     fn primary_works_or_fails_cleanly() {
@@ -88,5 +101,16 @@ mod tests {
             let is_first = all.first() == Some(&display);
             assert!(is_origin || is_first);
         }
+    }
+
+    #[test]
+    fn display_at_answers_or_errors_honestly() {
+        let all = displays();
+        let count = u32::try_from(all.len()).unwrap_or(16);
+        if count > 0 {
+            assert!(display_at(count).is_ok());
+        }
+        assert!(display_at(count + 1).is_err());
+        assert!(display_at(999).is_err());
     }
 }

@@ -9,8 +9,10 @@ pub enum Event {
     Record,
     /// Start a recording from a rectangle the user draws on screen.
     RecordRegion,
-    /// Start a recording of the application the user was just working in.
+    /// Records the application window under the cursor / last foreground.
     RecordWindow,
+    /// Record one named display fullscreen (1-based, tray "Display N").
+    RecordDisplay(u32),
     /// Capture a still photo.
     Photo,
     /// The frame timer fired; capture and encode one frame.
@@ -89,11 +91,12 @@ mod win;
 /// stub: nothing emits events there yet, and the catalog keeps the
 /// enum constructing on every target so the seam stays complete.
 #[cfg(not(windows))]
-fn catalogued() -> [Event; 8] {
+fn catalogued() -> [Event; 9] {
     [
         Event::Record,
         Event::RecordRegion,
         Event::RecordWindow,
+        Event::RecordDisplay(1),
         Event::Photo,
         Event::Tick,
         Event::ToggleAutostart,

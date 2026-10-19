@@ -24,12 +24,57 @@ pub enum Hotkey {
 /// Where a recording's frame comes from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CaptureMode {
-    /// The whole primary display.
+    /// The whole selected display (`display`; the primary by default).
     Full,
     /// Draw a rectangle on screen first (interactive).
     Region,
     /// A window's bounds, auto-detected at record time.
     Window,
+}
+
+/// Which display a Full capture records: the primary or a numbered one
+/// (1-based, matching the tray's "Display N" menu entries).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum DisplayChoice {
+    /// The display at the desktop origin.
+    #[default]
+    Primary,
+    /// A named part of the enumeration order, 1-based.
+    Number(u32),
+}
+
+impl DisplayChoice {
+    /// Parse a settings value: `primary` or a 1-based display number.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.to_ascii_lowercase().as_str() {
+            "primary" | "main" => Some(Self::Primary),
+            _ => text
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|number| (1..=16).contains(number))
+                .map(Self::Number),
+        }
+    }
+
+    /// The 1-based part of the enumeration order, or `None` for primary.
+    #[must_use]
+    pub fn number(self) -> Option<u32> {
+        match self {
+            Self::Primary => None,
+            Self::Number(number) => Some(number),
+        }
+    }
+}
+
+impl std::fmt::Display for DisplayChoice {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Primary => write!(formatter, "primary"),
+            Self::Number(number) => write!(formatter, "{number}"),
+        }
+    }
 }
 
 impl Hotkey {
@@ -85,6 +130,8 @@ pub struct Settings {
     pub codec: Video,
     /// Where the recording frame comes from.
     pub capture_mode: CaptureMode,
+    /// Which display a Full capture records.
+    pub display: DisplayChoice,
     /// Start/stop-recording hotkey.
     pub hotkey: Hotkey,
     /// Save-a-still hotkey.
@@ -168,6 +215,7 @@ fn template(media: &Path) -> String {
             "\n",
             "[capture]\n",
             "mode = full\n",
+            "display = primary\n",
             "\n",
             "[recording]\n",
             "profile = uhd-4k60\n",
@@ -193,6 +241,8 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
     let photo = photo_raw.and_then(Hotkey::parse);
     let mode_raw = document.value("capture", "mode").and_then(Value::as_str);
     let mode = mode_raw.and_then(CaptureMode::parse);
+    let display_raw = document.value("capture", "display").and_then(Value::as_str);
+    let display = display_raw.and_then(DisplayChoice::parse);
     let profile_raw = document
         .value("recording", "profile")
         .and_then(Value::as_str);
@@ -209,6 +259,12 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
     if mode_raw.is_some() && mode.is_none() {
         problems.push(format!("invalid capture mode; using {}", CaptureMode::Full));
     }
+    if display_raw.is_some() && display.is_none() {
+        problems.push(format!(
+            "invalid capture display; using {}",
+            DisplayChoice::Primary
+        ));
+    }
     if profile_raw.is_some() && profile.is_none() {
         problems.push(format!("invalid profile; using {}", recording::DEFAULT.id));
     }
@@ -219,6 +275,7 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
         profile: profile.unwrap_or(recording::DEFAULT),
         codec: codec.unwrap_or(Video::DEFAULT),
         capture_mode: mode.unwrap_or(CaptureMode::Full),
+        display: display.unwrap_or(DisplayChoice::Primary),
         hotkey: hotkey.unwrap_or(Hotkey::Record),
         photo: photo.unwrap_or(Hotkey::Photo),
         autostart: document
@@ -251,7 +308,7 @@ fn engine_path(document: &Document) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CaptureMode, Document, Hotkey, default_document, read_document};
+    use super::{CaptureMode, DisplayChoice, Document, Hotkey, default_document, read_document};
 
     #[test]
     fn builtin_template_round_trips_through_defaults() {
@@ -261,6 +318,7 @@ mod tests {
         assert_eq!(settings.hotkey, Hotkey::Record);
         assert_eq!(settings.photo, Hotkey::Photo);
         assert_eq!(settings.capture_mode, CaptureMode::Full);
+        assert_eq!(settings.display, DisplayChoice::Primary);
         assert!(settings.autostart);
         assert!(!settings.cursor);
         assert!(settings.engine.is_none());
@@ -276,6 +334,19 @@ mod tests {
         assert_eq!(CaptureMode::parse("window"), Some(CaptureMode::Window));
         assert_eq!(CaptureMode::parse("full"), Some(CaptureMode::Full));
         assert_eq!(CaptureMode::parse("whatever"), None);
+    }
+
+    #[test]
+    fn display_choice_parses_primary_and_numbers() {
+        assert_eq!(
+            DisplayChoice::parse("PRIMARY"),
+            Some(DisplayChoice::Primary)
+        );
+        assert_eq!(DisplayChoice::parse("2"), Some(DisplayChoice::Number(2)));
+        assert_eq!(DisplayChoice::parse("17"), None);
+        assert_eq!(DisplayChoice::parse("one"), None);
+        assert_eq!(DisplayChoice::Number(3).number(), Some(3));
+        assert_eq!(DisplayChoice::Primary.number(), None);
     }
 
     #[test]
