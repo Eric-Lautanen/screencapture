@@ -7,6 +7,7 @@ mod cli;
 mod clock;
 mod config;
 mod doctor;
+mod dxgi;
 mod encoder;
 mod ffmpeg;
 mod hotkeys;

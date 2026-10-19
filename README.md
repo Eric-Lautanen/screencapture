@@ -51,6 +51,8 @@ src/cli.rs        argument parsing and dispatch
 src/app.rs        tray runtime wiring, recording/photo commands
 src/winapi.rs     shared Win32 declarations (windows, cursors, messages)
 src/capture.rs    GDI frame capture (top-down BGRA, cached DIB target)
+src/dxgi/         Desktop Duplication capture: COM ABI shapes, protocol,
+                  engine loads (factory > adapter > output > duplication)
 src/screen.rs     monitor + window geometry in physical pixels
 src/selector.rs   fullscreen drawn-rectangle capture selector (drag)
 src/clock.rs      UTC timestamp math for output file names
@@ -89,22 +91,27 @@ that asset and copying `bin/ffmpeg.exe` and `bin/ffprobe.exe`.
 
 ## Status
 
-Sessions 1 to 4 are done: settings persistence and capture profiles, the
+Sessions 1 to 4b are done: settings persistence and capture profiles, the
 bundled FFmpeg engine, diagnostics, the Windows tray (running the authored
 icon, menu, message loop, autostart sync, and single-instance guard),
-global hotkeys, and the recording pipeline — GDI `BitBlt` frames stream
-into FFmpeg for H.264/MP4 records and lossless PNG stills, driven by the
-tray menu, hotkeys, or `--record`/`--photo`. Region capture drags a
-rectangle on a fullscreen selector and window capture auto-detects the
-focused application's bounds (DWM extended frame bounds); both are one
-menu entry or `--mode` away. Finished recordings are verified with
-bundled `ffprobe`. A dedicated encoder module (`src/encoder.rs`) isolates
-x264 so a later codec swap (VP9/AV1/hardware) needs only edits there.
+global hotkeys, and the recording pipeline — frames stream into FFmpeg
+for H.264/MP4 records and lossless PNG stills, driven by the tray menu,
+hotkeys, or `--record`/`--photo`. Frame capture picks Desktop Duplication
+(COM built by hand in std Rust, `src/dxgi/`) when the plan is one whole
+unrotated output with no cursor drawing, and falls back to GDI `BitBlt`
+for regions, windows, and everything the compositor refuses, printing the
+reason. Region capture drags a rectangle on a fullscreen selector and
+window capture auto-detects the focused application's bounds (DWM
+extended frame bounds); both are one menu entry or `--mode` away.
+Finished recordings are verified with bundled `ffprobe`. A dedicated
+encoder module (`src/encoder.rs`) isolates x264 so a later codec swap
+(VP9/AV1/hardware) needs only edits there.
 
 Measured on the reference panel (1920x1200, 4K profile): full-screen
-capture sustains ~30 live fps because a 33 MB `BitBlt` + pipe write
-misses the 16 ms frame deadline — recordings' timestamps fall short of
-wall time accordingly. Window/region-sized captures hit the full
-profile rate (59.9 fps measured, durations dead-on). See `ROADMAP.md`
-for what remains: DXGI Desktop Duplication for true full-screen 4K60,
-16-bit stills, a logging ring buffer, and shipping installers.
+capture now tracks wall time through Desktop Duplication (250 frames /
+4.17 s at 60/1 in the reference run, where GDI alone sustained ~30 live
+fps because a 33 MB `BitBlt` + pipe write misses the 16 ms frame
+deadline). Window/region-sized captures hit the full profile rate
+(59.9 fps measured, durations dead-on). See `ROADMAP.md` for what
+remains: 16-bit stills, a logging ring buffer, duplication session
+recovery, and shipping installers.

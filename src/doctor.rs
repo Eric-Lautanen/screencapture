@@ -18,6 +18,7 @@ pub fn check(config: Option<&Path>) -> ExitCode {
     println!();
     healthy &= check_settings(config);
     healthy &= check_engine(config);
+    check_capture();
     println!();
     if healthy {
         println!("result: ok");
@@ -122,3 +123,17 @@ fn check_engine(config: Option<&Path>) -> bool {
 }
 
 const ENGINE_HINT: &str = "ffmpeg/ffmpeg";
+
+/// Informational capture-backends line: desktop duplication when the
+/// compositor cooperates, which is the fast 4K path. A miss is not an
+/// unhealthy install; the GDI fallback records everything, just slower.
+fn check_capture() {
+    match crate::dxgi::probe() {
+        Ok((width, height)) => {
+            println!("{OK_TAG}capture: desktop duplication ({width}x{height})");
+        }
+        Err(reason) => {
+            println!("        capture: GDI fallback only ({reason})");
+        }
+    }
+}
