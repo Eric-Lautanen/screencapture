@@ -12,7 +12,11 @@
 Unicode true
 ManifestDPIAware true
 
+; ROOT may be passed on the makensis command line (/DROOT=<abs path>);
+; default is the repository root (invoke makensis from the repo root).
+!ifndef ROOT
 !define ROOT "."
+!endif
 !define APPNAME "Screencapture"
 !define COMPANY "Eric"
 !define EXENAME "screencapture.exe"
@@ -23,7 +27,6 @@ ManifestDPIAware true
 
 Name "${APPNAME}"
 OutFile "${ROOT}\installer\screencapture-setup.exe"
-DefaultLangCode "en_US"
 InstallDir "$PROGRAMFILES64\${APPNAME}"
 InstallDirRegKey HKCU "Software\${APPNAME}" "InstallDir"
 RequestExecutionLevel admin

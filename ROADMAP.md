@@ -351,3 +351,32 @@ Plan of record, in build order. Every session ends with
 - [x] Gates: fmt, pedantic clippy `-D warnings` (native + both cross
   targets), 43 tests; live smoke wrote the two-line log correctly and
   `--check` reported it.
+
+## Session 10 - Installer verified (NSIS 3.13 portable)
+
+- [x] NSIS obtained without admin or the SourceForge UI: the portable
+  3.13 zip fetched from a direct mirror (`deac-riga.dl.sourceforge.net`,
+  direct mirror downloads dodge the JS mirror chooser; `?download=1`
+  and a plain UA matter), hash verified against scoop's extraction of
+  the upstream manifest (`db14f8af…`).
+- [x] Script fixes from the first real compile: `ROOT` became
+  overridable (`!ifndef` + `/DROOT=` on the command line — a
+  hard-define collides with `/DROOT`), and an invented
+  `DefaultLangCode` instruction (not real NSIS) removed; `MUI2` alone
+  owns the language table.
+- [x] First real build: `installer\screencapture-setup.exe` (~122 MB;
+  the engine block compresses ~330 MB to ~128 MB inside), compile log
+  clean, 4 install pages, uninstall section included, deterministic
+  on rebuild (datablock optimizer's only saving: 1.9 KB).
+- [x] Payload proven by the compiler: makensis fails the run on any
+  `File:` path it cannot open, so the clean build guarantees every
+  payload entry (exe, README, license docs, engine, probe,
+  `engine.sha256`) embedded. 7-Zip on this box had no NSIS support for
+  post-hoc listing; compiler-log validation suffices.
+- [x] `installer/README.md` updated with the working invocation
+  (`/DROOT=$PWD`), the verified version + hash, and the explicit note
+  that interactive/silent install + uninstall runs belong in GUI/CI
+  contexts (the script claims admin; this shell cannot elevate).
+- Deferred: the actual run/uninstall cycle (elevation + GUI needs a
+  session without automation); ArtifactsPublish-style CI once the repo
+  goes public per the earlier Actions plan.
