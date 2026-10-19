@@ -10,6 +10,7 @@ use crate::autostart;
 use crate::capture::{Region, Target};
 use crate::clock;
 use crate::config::Value;
+use crate::encoder::Video;
 use crate::ffmpeg;
 use crate::hotkeys;
 use crate::instance::{Acquire, acquire};
@@ -200,14 +201,33 @@ fn sane_region(region: Region) -> Region {
     }
 }
 
+/// The effective codec: hardware choices are probed up front (here, once
+/// per recording) so an unavailable accelerator demotes to x264 with a
+/// notice instead of failing frame by frame mid-flight.
+fn effective_codec(binary: &ffmpeg::Binary, loaded: &Loaded) -> Video {
+    let requested = loaded.settings.codec;
+    if requested == Video::X264 {
+        return requested;
+    }
+    if binary.supports_encoder(requested, &loaded.settings.profile) {
+        return requested;
+    }
+    eprintln!(
+        "warn  encoder: {} is not usable on this machine; recording with x264 instead",
+        requested.name()
+    );
+    Video::X264
+}
+
 fn start_recording(loaded: &Loaded, region: Region) -> io::Result<(Recorder, ffmpeg::Binary)> {
     let binary = engine(loaded)?;
+    let codec = effective_codec(&binary, loaded);
     let profile = loaded.settings.profile;
     let plan = Plan {
         origin: (region.x, region.y),
         size: (region.width, region.height),
         profile,
-        codec: loaded.settings.codec,
+        codec,
         cursor: loaded.settings.cursor,
         media_dir: loaded.settings.media_dir.clone(),
     };
@@ -410,11 +430,12 @@ fn demo_recording(
         CaptureMode::Window => screen::window_region(None),
     }?;
     let binary = engine(loaded)?;
+    let codec = effective_codec(&binary, loaded);
     let plan = Plan {
         origin: (region.x, region.y),
         size: (region.width, region.height),
         profile: loaded.settings.profile,
-        codec: loaded.settings.codec,
+        codec,
         cursor: loaded.settings.cursor,
         media_dir: loaded.settings.media_dir.clone(),
     };

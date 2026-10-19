@@ -293,3 +293,33 @@ Plan of record, in build order. Every session ends with
   `EnumDisplayDevices`) — geometry labels suffice until a multi-panel
   machine shows the need; mac multi-display enumeration still waits for
   its Mac-verified session.
+
+## Session 8 - Hardware codecs
+
+- [x] Encoder module upgrade (`src/encoder.rs`): `Video` gains AMF, QSV,
+  NVENC, and Windows Media Foundation h264 variants (parse/id/name per
+  variant; extension stays `mp4`). Hardware arg sets contain only
+  options verified against this engine's `-h encoder` pages
+  (AMF `-quality high_quality`; QSV `-look_ahead`; NVENC
+  `-preset p4 -tune hq`; MF defaults); rate control stays at vendor
+  defaults, vendor probing decides.
+- [x] Probe before record (`src/ffmpeg.rs`
+  `Binary::supports_encoder`): one short `testsrc2` synthetic encode
+  with the encoder's exact argument set (`-f null`); success proves the
+  accelerator is present, the driver loads, and every option parses.
+- [x] Fallback on start (`src/app.rs` `effective_codec`): hardware
+  codec + failed probe → x264 with a `warn` notice, at both recording
+  entry points (tray and `--record`/`--photo` pipeline), once per
+  recording start.
+- [x] Doctor: `--check` now lists all five encoders
+  (`encoder [cpu|hw]: <name> is ready|not usable`) and marks the
+  configured one; non-fatal (x264 fallback keeps recordings alive).
+- [x] Settings template documents the codec choices and the fallback
+  contract; round-trip test extended.
+- [x] Live smoke (AMD 780M reference box): doctor shows `x264/amf/mf`
+  ready and `qsv/nvenc` not usable; `codec = amf` config records a
+  verified MP4; `codec = nvenc` config prints the warn and records
+  via x264; parse round-trips unit-tested (40 tests).
+- Deferred in this space: HEVC hardware variants (driver coverage too
+  murky to blind-ship), quality-rate-control parity mapping per vendor
+  (needs a quality-comparison session with frames to look at).

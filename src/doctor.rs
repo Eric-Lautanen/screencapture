@@ -122,6 +122,33 @@ fn check_display_choice(choice: settings::DisplayChoice) {
     }
 }
 
+/// Report every encoder's usability, inside the engine block of
+/// `--check` (non-fatal: hardware misses keep x264). The configured
+/// codec is marked so the demotion in the settings file is discoverable.
+fn report_codecs(binary: &ffmpeg::Binary, loaded: &settings::Loaded) {
+    let mut variants = vec![crate::encoder::Video::X264];
+    variants.extend(crate::encoder::Video::hardware());
+    let profile = &loaded.settings.profile;
+    for variant in variants {
+        let usable = binary.supports_encoder(variant, profile);
+        let verdict = if usable {
+            "ready"
+        } else {
+            "not usable on this machine"
+        };
+        let marked = match (variant == loaded.settings.codec, usable) {
+            (true, true) => " (configured)",
+            (true, false) => " (configured; recordings use x264)",
+            (false, _) => "",
+        };
+        let kind = if variant.is_hardware() { "hw" } else { "cpu" };
+        println!(
+            "        encoder [{kind}]: {} is {verdict}{marked}",
+            variant.name()
+        );
+    }
+}
+
 fn check_engine(config: Option<&Path>) -> bool {
     let load = settings::load(config);
     if let Some(binary) = ffmpeg::discover(load.settings.engine.as_deref()) {
@@ -129,6 +156,7 @@ fn check_engine(config: Option<&Path>) -> bool {
             Ok(version) => {
                 println!("{OK_TAG}engine: {}", binary.path.display());
                 println!("        {version}");
+                report_codecs(&binary, &load);
                 check_engine_integrity(&binary)
             }
             Err(error) => {
