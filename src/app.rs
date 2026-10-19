@@ -321,34 +321,42 @@ fn report_frames(engine: &ffmpeg::Binary, path: &Path) {
 }
 
 fn photo(loaded: &Loaded) {
-    match take_photo(loaded, None) {
+    match take_photo(loaded, None, None) {
         Ok(path) => log::note("photo", &path.display().to_string()),
         Err(error) => log::note("error", &error.to_string()),
     }
 }
 
-fn take_photo(loaded: &Loaded, override_display: Option<u32>) -> io::Result<std::path::PathBuf> {
+fn take_photo(
+    loaded: &Loaded,
+    override_display: Option<u32>,
+    rect: Option<Region>,
+) -> io::Result<std::path::PathBuf> {
     let binary = engine(loaded)?;
     std::fs::create_dir_all(&loaded.settings.media_dir)?;
-    let display = match override_display
-        .map_or(loaded.settings.display, DisplayChoice::Number)
-        .number()
-    {
-        Some(number) => screen::display_at(number)?,
-        None => screen::primary()?,
-    };
-    let region = Region {
-        x: display.x,
-        y: display.y,
-        width: display.width,
-        height: display.height,
+    let region = if let Some(rect) = rect {
+        rect
+    } else {
+        let display = match override_display
+            .map_or(loaded.settings.display, DisplayChoice::Number)
+            .number()
+        {
+            Some(number) => screen::display_at(number)?,
+            None => screen::primary()?,
+        };
+        Region {
+            x: display.x,
+            y: display.y,
+            width: display.width,
+            height: display.height,
+        }
     };
     let target = Target::new(region, loaded.settings.cursor)?;
     let frame = target.frame()?;
     let path = photo_path(&loaded.settings.media_dir);
     let stream = Stream {
-        width: display.width,
-        height: display.height,
+        width: region.width,
+        height: region.height,
         fps: 1,
     };
     let mut feed = pipe::Feed::spawn(&binary, &pipe::still_args(stream, &path))?;

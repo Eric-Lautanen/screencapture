@@ -4,6 +4,7 @@ use std::io::{Write, stdout};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use crate::capture::Region;
 use crate::settings::CaptureMode;
 use crate::{app, doctor};
 
@@ -18,6 +19,7 @@ USAGE:
     screencapture --record S   record for S seconds, then exit
     screencapture --record S --mode full | region | window
     screencapture --display N  capture display N (1-based) in full mode
+    screencapture --rect X,Y,W,H  capture one rectangle (region records, photos)
     screencapture --photo      take one still photo, then exit
     screencapture --check      diagnose install path, settings, and engine
     screencapture --init       write the default settings file if missing
@@ -52,6 +54,9 @@ struct Invocation {
     mode: Option<CaptureMode>,
     /// 1-based display number for Full captures.
     display: Option<u32>,
+    /// Headless capture rectangle: region records and photos use it
+    /// verbatim, so any platform can run an unattended area capture.
+    rect: Option<Region>,
 }
 
 /// Parse `args` and dispatch; returns the process exit code.
@@ -72,6 +77,7 @@ fn parse(args: &[String]) -> Result<Invocation, String> {
         config: None,
         mode: None,
         display: None,
+        rect: None,
     };
     let mut items = args.iter().peekable();
     while let Some(arg) = items.next().map(String::as_str) {
@@ -100,6 +106,12 @@ fn parse(args: &[String]) -> Result<Invocation, String> {
                     _ => return Err(format!("--display expects a number 1-16, not '{value}'")),
                 }
             }
+            "--rect" => {
+                let Some(value) = items.next().map(String::as_str) else {
+                    return Err("--rect requires X,Y,W,H".into());
+                };
+                invocation.rect = Some(parse_rect(value)?);
+            }
             "--check" => invocation.command = Command::Check,
             "--init" => invocation.command = Command::InitConfig,
             "--photo" => invocation.command = Command::Photo,
@@ -115,7 +127,68 @@ fn parse(args: &[String]) -> Result<Invocation, String> {
             bare => return Err(format!("unknown argument '{bare}'")),
         }
     }
+    if invocation.rect.is_some() {
+        if invocation.display.is_some() {
+            return Err("--display and --rect capture different ways; pick one".into());
+        }
+        if invocation.mode.is_some() && invocation.mode != Some(CaptureMode::Region) {
+            return Err("--rect is a region capture; drop --mode full/--mode window".into());
+        }
+    }
     Ok(invocation)
+}
+
+/// One desktop-coordinate capture rectangle from `X,Y,W,H`, edges inside
+/// the sane engine range.
+fn parse_rect(value: &str) -> Result<Region, String> {
+    const MAX_EDGE: u32 = 7680;
+    let parts: Vec<&str> = value.split(',').collect();
+    if parts.len() != 4 {
+        return Err(format!("--rect expects X,Y,W,H, not '{value}'"));
+    }
+    let numbers: Vec<i64> = parts
+        .iter()
+        .map(|part| part.trim().parse::<i64>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| format!("--rect expects four integers, not '{value}'"))?;
+    let [x, y, width, height] = numbers.try_into().expect("exactly four integers");
+    if width < 1 || width > i64::from(MAX_EDGE) || height < 1 || height > i64::from(MAX_EDGE) {
+        return Err(format!("--rect edges must be 1..{MAX_EDGE} pixels"));
+    }
+    let into = |value: i64, what: &str| {
+        i32::try_from(value).map_err(|_| format!("--rect {what} out of range"))
+    };
+    let width = u32::try_from(width).map_err(|_| "--rect edges out of range".to_string())?;
+    let height = u32::try_from(height).map_err(|_| "--rect edges out of range".to_string())?;
+    Ok(Region {
+        x: into(x, "x")?,
+        y: into(y, "y")?,
+        width,
+        height,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_rect;
+
+    #[test]
+    fn rect_parses_fields_and_spacing() {
+        let region = parse_rect("100, 200, 1280 , 720 ").expect("rectparses");
+        assert_eq!(region.x, 100);
+        assert_eq!(region.y, 200);
+        assert_eq!(region.width, 1280);
+        assert_eq!(region.height, 720);
+    }
+
+    #[test]
+    fn rect_rejects_bad_edge_counts() {
+        assert!(parse_rect("1,2,3").is_err());
+        assert!(parse_rect("1,2,3,4,5").is_err());
+        assert!(parse_rect("a,2,3,4").is_err());
+        assert!(parse_rect("1,2,0,4").is_err());
+        assert!(parse_rect("1,2,7681,4").is_err());
+    }
 }
 
 fn dispatch(invocation: &Invocation) -> ExitCode {
@@ -135,8 +208,13 @@ fn dispatch(invocation: &Invocation) -> ExitCode {
             seconds,
             invocation.mode,
             invocation.display,
+            invocation.rect,
         ),
-        Command::Photo => app::demo::photo_demo(invocation.config.as_deref(), invocation.display),
+        Command::Photo => app::demo::photo_demo(
+            invocation.config.as_deref(),
+            invocation.display,
+            invocation.rect,
+        ),
         Command::Run => app::run(invocation.config.as_deref()),
     }
 }

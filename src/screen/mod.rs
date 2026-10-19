@@ -1,7 +1,9 @@
 //! Display, monitor, and window geometry. Each platform module reports
 //! its displays in physical-pixel semantics (Windows enumerate monitors,
 //! macOS answers the compositor's main display, Linux the default screen
-//! root), and window picking stays a Windows capability for now.
+//! root), and window picking answers per platform: Windows DWM bounds,
+//! Linux the X client rectangle under the cursor, macOS later (needs
+//! the CoreGraphics window-list session).
 
 use std::io;
 
@@ -68,21 +70,24 @@ pub fn displays() -> Vec<Display> {
     return linux::list();
 }
 
-/// A window's capture region: DWM extended frame bounds (no borders or
-/// shadows), clamped to the visible desktop. `preferred` names a window
-/// the caller had focused just before a tray menu opened; otherwise the
-/// window under the cursor is used.
+/// A window's capture region: (Windows) DWM extended frame bounds, no
+/// borders or shadows, clamped to the visible desktop; (Linux) the
+/// client rectangle of the window under the cursor. `preferred` names a
+/// window the caller had focused just before a tray menu opened;
+/// otherwise the window under the cursor is used.
 ///
 /// # Errors
 /// Returns an error when no window bounds can be resolved.
 pub fn window_region(preferred: Option<usize>) -> Result<Region, io::Error> {
     #[cfg(windows)]
     return win::window_region(preferred);
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    return linux::window_region(preferred);
+    #[cfg(target_os = "macos")]
     {
         let _ = preferred;
         Err(io::Error::other(
-            "window picking lands with the tray on this platform",
+            "macOS window picking lands with the mac capture session",
         ))
     }
 }

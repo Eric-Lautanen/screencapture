@@ -380,3 +380,48 @@ Plan of record, in build order. Every session ends with
 - Deferred: the actual run/uninstall cycle (elevation + GUI needs a
   session without automation); ArtifactsPublish-style CI once the repo
   goes public per the earlier Actions plan.
+
+## Session 11 - Headless rect capture + Linux window picking (done)
+
+- [x] `--rect X,Y,W,H` (CLI, any platform): one desktop rectangle
+  drives both `record_demo` (region semantics, no selector) and
+  `photo_demo` (replaces the whole-display pick). Parse validates four
+  integers, edges inside the sane engine range (1..7680), and rejects
+  conflicts (`--display` versus `--rect`; non-region `--mode` with
+  `--rect`); tests cover field parsing and rejects. Live-smoked:
+  `--record 1 --rect 0,0,640,480` and `--record 1 --rect
+  100,100,800,450` both produced correct 4K-target h264 streams per
+  ffprobe (one initial run emitted an empty 261-byte mp4 shell that
+  two clean reproductions could not reproduce; logged as an
+  environment flake, not a pipeline defect).
+- [x] Linux window capture (blind-verified): `screen::window_region`
+  now answers on Linux with the window-under-the-cursor's client
+  rectangle in root coordinates, clamped to the root extent;
+  cursor-on-desktop captures the whole root, mirroring the Windows
+  desktop-handle answer. `preferred` stays a Windows notion.
+- [x] `src/xlib.rs` grew `XQueryPointer`, `XGetGeometry`, and
+  `XTranslateCoordinates` surfaces (out-parameter bundles verbatim to
+  the ABI), signatures re-checked against the cached upstream
+  `Xlib.h`; the X connection moved into an owned `Session` with a
+  `Drop` close.
+- [x] `--rect` photo semantics share the tray photo pipeline
+  (`take_photo` gained an optional rect; tray callers pass `None`).
+- [x] Gates: fmt, pedantic clippy `-D warnings` on native plus both
+  cross targets, 45 tests.
+- Deferred: live Linux rect/window runs (no X server here), macOS
+  window/region capture (needs the CoreGraphics window-list session
+  with `CFArray`/`CFDictionary` surfaces — next parity item).
+
+## Deferred backlog
+
+- numbered display names via `EnumDisplayDevices`; mac multi-display
+  enumeration (per-display picking answers the main display only);
+- macOS window/region capture (CF window list + `CGWindowListCreateImage`
+  on a window id); live hotkey re-registration; multi-monitor cursor
+  anchoring; monochrome/XOR cursor verification;
+- non-Windows tray (`~StatusNotifierItem`); XFixes cursor on Linux;
+  Wayland support;
+- live mac/linux CI hardening from user reports; the vendor/health
+  LGPL-switch option documented in `docs/FFMPEG-LICENSE.md`;
+- 16-bit/HDR stills; HEVC hardware variants (needs an eyeball session);
+  installer run/uninstall cycle (needs elevation + GUI, or CI).
