@@ -4,7 +4,7 @@ use std::io::{Write, stdout};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::doctor;
+use crate::{app, doctor};
 
 /// Display identity used by version output and diagnostics.
 pub const IDENTITY: &str = concat!("screencapture ", env!("CARGO_PKG_VERSION"));
@@ -90,9 +90,6 @@ fn dispatch(invocation: &Invocation) -> ExitCode {
         }
         Command::Check => doctor::check(invocation.config.as_deref()),
         Command::InitConfig => doctor::init_config(invocation.config.as_deref()),
-        Command::Run => {
-            eprintln!("note: the interactive tray runtime is not built yet; running diagnostics.");
-            doctor::check(invocation.config.as_deref())
-        }
+        Command::Run => app::run(invocation.config.as_deref()),
     }
 }

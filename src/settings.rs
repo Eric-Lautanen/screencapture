@@ -5,6 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use crate::config::{Document, Value};
+use crate::encoder::Video;
 use crate::paths;
 use crate::recording::{self, Profile};
 
@@ -46,6 +47,8 @@ impl std::fmt::Display for Hotkey {
 pub struct Settings {
     /// Motion-capture profile.
     pub profile: Profile,
+    /// Video codec used for recordings.
+    pub codec: Video,
     /// Start/stop-recording hotkey.
     pub hotkey: Hotkey,
     /// Save-a-still hotkey.
@@ -129,6 +132,7 @@ fn template(media: &Path) -> String {
             "\n",
             "[recording]\n",
             "profile = uhd-4k60\n",
+            "codec = x264\n",
             "cursor = false\n",
             "autostart = true\n",
             "\n",
@@ -152,6 +156,8 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
         .value("recording", "profile")
         .and_then(Value::as_str);
     let profile = profile_raw.and_then(Profile::by_id);
+    let codec_raw = document.value("recording", "codec").and_then(Value::as_str);
+    let codec = codec_raw.and_then(Video::parse);
     let mut problems = Vec::new();
     if hotkey_raw.is_some() && hotkey.is_none() {
         problems.push(format!("invalid record hotkey; using {}", Hotkey::Record));
@@ -162,8 +168,12 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
     if profile_raw.is_some() && profile.is_none() {
         problems.push(format!("invalid profile; using {}", recording::DEFAULT.id));
     }
+    if codec_raw.is_some() && codec.is_none() {
+        problems.push(format!("invalid codec; using {}", Video::DEFAULT.id()));
+    }
     let settings = Settings {
         profile: profile.unwrap_or(recording::DEFAULT),
+        codec: codec.unwrap_or(Video::DEFAULT),
         hotkey: hotkey.unwrap_or(Hotkey::Record),
         photo: photo.unwrap_or(Hotkey::Photo),
         autostart: document

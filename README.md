@@ -34,12 +34,18 @@ screencapture --help       print help
 Cargo.toml        crate manifest (edition 2024, warnings denied)
 src/main.rs       entry point
 src/cli.rs        argument parsing and dispatch
+src/app.rs        tray runtime wiring (instance guard, settings sync)
 src/config.rs     std-only settings file format (ordered key = value)
 src/settings.rs   typed settings view with safe defaults
 src/recording.rs  capture profiles (1080p30 ... 4K60, 4K120)
+src/encoder.rs    codec selection (x264 today; VP9/AV1/hardware tomorrow)
 src/ffmpeg.rs     locate and drive the bundled FFmpeg engine
+src/autostart.rs  login autostart (Windows registry; stubs elsewhere)
+src/instance.rs   single-instance guard
 src/doctor.rs     `--check` / `--init` diagnostics
 src/paths.rs      cross-platform filesystem locations
+src/tray/mod.rs   tray API (events shared by all platforms)
+src/tray/win/     Win32 FFI, message loop, tray icon, popup menus
 vendor/ffmpeg/    the bundled engine (gitignored binaries, licensed GPLv3+)
 target/           build output (gitignored)
 ```
@@ -58,7 +64,9 @@ that asset and copying `bin/ffmpeg.exe` and `bin/ffprobe.exe`.
 
 ## Status
 
-Day 1 foundation is in place: settings persistence, capture profiles,
-engine discovery, and diagnostics all work with zero warnings under
-pedantic clippy. See `ROADMAP.md` for the tray, capture pipeline, and
-installer work.
+Sessions 1 and 2 are done: settings persistence and capture profiles, the
+bundled FFmpeg engine, diagnostics, the Windows tray (icon, menu, message
+loop, autostart registry sync, single-instance guard), and a dedicated
+encoder module (`src/encoder.rs`) that isolates x264 so a later codec swap
+(VP9/AV1/hardware) needs only edits there. See `ROADMAP.md` for what
+remains.

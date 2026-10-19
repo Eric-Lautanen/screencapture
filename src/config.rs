@@ -131,7 +131,8 @@ impl Document {
     pub fn from_text(text: &str) -> Result<Self, ParseError> {
         let mut document = Self::default();
         let mut section: Option<String> = None;
-        for (offset, line) in text.lines().enumerate() {
+        // Files may carry a UTF-8 byte-order mark (Windows text editor).
+        for (offset, line) in text.trim_start_matches('\u{feff}').lines().enumerate() {
             let number = offset + 1;
             let content = strip_comment(line).trim();
             if content.is_empty() {
@@ -185,6 +186,12 @@ impl Document {
             .iter()
             .find(|candidate| candidate.name.as_str() == section)?
             .get(key)
+    }
+
+    /// Insert or replace a value, keeping section and key order stable.
+    pub fn set(&mut self, section: &str, key: &str, value: Value) {
+        let slot = section_mut(self, section);
+        slot.set(key, value);
     }
 
     /// Render back to file-order text.
@@ -273,6 +280,16 @@ mod tests {
             Some(&Value::Str("two words".to_owned()))
         );
         assert!(document.value("missing", "x").is_none());
+    }
+
+    #[test]
+    fn set_inserts_then_replaces_in_place() {
+        let mut document = Document::from_text("[a]\none = 1\n").expect("must parse");
+        document.set("a", "two", Value::Int(2));
+        document.set("a", "one", Value::Int(10));
+        assert_eq!(document.value("a", "one"), Some(&Value::Int(10)));
+        assert_eq!(document.value("a", "two"), Some(&Value::Int(2)));
+        assert!(document.to_text().starts_with("[a]\n"));
     }
 
     #[test]

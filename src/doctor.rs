@@ -3,6 +3,7 @@
 use std::path::Path;
 use std::process::ExitCode;
 
+use crate::autostart;
 use crate::cli::IDENTITY;
 use crate::ffmpeg;
 use crate::settings;
@@ -84,6 +85,7 @@ fn check_settings(config: Option<&Path>) -> bool {
         settings.autostart, settings.cursor
     );
     println!("        media:   {}", settings.media_dir.display());
+    println!("        codec:   {}", settings.codec.name());
     println!(
         "        engine:  {}",
         settings
@@ -91,6 +93,7 @@ fn check_settings(config: Option<&Path>) -> bool {
             .as_ref()
             .map_or_else(|| "bundled".to_owned(), |path| path.display().to_string())
     );
+    println!("        autostart os-level: {}", autostart::registered());
     loaded.problems.is_empty()
 }
 

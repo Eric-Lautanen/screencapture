@@ -13,22 +13,25 @@ Plan of record, in build order. Every session ends with
 - [x] FFmpeg engine discovery (configured > bundled > developer > PATH).
 - [x] `--check` / `--init` diagnostics passed end to end.
 
-## Session 2 - Windows tray core
+## Session 2 - Windows tray core (done)
 
-- [ ] `ffi/` module with documented Win32 declarations (edition-2024
-  `unsafe extern`), tray via `Shell_NotifyIconW`, hidden message window,
-  message loop, resource-file icon (generated from project icon sources).
-- [ ] Tray menu: record, photo, profile, settings, quit.
-- [ ] Autostart toggle: `HKCU\...\Run` plus settings flag.
-- [ ] Single instance guard.
+- [x] `src/tray/win/` with documented Win32 declarations (edition-2024
+  `unsafe extern`): tray icon via `Shell_NotifyIconW`, hidden message
+  window, message loop, popup menus through `user32`/`shell32`. (Icon
+  resource generation arrives with the installer session.)
+- [x] Tray menu: record, photo, profile submenu, autostart toggle, exit.
+- [x] Autostart toggle: `HKCU\...\Run` synced from the settings flag.
+- [x] Single-instance guard (`Local\` mutex) verified by smoke test.
+- [x] Unix-safe build: non-Windows tray paths return a clear error.
 
 ## Session 3 - Recording pipeline
 
 - [ ] Frame capture via GDI/DXGI into a BGRA pipe (`-f rawvideo -pix_fmt
-  bgra`); ffmpeg encodes to H.264 (x264) with the profile's quality level.
+  bgra`); ffmpeg encodes with the settings codec (x264 via `src/encoder.rs`,
+  swappable to VP9/AV1/hardware later without touching callers).
 - [ ] Region capture: drawn rectangle overlay, or auto-detect via visible
   window bounds (per-monitor DPI aware).
-- [ ] Still photos: single frame to a maximally high-quality `image format`
+- [ ] Still photos: single frame to a maximally high-quality format
       (PNG first; lossless 16-bit pipeline investigation).
 - [ ] Framerates/resolutions from settings; on-the-fly reconfiguration from
   the tray menu.
