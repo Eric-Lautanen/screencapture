@@ -14,6 +14,8 @@ screencapture - 4K screen recorder and still-image capture
 
 USAGE:
     screencapture              start the tray application
+    screencapture --record S   record the screen for S seconds, then exit
+    screencapture --photo      take one still photo, then exit
     screencapture --check      diagnose install path, settings, and engine
     screencapture --init       write the default settings file if missing
     screencapture --config P   use a specific settings file
@@ -32,6 +34,10 @@ enum Command {
     Check,
     /// Ensure the default settings file exists.
     InitConfig,
+    /// Record for a fixed number of seconds, then exit.
+    Record { seconds: u32 },
+    /// Take one still photo, then exit.
+    Photo,
     /// Start the tray application.
     Run,
 }
@@ -70,6 +76,14 @@ fn parse(args: &[String]) -> Result<Invocation, String> {
             }
             "--check" => invocation.command = Command::Check,
             "--init" => invocation.command = Command::InitConfig,
+            "--photo" => invocation.command = Command::Photo,
+            "--record" => {
+                let raw = items.next().map_or("3", String::as_str);
+                match raw.parse::<u32>() {
+                    Ok(seconds) if seconds > 0 => invocation.command = Command::Record { seconds },
+                    _ => return Err("--record requires a duration in seconds (1-3600)".into()),
+                }
+            }
             "--version" | "-V" => invocation.command = Command::Version,
             "--help" | "-h" => invocation.command = Command::Help,
             bare => return Err(format!("unknown argument '{bare}'")),
@@ -90,6 +104,8 @@ fn dispatch(invocation: &Invocation) -> ExitCode {
         }
         Command::Check => doctor::check(invocation.config.as_deref()),
         Command::InitConfig => doctor::init_config(invocation.config.as_deref()),
+        Command::Record { seconds } => app::record_demo(invocation.config.as_deref(), seconds),
+        Command::Photo => app::photo_demo(invocation.config.as_deref()),
         Command::Run => app::run(invocation.config.as_deref()),
     }
 }
