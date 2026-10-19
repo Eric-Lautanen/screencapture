@@ -6,7 +6,8 @@ description = "Professional 4K screen recorder and still-image capture with a bu
 publish = false
 
 [profile.release]
-lto = "thin"
+lto = "fat"
+codegen-units = 1
 strip = true
 
 [lints.rust]

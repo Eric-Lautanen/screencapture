@@ -234,11 +234,35 @@ Plan of record, in build order. Every session ends with
 
 ## Session 6 - Ship it (Windows half next, testable here)
 
-- [ ] FFmpeg licensing decision for the *baked-in* engine: GPL build keeps
-  x264 for free use; LGPL build (no x264; VP9/AV1/HW) if the app ships
-  proprietary. Vendor layout supports either.
-- [ ] Installers: NSIS/WiX on Windows with icon/theming, DMG/pkl on macOS,
-      `.deb`/`.rpm` on Linux.
-- [ ] Auto-update checks for the engine binary; sha256 match recorded in
-      `vendor/ffmpeg/engine.sha256`.
-- [ ] Release profile (LTO, strip) and installer smoke tests.
+- [x] FFmpeg licensing decision, recorded in `docs/FFMPEG-LICENSE.md`:
+  the engine stays the BtbN **win64-gpl** build (keeps x264/x265 for the
+  4K profiles); the app remains a separate work (mere aggregation), so
+  distribution obligations cover the engine only — ship its license
+  text and the upstream source URL. The `vendor/` layout still supports
+  an LGPL switch if a future distribution plan demands it (drop x264,
+  re-record, re-verify encoders).
+- [x] Release profile: `lto = "fat"`, `codegen-units = 1`, `strip = true`
+  (release exe ~0.5 MB on the reference box).
+- [x] Engine integrity: pure-std SHA-256 (`src/sha256.rs`, streaming
+  hasher, FIPS 180-4 vectors incl. the million-`a` digest verified
+  against .NET) under `vendor/ffmpeg/engine.sha256`; `--check` records
+  on first run and fails loudly on mismatch with a recovery hint
+  (delete the record after a deliberate engine update).
+- [x] Icon resource baked into the exe: std-only `build.rs` runs
+  `windres` on `assets/icon.rc` (resource id 1 = DEFAULT_ICON) and links
+  the COFF object into the binary; missing or failing `windres` prints a
+  notice and keeps the build green. Verified live: the exe exports its
+  32x32 icon.
+- [x] Windows installer script: NSIS/MUI2 `installer/nsis/screencapture.nsi`
+  (app + engine + licenses + `engine.sha256`, Start-Menu shortcuts,
+  uninstall entries, estimated size, optional launch-on-finish).
+  `installer/README.md` explains prerequisites and the build command.
+  NSIS is not on this machine — the script is the plan of record;
+  smoke tests run wherever NSIS lands (this box later, or CI).
+- [ ] DMG (macOS), `.deb`/`.rpm` (Linux) packaging: deferred until the
+  mac/Linux runtimes are exercised by CI/user reports (blind packaging
+  now would be dead weight to re-verify later).
+- Verified this session: fmt + pedantic clippy green on all three
+  targets (`-D warnings`), 37 tests green (the four SHA-256 vectors
+  included), release build embeds the icon, `--check` records then
+  verifies `engine.sha256` (`f9c4d64e..`).

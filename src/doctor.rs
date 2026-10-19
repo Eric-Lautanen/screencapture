@@ -105,7 +105,7 @@ fn check_engine(config: Option<&Path>) -> bool {
             Ok(version) => {
                 println!("{OK_TAG}engine: {}", binary.path.display());
                 println!("        {version}");
-                true
+                check_engine_integrity(&binary)
             }
             Err(error) => {
                 println!(
@@ -123,6 +123,66 @@ fn check_engine(config: Option<&Path>) -> bool {
 }
 
 const ENGINE_HINT: &str = "ffmpeg/ffmpeg";
+
+/// Engine integrity: the binary's SHA-256 against its neighboring
+/// `engine.sha256` record. A missing record self-records (first run after
+/// a fresh unpack); a mismatch fails loudly and points at the recovery
+/// path, so a silently swapped engine never ships.
+fn check_engine_integrity(binary: &ffmpeg::Binary) -> bool {
+    let Some(actual) = file_digest(&binary.path) else {
+        println!(
+            "{FAIL_TAG}engine integrity: cannot hash {}",
+            binary.path.display()
+        );
+        return false;
+    };
+    let actual_hex = crate::sha256::hex(&actual);
+    let record = binary.path.with_file_name("engine.sha256");
+    match std::fs::read_to_string(&record) {
+        Ok(recorded) => {
+            let expected = recorded.trim();
+            if expected.len() >= 64 && expected[..64] == actual_hex {
+                println!("{OK_TAG}engine integrity: {}..", &actual_hex[..8]);
+                true
+            } else {
+                println!(
+                    "{FAIL_TAG}engine integrity: {} does not match its record",
+                    binary.path.display()
+                );
+                println!(
+                    "        hint: delete {} after a deliberate engine update to re-record it",
+                    record.display()
+                );
+                false
+            }
+        }
+        Err(_) => match std::fs::write(&record, format!("{actual_hex}\n")) {
+            Ok(()) => {
+                println!("{OK_TAG}engine integrity: recorded (first run)");
+                true
+            }
+            Err(error) => {
+                println!("{FAIL_TAG}engine integrity: cannot write the record ({error})");
+                false
+            }
+        },
+    }
+}
+
+/// Hash a file in 1 MiB chunks; `None` on any read/IO failure.
+fn file_digest(path: &Path) -> Option<[u8; 32]> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = crate::sha256::Sha256::new();
+    let mut buffer = vec![0_u8; 1 << 20];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => return Some(hasher.finish()),
+            Ok(read) => hasher.update(&buffer[..read]),
+            Err(_) => return None,
+        }
+    }
+}
 
 /// Informational capture-backends line: desktop duplication when the
 /// compositor cooperates, which is the fast 4K path. A miss is not an
