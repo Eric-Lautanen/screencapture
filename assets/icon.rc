@@ -1,0 +1,4 @@
+// Windows resource script: the authored tray icon baked into the exe so
+// desktop shortcuts, Explorer, and task dialogs show it with no sidecar
+// file. Resource id 1 is the DEFAULT_ICON slot Windows picks up.
+1 ICON "icon.ico"

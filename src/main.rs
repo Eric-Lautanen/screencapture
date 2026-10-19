@@ -25,6 +25,7 @@ mod screen;
 #[cfg(windows)]
 mod selector;
 mod settings;
+mod sha256;
 mod tray;
 #[cfg(windows)]
 mod winapi;
