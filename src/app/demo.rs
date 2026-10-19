@@ -7,6 +7,7 @@ use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use crate::capture::Region;
 use crate::recorder::{Plan, Recorder};
 use crate::screen;
 use crate::settings::{self, CaptureMode};
@@ -18,19 +19,21 @@ const STEP: Duration = Duration::from_millis(1);
 /// Record for `seconds` from the command line; doubles as the headless
 /// smoke test for the whole capture pipeline (no tray, no single-instance).
 /// `mode` overrides the configured capture mode when given; `display`
-/// (1-based) overrides which display a Full capture records.
+/// (1-based) overrides which display a Full capture records; `rect`
+/// captures that exact rectangle instead of any interactive picking.
 pub fn record_demo(
     config: Option<&Path>,
     seconds: u32,
     mode: Option<CaptureMode>,
     display: Option<u32>,
+    rect: Option<Region>,
 ) -> ExitCode {
     let loaded = settings::load(config);
     for problem in &loaded.problems {
         eprintln!("warn  settings: {problem}");
     }
     let mode = mode.unwrap_or(loaded.settings.capture_mode);
-    match demo_recording(&loaded, mode, seconds, display) {
+    match demo_recording(&loaded, mode, seconds, display, rect) {
         Ok(Some(path)) => {
             println!("recorded: {}", path.display());
             ExitCode::SUCCESS
@@ -56,14 +59,19 @@ fn demo_recording(
     mode: CaptureMode,
     seconds: u32,
     display: Option<u32>,
+    rect: Option<Region>,
 ) -> io::Result<Option<std::path::PathBuf>> {
-    let region = match mode {
-        CaptureMode::Full => super::full_region(loaded, display),
-        CaptureMode::Region => match super::draw_region()? {
-            Some(region) => Ok(region),
-            None => return Ok(None),
-        },
-        CaptureMode::Window => screen::window_region(None),
+    let region = if let Some(rect) = rect {
+        Ok(rect)
+    } else {
+        match mode {
+            CaptureMode::Full => super::full_region(loaded, display),
+            CaptureMode::Region => match super::draw_region()? {
+                Some(region) => Ok(region),
+                None => return Ok(None),
+            },
+            CaptureMode::Window => screen::window_region(None),
+        }
     }?;
     let binary = super::engine(loaded)?;
     let codec = super::effective_codec(&binary, loaded);
@@ -114,13 +122,14 @@ fn demo_recording(
 }
 
 /// Take one still photo from the command line; smoke-tests the photo path.
-/// `display` (1-based) overrides which display is photographed.
-pub fn photo_demo(config: Option<&Path>, display: Option<u32>) -> ExitCode {
+/// `display` (1-based) overrides which display is photographed; `rect`
+/// captures that exact rectangle instead of a whole display.
+pub fn photo_demo(config: Option<&Path>, display: Option<u32>, rect: Option<Region>) -> ExitCode {
     let loaded = settings::load(config);
     for problem in &loaded.problems {
         eprintln!("warn  settings: {problem}");
     }
-    match super::take_photo(&loaded, display) {
+    match super::take_photo(&loaded, display, rect) {
         Ok(path) => {
             println!("photo: {}", path.display());
             ExitCode::SUCCESS

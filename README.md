@@ -24,6 +24,8 @@ screencapture              start the tray application
 screencapture --record S   record for S seconds, then exit
 screencapture --record S --mode full | region | window
 screencapture --display N  capture display N (1-based) in full mode
+screencapture --rect X,Y,W,H  capture one rectangle, headless (region
+                           records and photos; any platform)
 screencapture --photo      take one still photo, then exit
 screencapture --check      diagnose install path, settings, and engine
 screencapture --init       write the default settings file if missing
@@ -32,13 +34,16 @@ screencapture --version    print the version
 screencapture --help       print help
 ```
 
-`--mode region` opens the fullscreen drag selector; `--mode window`
-records the application window under the cursor. The tray menu has
-matching entries ("Record region...", "Record window") plus
-"Record display" (shown when more than one display is attached);
-the tray's "Record" and the record hotkey honor the settings file's
-`[capture] mode` (full/region/window) and `[capture] display`
-(primary or a 1-based number).
+`--mode region` opens the fullscreen drag selector (Windows overlay);
+`--mode window` records the application window under the cursor
+(Windows DWM frame bounds, Linux the X client rectangle). Headless
+area picking needs no interaction: `--rect X,Y,W,H` captures that exact
+desktop rectangle for both a region recording and a photo, on every
+platform. The tray menu has matching entries ("Record region...",
+"Record window") plus "Record display" (shown when more than one
+display is attached); the tray's "Record" and the record hotkey honor
+the settings file's `[capture] mode` (full/region/window) and
+`[capture] display` (primary or a 1-based number).
 
 `--record` and `--photo` run the same capture pipelines as the tray, so
 they double as headless smoke tests; every completed recording is
@@ -114,6 +119,22 @@ that asset and copying `bin/ffmpeg.exe` and `bin/ffprobe.exe`; then run
 Licensing: `docs/FFMPEG-LICENSE.md`.
 
 ## Status
+
+Session 11 widened headless capture to any platform and rectangle:
+`--rect X,Y,W,H` feeds the exact desktop rectangle to both `--record`
+(a region recording, no interactive selector) and `--photo` (replacing
+the whole-display pick), with parse validation for edges, ranges, and
+conflicts (`--display`/non-region `--mode` reject a `--rect`). Verified
+live on Windows: rect recordings and rect photos at off-display-origin
+bounds produce correct streams (the earlier full-mode and display
+semantics untouched; `-D warnings`, fmt, and 45 tests green across the
+native and both cross targets). Linux window capture also landed
+blind-verified: `screen::window_region` now answers the X client
+rectangle under the cursor (cursor-on-desktop captures the whole root),
+built on new `XQueryPointer`/`XGetGeometry`/`XTranslateCoordinates`
+surfaces in `src/xlib.rs` with signatures checked against the upstream
+`Xlib.h`; the live X run and macOS equivalent stay deferred to sessions
+with the corresponding hardware.
 
 Session 9 split `src/app.rs` (it had grown to 478 of the 500-line cap):
 the headless `--record`/`--photo` paths moved to `src/app/demo.rs`, and a

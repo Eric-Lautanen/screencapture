@@ -78,6 +78,46 @@ type RootWindowProc = unsafe extern "C" fn(Display) -> Window;
 type GetImageProc =
     unsafe extern "C" fn(Display, Window, i32, i32, u32, u32, c_ulong, i32) -> Image;
 
+/// `XQueryPointer` (`Xlib.h`): mouse pose plus the child window under it.
+type QueryPointerProc = unsafe extern "C" fn(
+    Display,
+    Window,
+    *mut Window,
+    *mut Window,
+    *mut c_int,
+    *mut c_int,
+    *mut c_int,
+    *mut c_int,
+    *mut u32,
+) -> c_int;
+
+/// `XGetGeometry` (`Xlib.h`): a drawable's own rectangle, all out-
+/// parameters spelled out pointer-for-pointer as the ABI demands.
+type GetGeometryProc = unsafe extern "C" fn(
+    Display,
+    Window,
+    *mut Window,
+    *mut c_int,
+    *mut c_int,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+    *mut u32,
+) -> c_int;
+
+/// `XTranslateCoordinates` (`Xlib.h`): one point moved into another
+/// window's coordinate space.
+type TranslateProc = unsafe extern "C" fn(
+    Display,
+    Window,
+    Window,
+    i32,
+    i32,
+    *mut c_int,
+    *mut c_int,
+    *mut Window,
+) -> c_int;
+
 /// One `XGetImage` parameter bundle, collapsed so the api call stays
 /// under the argument budget.
 #[derive(Clone, Copy)]
@@ -114,6 +154,12 @@ pub struct Api {
     pub root_window: RootWindowProc,
     /// `XGetImage`.
     pub get_image: GetImageProc,
+    /// `XQueryPointer`.
+    pub query_pointer: QueryPointerProc,
+    /// `XGetGeometry`.
+    pub get_geometry: GetGeometryProc,
+    /// `XTranslateCoordinates`.
+    pub translate_coordinates: TranslateProc,
 }
 
 impl Api {
@@ -137,6 +183,9 @@ impl Api {
             display_height: symbol(&library, b"XDisplayHeight\0")?,
             root_window: symbol(&library, b"XDefaultRootWindow\0")?,
             get_image: symbol(&library, b"XGetImage\0")?,
+            query_pointer: symbol(&library, b"XQueryPointer\0")?,
+            get_geometry: symbol(&library, b"XGetGeometry\0")?,
+            translate_coordinates: symbol(&library, b"XTranslateCoordinates\0")?,
         };
         // The handle stays loaded for the process lifetime, exactly like
         // the Windows dxgi loader; closing it would invalidate the
@@ -200,6 +249,106 @@ impl Api {
         let height = unsafe { (self.display_height)(display, screen) };
         (pixels(width), pixels(height))
     }
+
+    /// The mouse pose in root coordinates plus the child window under it.
+    /// `None` when the report says the pointer is not on this screen.
+    pub fn pointer(&self, display: Display, root: Window) -> Option<Pointer> {
+        let mut parent: Window = 0;
+        let mut child: Window = 0;
+        let mut root_x: c_int = 0;
+        let mut root_y: c_int = 0;
+        let mut win_x: c_int = 0;
+        let mut win_y: c_int = 0;
+        let mut mask: u32 = 0;
+        // SAFETY: every out-pointer targets one of the locals above.
+        let on_screen = unsafe {
+            (self.query_pointer)(
+                display,
+                root,
+                &raw mut parent,
+                &raw mut child,
+                &raw mut root_x,
+                &raw mut root_y,
+                &raw mut win_x,
+                &raw mut win_y,
+                &raw mut mask,
+            )
+        };
+        (on_screen != 0).then_some(Pointer { child })
+    }
+
+    /// One drawable's rectangle: x/y relative to the parent window
+    /// (usually the root), plus border, in [`Geometry`].
+    pub fn geometry(&self, display: Display, drawable: Window) -> Option<Geometry> {
+        let mut parent: Window = 0;
+        let mut x: c_int = 0;
+        let mut y: c_int = 0;
+        let mut width: u32 = 0;
+        let mut height: u32 = 0;
+        let mut border: u32 = 0;
+        let mut depth: u32 = 0;
+        // SAFETY: every out-pointer targets one of the locals above.
+        let status = unsafe {
+            (self.get_geometry)(
+                display,
+                drawable,
+                &raw mut parent,
+                &raw mut x,
+                &raw mut y,
+                &raw mut width,
+                &raw mut height,
+                &raw mut border,
+                &raw mut depth,
+            )
+        };
+        (status != 0).then_some(Geometry { width, height })
+    }
+
+    /// One point moved from `source`'s coordinate space into
+    /// `target`'s (both drawable ids on this connection).
+    pub fn translate(
+        &self,
+        display: Display,
+        source: Window,
+        target: Window,
+        x: i32,
+        y: i32,
+    ) -> Option<(i32, i32)> {
+        let mut out_x: c_int = 0;
+        let mut out_y: c_int = 0;
+        let mut child: Window = 0;
+        // SAFETY: the out-pointers target the locals above.
+        let status = unsafe {
+            (self.translate_coordinates)(
+                display,
+                source,
+                target,
+                x,
+                y,
+                &raw mut out_x,
+                &raw mut out_y,
+                &raw mut child,
+            )
+        };
+        (status != 0).then_some((out_x, out_y))
+    }
+}
+
+/// One `XQueryPointer` answer: the child window under the pointer
+/// (`0` names the root/desktop itself).
+pub struct Pointer {
+    /// Window under the pointer, or `0` for the desktop.
+    pub child: Window,
+}
+
+/// One `XGetGeometry` answer: a drawable's client rectangle size in
+/// pixels (frame border and parent-relative origin stay with the call
+/// site's out-parameters when they matter).
+pub struct Geometry {
+    /// Client width in pixels.
+    pub width: u32,
+    /// Client height in pixels.
+    pub height: u32,
 }
 
 /// A non-negative screen metric as a pixel count.
