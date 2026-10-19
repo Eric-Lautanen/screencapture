@@ -87,6 +87,7 @@ fn check_settings(config: Option<&Path>) -> bool {
     );
     println!("        media:   {}", settings.media_dir.display());
     println!("        codec:   {}", settings.codec.name());
+    check_display_choice(settings.display);
     println!(
         "        engine:  {}",
         settings
@@ -96,6 +97,29 @@ fn check_settings(config: Option<&Path>) -> bool {
     );
     println!("        autostart os-level: {}", autostart::registered());
     loaded.problems.is_empty()
+}
+
+/// Report attached displays and whether the configured Full-mode display
+/// exists right now. A stale choice is informational (records still fall
+/// back with an honest error when it is requested and missing).
+fn check_display_choice(choice: settings::DisplayChoice) {
+    let attached = crate::screen::displays();
+    match choice.number() {
+        Some(number) => {
+            let count = u32::try_from(attached.len()).unwrap_or(u32::MAX);
+            let exists = (1..=count).contains(&number);
+            if exists {
+                println!("        display: {number} of {} attached", attached.len());
+            } else {
+                println!(
+                    "        display: {number} is not attached ({} connected); \
+                     recording it answers with an error",
+                    attached.len()
+                );
+            }
+        }
+        None => println!("        display: primary ({} attached)", attached.len()),
+    }
 }
 
 fn check_engine(config: Option<&Path>) -> bool {

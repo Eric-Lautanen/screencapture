@@ -266,3 +266,30 @@ Plan of record, in build order. Every session ends with
   targets (`-D warnings`), 37 tests green (the four SHA-256 vectors
   included), release build embeds the icon, `--check` records then
   verifies `engine.sha256` (`f9c4d64e..`).
+
+## Session 7 - Per-display picking
+
+- [x] Settings: `[capture] display` (`primary` default, or a 1-based
+  number 1-16; anything else falls back with a problem line), typed as
+  `DisplayChoice` (`src/settings.rs`, unit-tested).
+- [x] CLI: `--display N` overrides the choice for `--record` and
+  `--photo` full captures; parse errors are honest (1-16).
+- [x] Tray: a "Record display" submenu appears when more than one
+  display is attached (labels carry size; non-zero origins marked
+  `+x,+y`), ids in a reserved dynamic range `[ID_DISPLAY_BASE,
+  ID_EXIT)` that cannot collide with profiles; one-refresh menu built
+  per open, like profiles.
+- [x] App plumbing: `screen::display_at(n)` (error message names the
+  number and its absence), full/record/photo paths resolve choice →
+  region; cross-platform intact (mac answers the main display list,
+  Linux the X11 root).
+- [x] Doctor: `--check` prints `display: primary (N attached)` or the
+  numbered choice with an "is not attached" note when stale.
+- [x] Live smoke (single-panel reference box): `--display 2` answers
+  `error: display 2 is not attached`; `--record 2 --display 1` lands a
+  probe-verified file; `--check` prints the display line; `--photo`
+  unaffected; flag parse errors guarded.
+- Deferred from this space: numbered display names (via
+  `EnumDisplayDevices`) — geometry labels suffice until a multi-panel
+  machine shows the need; mac multi-display enumeration still waits for
+  its Mac-verified session.

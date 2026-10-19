@@ -23,6 +23,7 @@ engine.
 screencapture              start the tray application
 screencapture --record S   record for S seconds, then exit
 screencapture --record S --mode full | region | window
+screencapture --display N  capture display N (1-based) in full mode
 screencapture --photo      take one still photo, then exit
 screencapture --check      diagnose install path, settings, and engine
 screencapture --init       write the default settings file if missing
@@ -33,9 +34,11 @@ screencapture --help       print help
 
 `--mode region` opens the fullscreen drag selector; `--mode window`
 records the application window under the cursor. The tray menu has
-matching entries ("Record region...", "Record window"); the tray's
-"Record" and the record hotkey honor the settings file's
-`[capture] mode` (full/region/window).
+matching entries ("Record region...", "Record window") plus
+"Record display" (shown when more than one display is attached);
+the tray's "Record" and the record hotkey honor the settings file's
+`[capture] mode` (full/region/window) and `[capture] display`
+(primary or a 1-based number).
 
 `--record` and `--photo` run the same capture pipelines as the tray, so
 they double as headless smoke tests; every completed recording is
@@ -107,6 +110,17 @@ that asset and copying `bin/ffmpeg.exe` and `bin/ffprobe.exe`; then run
 Licensing: `docs/FFMPEG-LICENSE.md`.
 
 ## Status
+
+Session 7 added per-display picking (the top deferred item): full captures
+record the display chosen by `[capture] display` (`primary` default, or a
+1-based number), `--display N` overrides it on the command line for both
+`--record` and `--photo`, and the tray grows a "Record display" submenu when
+more than one panel is attached (labels carry size and non-zero origins).
+Duplication needs no changes — it already matched regions to outputs, so a
+secondary display records through its own output; a stale choice answers
+with "display N is not attached" and the doctor lists the display state.
+Live-smoke verified on the single-panel reference box (missing-display
+error, `--display 1` record, doctor line, flag parse errors).
 
 Session 6 packaged the Windows half: release profile (fat LTO, one codegen
 unit, stripped ~0.5 MB exe), the tray icon resource baked into the exe via a

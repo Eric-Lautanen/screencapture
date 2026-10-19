@@ -6,9 +6,11 @@ use super::ffi::{
     TrackPopupMenu, WM_NULL, Wparam,
 };
 use super::{
-    ID_AUTOSTART, ID_EXIT, ID_PHOTO, ID_PROFILE_BASE, ID_RECORD, ID_RECORD_REGION, ID_RECORD_WINDOW,
+    ID_AUTOSTART, ID_DISPLAY_BASE, ID_EXIT, ID_PHOTO, ID_PROFILE_BASE, ID_RECORD, ID_RECORD_REGION,
+    ID_RECORD_WINDOW,
 };
 use crate::recording::Profile;
+use crate::screen;
 
 /// Build the popup menu at the cursor and let the window collect the picks.
 ///
@@ -25,6 +27,7 @@ pub(super) unsafe fn show(window: Hwnd) {
     add_text(menu, ID_RECORD, "Record");
     add_text(menu, ID_RECORD_REGION, "Record region...");
     add_text(menu, ID_RECORD_WINDOW, "Record window");
+    add_displays(menu);
     add_text(menu, ID_PHOTO, "Photo");
     add_text(menu, ID_AUTOSTART, "Autostart");
     add_separator(menu);
@@ -66,6 +69,43 @@ fn add_text(menu: Hmenu, id: usize, text: &str) {
 fn add_separator(menu: Hmenu) {
     // SAFETY: menu is a live handle; no string data for a separator.
     let _ = unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null()) };
+}
+
+/// A "Displays" submenu when several are attached, so recording the
+/// non-primary panel is one click; single-panel machines skip it (the
+/// list is enumerated fresh at every menu open, reflecting plug events).
+fn add_displays(menu: Hmenu) {
+    let attached = screen::displays();
+    if attached.len() < 2 {
+        return;
+    }
+    let submenu = {
+        // SAFETY: parameterless Win32 menu creation.
+        unsafe { CreatePopupMenu() }
+    };
+    if submenu.is_null() {
+        return;
+    }
+    for (offset, display) in attached.iter().enumerate() {
+        let label = display_menu_label(display, offset);
+        add_text(submenu, ID_DISPLAY_BASE + offset, &label);
+    }
+    let label = super::wide("Record display");
+    // SAFETY: `submenu` stays alive until `menu` (its parent) is destroyed.
+    let _ = unsafe { AppendMenuW(menu, MF_POPUP, submenu as Wparam, label.as_ptr()) };
+}
+
+/// "Display 2 — 2560x1440 (+3840,0)"; the origin marks non-primary panels.
+fn display_menu_label(display: &screen::Display, offset: usize) -> String {
+    let numbered = offset + 1;
+    if display.x == 0 && display.y == 0 {
+        format!("Display {numbered} — {}x{}", display.width, display.height)
+    } else {
+        format!(
+            "Display {numbered} — {}x{} (+{},+{})",
+            display.width, display.height, display.x, display.y
+        )
+    }
 }
 
 fn add_profiles(menu: Hmenu) {

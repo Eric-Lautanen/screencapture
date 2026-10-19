@@ -42,6 +42,10 @@ const ID_AUTOSTART: Wparam = 3;
 const ID_RECORD_REGION: Wparam = 4;
 const ID_RECORD_WINDOW: Wparam = 5;
 const ID_PROFILE_BASE: Wparam = 100;
+/// Per-display entries live in the half-open range from
+/// `ID_DISPLAY_BASE` up to `ID_EXIT`; the gap keeps future static ids out
+/// of the dynamic range.
+const ID_DISPLAY_BASE: Wparam = 120;
 const ID_EXIT: Wparam = 200;
 
 /// Frame-timer id for `WM_TIMER`.
@@ -275,11 +279,18 @@ fn dispatch_command(command: Wparam, window: Hwnd) -> Lresult {
             let _ = unsafe { DestroyWindow(window) };
             return 0;
         }
-        offset if offset >= ID_PROFILE_BASE => {
+        offset if (ID_PROFILE_BASE..ID_DISPLAY_BASE).contains(&offset) => {
             let index = offset - ID_PROFILE_BASE;
             if let Some(profile) = Profile::PROFILES.get(index) {
                 emit(Event::ProfileSelected(*profile));
             }
+        }
+        offset if (ID_DISPLAY_BASE..ID_EXIT).contains(&offset) => {
+            // Menu ids are built from a fresh enumeration each open, so a
+            // click implies the display was attached after the menu built.
+            emit(Event::RecordDisplay(
+                u32::try_from(offset - ID_DISPLAY_BASE + 1).unwrap_or(1),
+            ));
         }
         _ => {}
     }

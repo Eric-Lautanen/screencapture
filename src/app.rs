@@ -19,7 +19,7 @@ use crate::recording::Profile;
 use crate::screen;
 #[cfg(windows)]
 use crate::selector;
-use crate::settings::{self, CaptureMode, Loaded};
+use crate::settings::{self, CaptureMode, DisplayChoice, Loaded};
 use crate::tray::{self, Event};
 
 /// Mutable application state the tray handler drives.
@@ -82,6 +82,11 @@ fn handle(loaded: &mut Loaded, runtime: &mut Runtime, event: Event) {
             runtime,
             screen::window_region(tray::previous_foreground()),
         ),
+        Event::RecordDisplay(number) => begin(
+            loaded,
+            runtime,
+            screen::display_at(number).map(display_region),
+        ),
         Event::Photo => photo(loaded),
         Event::Tick => tick(runtime),
         Event::ToggleAutostart => toggle_autostart(loaded),
@@ -96,7 +101,7 @@ fn record(loaded: &mut Loaded, runtime: &mut Runtime) {
         return;
     }
     match loaded.settings.capture_mode {
-        CaptureMode::Full => begin(loaded, runtime, full_region()),
+        CaptureMode::Full => begin(loaded, runtime, full_region(loaded, None)),
         CaptureMode::Region => select_and_record(loaded, runtime),
         CaptureMode::Window => begin(
             loaded,
@@ -138,15 +143,25 @@ fn draw_region() -> io::Result<Option<Region>> {
     ))
 }
 
-/// The primary display as a capture region.
-fn full_region() -> io::Result<Region> {
-    let display = screen::primary()?;
-    Ok(Region {
+/// A display's full rect as a desktop-coordinate capture region.
+fn display_region(display: screen::Display) -> Region {
+    Region {
         x: display.x,
         y: display.y,
         width: display.width,
         height: display.height,
-    })
+    }
+}
+
+/// The configured display as a capture region (Full mode), with the
+/// command line able to override the choice.
+fn full_region(loaded: &Loaded, override_display: Option<u32>) -> io::Result<Region> {
+    let which = override_display.map_or(loaded.settings.display, DisplayChoice::Number);
+    match which.number() {
+        Some(number) => screen::display_at(number),
+        None => screen::primary(),
+    }
+    .map(display_region)
 }
 
 /// Begin encoding `region`, replacing any recording already running.
@@ -253,16 +268,22 @@ fn report_frames(runtime: &mut Runtime, path: &Path) {
 }
 
 fn photo(loaded: &Loaded) {
-    match take_photo(loaded) {
+    match take_photo(loaded, None) {
         Ok(path) => eprintln!("photo: {}", path.display()),
         Err(error) => eprintln!("error: {error}"),
     }
 }
 
-fn take_photo(loaded: &Loaded) -> io::Result<std::path::PathBuf> {
+fn take_photo(loaded: &Loaded, override_display: Option<u32>) -> io::Result<std::path::PathBuf> {
     let binary = engine(loaded)?;
     std::fs::create_dir_all(&loaded.settings.media_dir)?;
-    let display = screen::primary()?;
+    let display = match override_display
+        .map_or(loaded.settings.display, DisplayChoice::Number)
+        .number()
+    {
+        Some(number) => screen::display_at(number)?,
+        None => screen::primary()?,
+    };
     let region = Region {
         x: display.x,
         y: display.y,
@@ -343,14 +364,20 @@ fn sync_autostart(loaded: &mut Loaded) -> Result<(), std::io::Error> {
 
 /// Record for `seconds` from the command line; doubles as the headless
 /// smoke test for the whole capture pipeline (no tray, no single-instance).
-/// `mode` overrides the configured capture mode when given.
-pub fn record_demo(config: Option<&Path>, seconds: u32, mode: Option<CaptureMode>) -> ExitCode {
+/// `mode` overrides the configured capture mode when given; `display`
+/// (1-based) overrides which display a Full capture records.
+pub fn record_demo(
+    config: Option<&Path>,
+    seconds: u32,
+    mode: Option<CaptureMode>,
+    display: Option<u32>,
+) -> ExitCode {
     let loaded = settings::load(config);
     for problem in &loaded.problems {
         eprintln!("warn  settings: {problem}");
     }
     let mode = mode.unwrap_or(loaded.settings.capture_mode);
-    match demo_recording(&loaded, mode, seconds) {
+    match demo_recording(&loaded, mode, seconds, display) {
         Ok(Some(path)) => {
             println!("recorded: {}", path.display());
             ExitCode::SUCCESS
@@ -372,9 +399,10 @@ fn demo_recording(
     loaded: &Loaded,
     mode: CaptureMode,
     seconds: u32,
+    display: Option<u32>,
 ) -> io::Result<Option<std::path::PathBuf>> {
     let region = match mode {
-        CaptureMode::Full => full_region(),
+        CaptureMode::Full => full_region(loaded, display),
         CaptureMode::Region => match draw_region()? {
             Some(region) => Ok(region),
             None => return Ok(None),
@@ -410,12 +438,13 @@ fn demo_recording(
 const STEP: Duration = Duration::from_millis(1);
 
 /// Take one still photo from the command line; smoke-tests the photo path.
-pub fn photo_demo(config: Option<&Path>) -> ExitCode {
+/// `display` (1-based) overrides which display is photographed.
+pub fn photo_demo(config: Option<&Path>, display: Option<u32>) -> ExitCode {
     let loaded = settings::load(config);
     for problem in &loaded.problems {
         eprintln!("warn  settings: {problem}");
     }
-    match take_photo(&loaded) {
+    match take_photo(&loaded, display) {
         Ok(path) => {
             println!("photo: {}", path.display());
             ExitCode::SUCCESS
