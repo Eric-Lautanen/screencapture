@@ -70,7 +70,9 @@ The signing workflow waits up to one hour for each request.
 ## Cutting a signed release
 
 1. Bump `Cargo.toml`, `Cargo.lock`, `assets/icon.rc`, and the NSIS version
-   together, then merge the version change to `main`.
+   together, then merge the version change to `main`. `tests/version.rs`
+   fails when the package, exe resource, and installer versions disagree, so
+   the ordinary test run catches a missed file.
 2. Create and push an annotated tag whose version matches `Cargo.toml`:
 
    ```powershell
