@@ -118,3 +118,46 @@ jobs:
               throw "installer product version [$($setup.VersionInfo.ProductVersion)] does not match $version"
           }
           Write-Host "built $($setup.Name): $($setup.Length) bytes, version $version"
+
+      - name: Install and uninstall without elevation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Join-Path $PWD 'installer/screencapture-setup.exe'
+          if (-not (Select-String -LiteralPath $setup -Pattern 'requestedExecutionLevel level="asInvoker"' -SimpleMatch -Quiet)) {
+              throw 'the setup does not request asInvoker; it would prompt for administrator rights'
+          }
+          $version = (Select-String -LiteralPath Cargo.toml -Pattern '^version = "(.+)"$').Matches[0].Groups[1].Value
+          # A per-user install lives outside Program Files and asks for no
+          # elevation, so the whole round trip has to work as this account.
+          $install = Join-Path $env:RUNNER_TEMP 'screencapture-install'
+          if ($install -match '\s') { throw "the temporary install path must not contain spaces: $install" }
+          if (Test-Path -LiteralPath $install) { Remove-Item -LiteralPath $install -Recurse -Force }
+          $process = Start-Process -FilePath $setup -ArgumentList '/S', "/D=$install" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "the silent install exited $($process.ExitCode)" }
+          foreach ($file in @('screencapture.exe', 'uninstall.exe', 'ffmpeg/ffmpeg.exe', 'ffmpeg/engine.sha256', 'docs/FFMPEG-LICENSE.md')) {
+              $path = Join-Path $install $file
+              if (-not (Test-Path -LiteralPath $path)) { throw "the install is missing $file" }
+          }
+          $installed = (Get-Item -LiteralPath (Join-Path $install 'screencapture.exe')).VersionInfo
+          if ($installed.ProductVersion -ne $version) { throw "the installed exe is version [$($installed.ProductVersion)], expected $version" }
+          $entry = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Screencapture'
+          $registered = Get-ItemProperty -LiteralPath $entry -ErrorAction SilentlyContinue
+          if ($null -eq $registered) { throw 'the install wrote no per-user uninstall entry' }
+          if ($registered.DisplayVersion -ne $version) { throw "the uninstall entry records [$($registered.DisplayVersion)], expected $version" }
+          if (Test-Path 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\Screencapture') {
+              throw 'the setup wrote an all-users uninstall entry; it must stay per-user'
+          }
+          $shortcuts = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Screencapture'
+          if (-not (Test-Path -LiteralPath (Join-Path $shortcuts 'Screencapture.lnk'))) { throw 'the install wrote no Start Menu shortcut' }
+          $uninstaller = Start-Process -FilePath (Join-Path $install 'uninstall.exe') -ArgumentList '/S' -Wait -PassThru
+          if ($uninstaller.ExitCode -ne 0) { throw "the silent uninstall exited $($uninstaller.ExitCode)" }
+          # The silent uninstaller finishes its deletes on a detached process,
+          # so poll briefly instead of assuming it is done when the start returns.
+          $deadline = (Get-Date).AddSeconds(60)
+          while ((Test-Path -LiteralPath $install) -and ((Get-Date) -lt $deadline)) { Start-Sleep -Milliseconds 500 }
+          if (Test-Path -LiteralPath $install) { throw 'the uninstall left the install directory behind' }
+          if (Test-Path -LiteralPath $entry) { throw 'the uninstall left the registry entry behind' }
+          if (Test-Path -LiteralPath $shortcuts) { throw 'the uninstall left the Start Menu folder behind' }
+          Remove-Item -LiteralPath 'HKCU:\Software\Screencapture' -Recurse -Force -ErrorAction SilentlyContinue
+          Write-Host "per-user install and uninstall round trip ok at $install (version $version)"
