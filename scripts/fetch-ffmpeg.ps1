@@ -157,14 +157,15 @@ if (-not [Environment]::Is64BitOperatingSystem) {
 }
 
 $Destination = [System.IO.Path]::GetFullPath($Destination)
+# Only the executables are an engine. A fresh checkout already carries the
+# pinned license text and integrity record, and those must not look installed.
 $targets = @(
     (Join-Path $Destination 'ffmpeg.exe'),
-    (Join-Path $Destination 'ffprobe.exe'),
-    (Join-Path $Destination 'ffmpeg.LICENSE.txt')
+    (Join-Path $Destination 'ffprobe.exe')
 )
 $present = @($targets | Where-Object { Test-Path -LiteralPath $_ })
 if ($present.Count -gt 0 -and -not $Force) {
-    throw "The engine is already present at $Destination. Pass -Force to replace it (close screencapture first)."
+    throw "An engine is already installed at $Destination. Pass -Force to replace it (close screencapture first)."
 }
 
 Write-Step "Preparing $Destination"

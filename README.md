@@ -256,6 +256,27 @@ the compositor's window list into a BGRA context; Linux reads X11 root images.
 A lost duplication session is rebuilt mid-recording while the recording holds
 its last frame.
 
+## Code signing policy
+
+Windows release binaries are Authenticode-signed with a certificate issued to
+SignPath Foundation.
+
+Free code signing provided by SignPath.io, certificate by SignPath Foundation.
+
+- Authors and committers: Eric Lautanen ([@Eric-Lautanen](https://github.com/Eric-Lautanen))
+- Reviewers: Eric Lautanen
+- Approvers: Eric Lautanen
+
+Every signing request is manually approved before a release is published. The
+unsigned `v0.1.1` release predates this policy.
+
+This program will not transfer any information to other networked systems
+unless specifically requested by the user or the person installing or operating
+it.
+
+See [docs/SIGNING.md](docs/SIGNING.md) for the SignPath setup, release flow,
+and signature-verification steps.
+
 ## Development
 
 The gates are the contract:

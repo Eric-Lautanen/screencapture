@@ -38,8 +38,10 @@ Verified on this machine with NSIS 3.13 (portable): compile clean,
 output `installer\screencapture-setup.exe` (~122 MB; the engine block
 compresses ~330 MB to ~128 MB). Full interactive install/uninstall
 runs need a GUI session and an elevation prompt; silent runs claim
-admin (`RequestExecutionLevel admin`), so they belong in CI (`Actions`)
-once repo packaging lands there.
+admin (`RequestExecutionLevel admin`), so they still need a desktop
+session. CI compiles the script on every push and checks the built
+setup's product version, so a broken or stale script fails long before
+a release tag.
 
 ## Notes
 
@@ -47,3 +49,5 @@ once repo packaging lands there.
 - Setup and the uninstaller use `assets/icon.ico`; the installed exe carries
   the same multi-size icon as a resource.
 - `EstimatedSize` is computed at install time with `${GetSize}`.
+- Signed releases use the tag-triggered workflow and SignPath setup in
+  `docs/SIGNING.md`.

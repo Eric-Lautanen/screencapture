@@ -12,10 +12,14 @@ fn main() {
     println!("cargo:rerun-if-changed=assets/icon.rc");
     println!("cargo:rerun-if-changed=assets/icon.ico");
     println!("cargo:rerun-if-changed=assets/app.manifest");
+    println!("cargo:rerun-if-env-changed=WINDRES");
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let script = manifest.join("assets/icon.rc");
     let output = PathBuf::from(env::var("OUT_DIR").unwrap()).join("icon.coff.o");
-    let baked = Command::new("windres")
+    // `WINDRES` lets a build point at a resource compiler that is not named
+    // `windres` and is not first on PATH (CI installs a prefixed MinGW one).
+    let windres = env::var_os("WINDRES").unwrap_or_else(|| "windres".into());
+    let baked = Command::new(&windres)
         .arg("-O")
         .arg("coff")
         .arg("--input")
