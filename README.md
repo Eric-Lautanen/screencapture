@@ -256,27 +256,21 @@ the compositor's window list into a BGRA context; Linux reads X11 root images.
 A lost duplication session is rebuilt mid-recording while the recording holds
 its last frame.
 
-## Code signing policy
+## Releases
 
-Windows release binaries are Authenticode-signed with a certificate issued to
-SignPath Foundation.
+Windows release binaries are unsigned, so SmartScreen may ask for
+confirmation. Every tag is built from the public source by the
+[`Release`](.github/workflows/release.yml) workflow on a GitHub-hosted
+Windows runner, and each release ships `SHA256SUMS.txt` so a download can
+be checked:
 
-Free code signing provided by SignPath.io, certificate by SignPath Foundation.
+```sh
+sha256sum -c SHA256SUMS.txt              # Git Bash, macOS, Linux
+Get-FileHash -Algorithm SHA256 .\screencapture-setup.exe   # PowerShell
+```
 
-- Authors and committers: Eric Lautanen ([@Eric-Lautanen](https://github.com/Eric-Lautanen))
-- Reviewers: Eric Lautanen
-- Approvers: Eric Lautanen
-
-Every signing request is manually approved before a release is published. The
-`v0.1.1` and `v0.1.2` releases are unsigned; signing applies from the first
-release after onboarding completes.
-
-This program will not transfer any information to other networked systems
-unless specifically requested by the user or the person installing or operating
-it.
-
-See [docs/SIGNING.md](docs/SIGNING.md) for the SignPath setup, release flow,
-and signature-verification steps.
+`screencapture --check` verifies the bundled engine against
+`vendor/ffmpeg/engine.sha256`.
 
 ## Development
 
