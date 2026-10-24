@@ -1,16 +1,22 @@
 //! Tray menu construction and presentation, fresh on each open.
 
 use super::ffi::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, Hmenu, Hwnd, MF_POPUP, MF_SEPARATOR,
-    MF_STRING, Point, PostMessageW, SetForegroundWindow, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON,
-    TrackPopupMenu, WM_NULL, Wparam,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, Hmenu, Hwnd, MF_CHECKED, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, Point, PostMessageW, SetForegroundWindow, TPM_BOTTOMALIGN,
+    TPM_RIGHTBUTTON, TrackPopupMenu, WM_NULL, Wparam,
 };
 use super::{
-    ID_AUTOSTART, ID_DISPLAY_BASE, ID_EXIT, ID_PHOTO, ID_PROFILE_BASE, ID_RECORD, ID_RECORD_REGION,
-    ID_RECORD_WINDOW,
+    ID_CHIMES, ID_DISPLAY_BASE, ID_EXIT, ID_PHOTO, ID_PROFILE_BASE, ID_RECORD, ID_SETTINGS,
 };
 use crate::recording::Profile;
 use crate::screen;
+
+/// Profiles and per-display entries share the `WM_COMMAND` id space; the
+/// profile range must never reach the display range.
+const _: () = assert!(
+    Profile::PROFILES.len() <= ID_DISPLAY_BASE - ID_PROFILE_BASE,
+    "too many video profiles for the tray menu id range"
+);
 
 /// Build the popup menu at the cursor and let the window collect the picks.
 ///
@@ -25,11 +31,15 @@ pub(super) unsafe fn show(window: Hwnd) {
         return;
     }
     add_text(menu, ID_RECORD, "Record");
-    add_text(menu, ID_RECORD_REGION, "Record region...");
-    add_text(menu, ID_RECORD_WINDOW, "Record window");
-    add_displays(menu);
     add_text(menu, ID_PHOTO, "Photo");
-    add_text(menu, ID_AUTOSTART, "Autostart");
+    add_checkable(
+        menu,
+        ID_CHIMES,
+        "Mute capture chimes",
+        mute_checked(super::chimes_enabled()),
+    );
+    add_text(menu, ID_SETTINGS, "Settings...");
+    add_displays(menu);
     add_separator(menu);
     add_profiles(menu);
     add_separator(menu);
@@ -64,6 +74,24 @@ fn add_text(menu: Hmenu, id: usize, text: &str) {
     let label = super::wide(text);
     // SAFETY: menu is a live handle; `label` outlives the call.
     let _ = unsafe { AppendMenuW(menu, MF_STRING, id, label.as_ptr()) };
+}
+
+/// One text entry with a check mark; the caller supplies the state.
+fn add_checkable(menu: Hmenu, id: usize, text: &str, checked: bool) {
+    let label = super::wide(text);
+    // SAFETY: menu is a live handle; `label` outlives the call.
+    let _ = unsafe { AppendMenuW(menu, check_flags(checked), id, label.as_ptr()) };
+}
+
+/// The mute entry reads checked while chimes are off, so the check mark
+/// always describes the muted state the entry toggles.
+fn mute_checked(enabled: bool) -> bool {
+    !enabled
+}
+
+/// `MF_STRING` plus the check bit when the entry is on.
+fn check_flags(checked: bool) -> u32 {
+    MF_STRING | if checked { MF_CHECKED } else { 0 }
 }
 
 fn add_separator(menu: Hmenu) {
@@ -122,4 +150,17 @@ fn add_profiles(menu: Hmenu) {
     let label = super::wide("Profile");
     // SAFETY: `submenu` stays alive until `menu` (its parent) is destroyed.
     let _ = unsafe { AppendMenuW(menu, MF_POPUP, submenu as Wparam, label.as_ptr()) };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MF_CHECKED, check_flags, mute_checked};
+
+    #[test]
+    fn the_mute_entry_checks_only_while_chimes_are_off() {
+        assert!(mute_checked(false), "muted shows the check");
+        assert!(!mute_checked(true), "audible stays unchecked");
+        assert_eq!(check_flags(false) & MF_CHECKED, 0);
+        assert_eq!(check_flags(true) & MF_CHECKED, MF_CHECKED);
+    }
 }
