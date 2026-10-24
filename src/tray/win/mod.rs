@@ -202,19 +202,24 @@ fn register_hotkeys(window: Hwnd) {
         let registered =
             unsafe { RegisterHotKey(window, binding.id, binding.modifiers, binding.key) };
         if registered == 0 {
-            eprintln!(
-                "warn  hotkey id {} registration failed (already in use?)",
-                binding.id
+            // The ring log is the only record that survives the tray: a
+            // detached process has no console to print to.
+            crate::log::note(
+                "warn",
+                &format!(
+                    "the {} hotkey did not register; another app already owns it",
+                    binding.role.label()
+                ),
             );
-            notify_hotkey_taken();
+            notify_hotkey_taken(binding.role);
         }
     }
 }
 
 /// Say in the tray that a saved hotkey could not be registered. The log
 /// alone is invisible to a tray-only user; the balloon is the only sign
-/// that a combo needs changing.
-fn notify_hotkey_taken() {
+/// that a combo needs changing, so it names the action that lost one.
+fn notify_hotkey_taken(role: crate::hotkeys::Role) {
     let Some(window) = WINDOW.with_borrow(|slot| *slot) else {
         return;
     };
@@ -224,7 +229,10 @@ fn notify_hotkey_taken() {
     fill_text(&mut data.info_title, "Hotkey unavailable");
     fill_text(
         &mut data.info,
-        "A configured hotkey is already used by another app. Open Settings to choose another.",
+        &format!(
+            "The {} hotkey is already used by another app. Open Settings to choose another.",
+            role.label()
+        ),
     );
     // SAFETY: `data` is a local initialized struct bound to the live icon.
     let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &raw mut data) };

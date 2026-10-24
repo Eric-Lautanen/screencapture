@@ -25,20 +25,34 @@ pub(super) fn take_photo(loaded: &Loaded, region: Region) -> io::Result<Photo> {
     // can add their latency. Its own thread keeps the capture path walking.
     let sound = crate::sound::capture_chime(loaded.settings.chimes);
     let binary = engine(loaded)?;
-    std::fs::create_dir_all(&loaded.settings.image_dir)?;
+    let folder = &loaded.settings.image_dir;
+    // Each step names itself: a bare OS code (a refused handle, a folder
+    // the shell keeps in the cloud) otherwise reads as "the photo failed"
+    // with no way to tell where.
+    std::fs::create_dir_all(folder)
+        .map_err(|error| io::Error::other(format!("cannot use {}: {error}", folder.display())))?;
     let target = Target::new(region, loaded.settings.cursor)?;
-    let frame = target.frame()?;
-    let path = clock::stamped_path(&loaded.settings.image_dir, "png")?;
+    let frame = target
+        .frame()
+        .map_err(|error| io::Error::other(format!("cannot grab the screen: {error}")))?;
+    let path = clock::stamped_path(folder, "png").map_err(|error| {
+        io::Error::other(format!(
+            "cannot create a file in {}: {error}",
+            folder.display()
+        ))
+    })?;
     let stream = Stream {
         width: region.width,
         height: region.height,
         fps: 1,
     };
     let args = pipe::still_args(stream, loaded.settings.photo_depth, &path);
-    let encoded = pipe::Feed::spawn(&binary, &args, &path).and_then(|mut feed| {
-        feed.frame(frame)?;
-        feed.finish()
-    });
+    let encoded = pipe::Feed::spawn(&binary, &args, &path)
+        .map_err(|error| io::Error::other(format!("cannot start the encoder: {error}")))
+        .and_then(|mut feed| {
+            feed.frame(frame)?;
+            feed.finish()
+        });
     if let Err(error) = encoded {
         // The name was reserved with an empty file; a failed encode must
         // not leave that placeholder behind.

@@ -10,8 +10,8 @@ use crate::winapi::{GetSystemMetrics, Hinstance, Hwnd};
 use super::ffi::{
     AdjustWindowRectEx, CLEARTYPE_QUALITY, CreateFontIndirectW, DEFAULT_CHARSET, DEFAULT_DPI,
     DeleteObject, FW_NORMAL, GetDpiForSystem, ICON_RESOURCE_ID, IMAGE_ICON, LR_DEFAULTSIZE,
-    LoadImageW, LogFontW, Rect, SM_CXSCREEN, SM_CYSCREEN, SendMessageW, UI_FONT_HEIGHT, WM_SETICON,
-    WS_CAPTION, WS_EX_DLGMODALFRAME, WS_SYSMENU,
+    LoadImageW, LogFontW, Rect, SM_CXSCREEN, SM_CYSCREEN, SPI_GETWORKAREA, SendMessageW,
+    SystemParametersInfoW, UI_FONT_HEIGHT, WM_SETICON, WS_CAPTION, WS_EX_DLGMODALFRAME, WS_SYSMENU,
 };
 
 /// The designed client area: fits the grouped layout in `rows` with a
@@ -19,6 +19,13 @@ use super::ffi::{
 pub(super) const CLIENT_W: i32 = 490;
 /// See [`CLIENT_W`].
 pub(super) const CLIENT_H: i32 = 676;
+
+/// Smallest layout percent the dialog shrinks to: below this the labels
+/// stop being readable, so a display that still cannot fit the dialog
+/// gets a clipped window rather than unreadable controls.
+pub(super) const MIN_SCALE: i32 = 55;
+/// Breathing room left around the dialog inside the work area.
+const EDGE_MARGIN: i32 = 12;
 
 /// The display's scale as an integer percentage (100 at 96 DPI). The
 /// process is DPI aware for capture geometry, so the system will not
@@ -37,8 +44,83 @@ pub(super) fn dpi_scale() -> i32 {
 /// integer multiplication (values stay small: the largest is a drop-down
 /// extent, so overflow is not reachable).
 pub(super) fn scaled(value: i32, percent: i32) -> i32 {
-    let percent = percent.clamp(100, 400);
+    let percent = percent.clamp(MIN_SCALE, 400);
     value * percent / 100
+}
+
+/// The layout percent the dialog actually uses: the display's DPI scale,
+/// reduced until the whole window — caption included — fits the work area
+/// (the desktop minus the taskbar). A 1366x768 laptop at 125% would
+/// otherwise draw a 845-pixel client area and put Save below the screen.
+pub(super) fn fit_scale(scale: i32) -> i32 {
+    let (_, _, work_w, work_h) = work_area();
+    let (chrome_w, chrome_h) = frame_extents();
+    fit_percent(work_w, work_h, chrome_w, chrome_h, scale)
+}
+
+/// The layout percent for a design area, a work area, and the window's
+/// non-client extents; `scale` is the display's DPI percent. Width or
+/// height can limit the answer on very small displays.
+fn fit_percent(work_w: i32, work_h: i32, chrome_w: i32, chrome_h: i32, scale: i32) -> i32 {
+    let by_width = percent_that_fits(CLIENT_W, work_w - chrome_w - EDGE_MARGIN);
+    let by_height = percent_that_fits(CLIENT_H, work_h - chrome_h - EDGE_MARGIN);
+    scale.min(by_width).min(by_height).clamp(MIN_SCALE, 400)
+}
+
+/// The largest whole percent whose scaled design still fits `available`
+/// pixels; values below 100 are the shrink a small display needs.
+fn percent_that_fits(design: i32, available: i32) -> i32 {
+    available * 100 / design
+}
+
+/// The non-client extents (caption and borders) in physical pixels.
+fn frame_extents() -> (i32, i32) {
+    let mut rect = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: `rect` is a live local updated in place by the call.
+    let adjusted = unsafe {
+        AdjustWindowRectEx(
+            &raw mut rect,
+            WS_CAPTION | WS_SYSMENU,
+            0,
+            WS_EX_DLGMODALFRAME,
+        )
+    } != 0;
+    if adjusted {
+        (rect.right - rect.left, rect.bottom - rect.top)
+    } else {
+        // Honest fallback: a caption's height at 96 DPI plus a border.
+        (16, 39)
+    }
+}
+
+/// The primary display's work area: origin plus size, taskbar excluded.
+fn work_area() -> (i32, i32, i32, i32) {
+    let mut rect = Rect {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: `rect` is a live local filled by the call.
+    let read = unsafe {
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, std::ptr::from_mut(&mut rect).cast(), 0)
+    } != 0;
+    if read && rect.right > rect.left && rect.bottom > rect.top {
+        (
+            rect.left,
+            rect.top,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+        )
+    } else {
+        let (width, height) = primary_size();
+        (0, 0, width, height)
+    }
 }
 
 /// Outer window geometry for the designed client area: the frame sizes
@@ -66,9 +148,9 @@ pub(super) fn window_frame(scale: i32) -> (i32, i32, i32, i32) {
     } else {
         (scaled(CLIENT_W, scale), scaled(CLIENT_H, scale))
     };
-    let (screen_w, screen_h) = primary_size();
-    let (x, y) = centered_origin(width, height, screen_w, screen_h);
-    (width, height, x, y)
+    let (work_x, work_y, work_w, work_h) = work_area();
+    let (x, y) = centered_origin(width, height, work_w, work_h);
+    (width, height, work_x + x, work_y + y)
 }
 
 /// The primary display's size in pixels (0x0 only if Windows refuses).
@@ -153,15 +235,62 @@ mod tests {
 
     #[test]
     fn designed_pixels_scale_with_the_display() {
-        use super::{dpi_scale, scaled};
+        use super::{MIN_SCALE, dpi_scale, scaled};
 
         assert_eq!(scaled(100, 100), 100);
         assert_eq!(scaled(100, 150), 150);
         assert_eq!(scaled(100, 200), 200);
         assert_eq!(scaled(-12, 150), -18);
-        // A bad scale must not collapse the layout.
-        assert_eq!(scaled(100, 0), 100);
+        // A bad scale must not collapse the layout, and a shrunk layout
+        // stops at the readable floor.
+        assert_eq!(scaled(100, 0), MIN_SCALE);
+        assert_eq!(scaled(100, 30), 55);
         assert!(dpi_scale() >= 100);
+    }
+
+    /// The fit math: a full-size desktop is untouched, a short one is
+    /// shrunk by exactly the ratio its height allows.
+    #[test]
+    fn the_layout_shrinks_to_the_available_height() {
+        use super::{CLIENT_H, CLIENT_W, percent_that_fits};
+
+        assert_eq!(percent_that_fits(CLIENT_H, 900), 133);
+        // A 768-high display minus a taskbar and the frame leaves ~690.
+        assert_eq!(percent_that_fits(CLIENT_H, 690), 102);
+        // A 600-high netbook cannot show the design at 100%.
+        assert_eq!(percent_that_fits(CLIENT_H, 540), 79);
+        assert_eq!(percent_that_fits(CLIENT_W, 480), 97);
+    }
+
+    /// Whatever the display reports, the dialog's own scale answer stays
+    /// inside the readable range.
+    #[test]
+    fn fit_scale_stays_readable() {
+        use super::{MIN_SCALE, fit_scale};
+
+        for scale in [100, 125, 150, 200, 400] {
+            let fitted = fit_scale(scale);
+            assert!((MIN_SCALE..=scale).contains(&fitted), "{scale} -> {fitted}");
+        }
+    }
+
+    /// Real displays: a 768-high laptop at 125% has to shrink to 100% to
+    /// keep Save on screen; a 600-high netbook shrinks further; a large
+    /// desktop keeps its DPI scale untouched.
+    #[test]
+    fn small_displays_shrink_the_layout_to_fit() {
+        use super::fit_percent;
+
+        // 1366x768 at 125%: 728-high work area, 39-pixel caption.
+        assert_eq!(fit_percent(1366, 728, 16, 39, 125), 100);
+        // 1024x600 at 125%: the design only fits shrunk.
+        assert_eq!(fit_percent(1024, 560, 16, 39, 125), 75);
+        // 1920x1080 at 150%: trim a little rather than overflow.
+        assert_eq!(fit_percent(1920, 1032, 16, 39, 150), 145);
+        // 2560x1440 at 100%: nothing to do.
+        assert_eq!(fit_percent(2560, 1400, 16, 39, 100), 100);
+        // An absurdly small display stops at the readable floor.
+        assert_eq!(fit_percent(800, 400, 16, 39, 100), 55);
     }
 
     #[test]

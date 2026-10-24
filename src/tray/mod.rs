@@ -51,10 +51,6 @@ impl std::error::Error for Error {}
 /// it answers taken. Used by the settings window while a field records
 /// the keys the user presses.
 #[must_use]
-#[cfg_attr(
-    not(windows),
-    expect(dead_code, reason = "only the Windows settings window probes combos")
-)]
 pub fn hotkey_available(combo: Hotkey) -> bool {
     #[cfg(windows)]
     {
