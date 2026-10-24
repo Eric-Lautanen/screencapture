@@ -105,6 +105,10 @@ macro_rules! interfaces {
 
 pin_layout!(UnknownVt, 24; query = 0, reference = 8, release = 16);
 
+// The window-capture module declares its WinRT tables with the same
+// macro, so a new interface pins its slots exactly like these do.
+pub(crate) use interfaces;
+
 interfaces! {
     (
         "`IDXGIFactory1`: slots 0..=13; `EnumAdapters1` sits at 12.",

@@ -13,13 +13,14 @@ use crate::settings::Loaded;
 
 use super::engine;
 
-/// Capture `region` as a lossless PNG in `loaded.settings.image_dir` and
+/// Capture `selection` as a lossless PNG in `loaded.settings.image_dir` and
 /// offer it to the clipboard.
 ///
 /// # Errors
 /// Fails when the directory cannot be created, the target refuses the frame,
 /// or the `FFmpeg` pipe cannot finish the PNG.
-pub(super) fn take_photo(loaded: &Loaded, region: Region) -> io::Result<Photo> {
+pub(super) fn take_photo(loaded: &Loaded, selection: super::Selection) -> io::Result<Photo> {
+    let region = selection.region;
     // The chime is the audible "got it", so it starts the instant the
     // selection is committed — before the frame grab and the encoder spawn
     // can add their latency. Its own thread keeps the capture path walking.
@@ -31,7 +32,7 @@ pub(super) fn take_photo(loaded: &Loaded, region: Region) -> io::Result<Photo> {
     // with no way to tell where.
     std::fs::create_dir_all(folder)
         .map_err(|error| io::Error::other(format!("cannot use {}: {error}", folder.display())))?;
-    let target = Target::new(region, loaded.settings.cursor)?;
+    let mut target = open_target(selection, loaded.settings.cursor)?;
     let frame = target
         .frame()
         .map_err(|error| io::Error::other(format!("cannot grab the screen: {error}")))?;
@@ -65,6 +66,31 @@ pub(super) fn take_photo(loaded: &Loaded, region: Region) -> io::Result<Photo> {
         clipboard,
         sound,
     })
+}
+
+/// The frame source for a selection: the clicked window's own content
+/// where Windows allows it, else the desktop rectangle.
+///
+/// A window that refuses to be captured alone (protected content) is not a
+/// failed photo: the region blit still saves what is on screen, and the log
+/// says why the result may show the window on top.
+#[cfg(windows)]
+fn open_target(selection: super::Selection, cursor: bool) -> io::Result<Target> {
+    let Some(handle) = selection.window else {
+        return Target::new(selection.region, cursor);
+    };
+    Target::window(handle, selection.region, cursor).or_else(|error| {
+        crate::log::note(
+            "capture",
+            &format!("window capture unavailable ({error}); saving the screen instead"),
+        );
+        Target::new(selection.region, cursor)
+    })
+}
+
+#[cfg(not(windows))]
+fn open_target(selection: super::Selection, cursor: bool) -> io::Result<Target> {
+    Target::new(selection.region, cursor)
 }
 
 /// A finished photo: where the PNG landed and how the clipboard took it.

@@ -177,9 +177,31 @@ fn handle(loaded: &mut Loaded, runtime: &mut Runtime, event: Event) {
     }
 }
 
+/// What a capture targets: the region to save, and the window to save it
+/// from when the user clicked one.
+#[derive(Clone, Copy, Debug)]
+struct Selection {
+    /// The pixels to save, in screen coordinates.
+    region: Region,
+    /// The clicked window, whose own content is captured instead of the
+    /// desktop rectangle — so a window behind another one still saves
+    /// itself. `None` for a display or a dragged rectangle.
+    window: Option<usize>,
+}
+
+impl Selection {
+    /// A plain region: the desktop's own pixels.
+    fn region(region: Region) -> Self {
+        Self {
+            region,
+            window: None,
+        }
+    }
+}
+
 /// Shared selection path: `[capture] mode` names full display or interactive
 /// pick/drag. Interactive sessions stop a running recording first.
-fn select_region(loaded: &mut Loaded, runtime: &mut Runtime) -> Option<io::Result<Region>> {
+fn select_region(loaded: &mut Loaded, runtime: &mut Runtime) -> Option<io::Result<Selection>> {
     match loaded.settings.capture_mode {
         CaptureMode::Full => Some(full_region(loaded, None)),
         CaptureMode::Region | CaptureMode::Window => {
@@ -192,12 +214,16 @@ fn select_region(loaded: &mut Loaded, runtime: &mut Runtime) -> Option<io::Resul
 /// The interactive session (Windows): one crosshair pass answers a
 /// clicked window or a dragged rectangle; cancel answers None.
 #[cfg(windows)]
-fn pick_region() -> Option<io::Result<Region>> {
+fn pick_region() -> Option<io::Result<Selection>> {
     match crate::window_picker::pick() {
         Ok(Some(crate::window_picker::Pick::Window(handle))) => {
-            Some(screen::window_region(Some(handle)))
+            let region = screen::window_region(Some(handle));
+            Some(region.map(|region| Selection {
+                region,
+                window: Some(handle),
+            }))
         }
-        Ok(Some(crate::window_picker::Pick::Region(region))) => Some(Ok(region)),
+        Ok(Some(crate::window_picker::Pick::Region(region))) => Some(Ok(Selection::region(region))),
         Ok(None) => {
             log::note("record", "selection cancelled");
             None
@@ -214,8 +240,8 @@ fn pick_region() -> Option<io::Result<Region>> {
     clippy::unnecessary_wraps,
     reason = "the Windows variant cancels; this one only answers, and they share a signature"
 )]
-fn pick_region() -> Option<io::Result<Region>> {
-    Some(screen::window_region(None))
+fn pick_region() -> Option<io::Result<Selection>> {
+    Some(screen::window_region(None).map(Selection::region))
 }
 
 /// Record the shared selection; a running recording stops first, so
@@ -236,7 +262,7 @@ fn photograph(loaded: &mut Loaded, runtime: &mut Runtime) {
         return;
     };
     match result {
-        Ok(region) => match take_photo(loaded, region) {
+        Ok(selection) => match take_photo(loaded, selection) {
             Ok(photo) => log::note("photo", &photo.describe()),
             Err(error) => log::note("error", &format!("cannot take a photo: {error}")),
         },
@@ -245,17 +271,17 @@ fn photograph(loaded: &mut Loaded, runtime: &mut Runtime) {
 }
 
 /// A display's full rect as a desktop-coordinate capture region.
-fn display_region(display: screen::Display) -> Region {
-    Region {
+fn display_region(display: screen::Display) -> Selection {
+    Selection::region(Region {
         x: display.x,
         y: display.y,
         width: display.width,
         height: display.height,
-    }
+    })
 }
 
 /// The configured display as a capture region (Full mode).
-fn full_region(loaded: &Loaded, override_display: Option<u32>) -> io::Result<Region> {
+fn full_region(loaded: &Loaded, override_display: Option<u32>) -> io::Result<Selection> {
     let which = override_display.map_or(loaded.settings.display, DisplayChoice::Number);
     which
         .number()
@@ -263,9 +289,10 @@ fn full_region(loaded: &Loaded, override_display: Option<u32>) -> io::Result<Reg
         .map(display_region)
 }
 
-/// Begin encoding `region`, replacing any recording already running.
-fn begin(loaded: &mut Loaded, runtime: &mut Runtime, region: Result<Region, io::Error>) {
-    let Ok(region) = region.map_err(|error| log::note("error", &error.to_string())) else {
+/// Begin encoding `selection`, replacing any recording already running.
+fn begin(loaded: &mut Loaded, runtime: &mut Runtime, selection: Result<Selection, io::Error>) {
+    let Ok(mut selection) = selection.map_err(|error| log::note("error", &error.to_string()))
+    else {
         return;
     };
     stop_recording(runtime);
@@ -273,10 +300,10 @@ fn begin(loaded: &mut Loaded, runtime: &mut Runtime, region: Result<Region, io::
         log::note("error", &format!("cannot create video directory: {error}"));
         return;
     }
-    let region = sane_region(region);
+    selection.region = sane_region(selection.region);
     #[cfg(windows)]
-    let border = show_border(region);
-    match start_recording(loaded, region) {
+    let border = show_border(selection.region);
+    match start_recording(loaded, selection) {
         Ok((recorder, engine)) => {
             runtime.recorder = Some(recorder);
             runtime.engine = Some(engine);
@@ -334,7 +361,11 @@ fn effective_codec(binary: &ffmpeg::Binary, loaded: &Loaded) -> io::Result<Video
     Ok(codec)
 }
 
-fn start_recording(loaded: &Loaded, region: Region) -> io::Result<(Recorder, ffmpeg::Binary)> {
+fn start_recording(
+    loaded: &Loaded,
+    selection: Selection,
+) -> io::Result<(Recorder, ffmpeg::Binary)> {
+    let region = selection.region;
     let binary = engine(loaded)?;
     let codec = effective_codec(&binary, loaded)?;
     let profile = loaded.settings.profile;
@@ -345,6 +376,7 @@ fn start_recording(loaded: &Loaded, region: Region) -> io::Result<(Recorder, ffm
         codec,
         cursor: loaded.settings.cursor,
         media_dir: loaded.settings.video_dir.clone(),
+        window: selection.window,
     };
     let recorder = Recorder::start(&binary, &plan)?;
     tray::set_watchdog_timer(Some(WATCHDOG_MS));

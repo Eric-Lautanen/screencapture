@@ -363,7 +363,7 @@ fn check_throughput() {
     // recorder's measured-fps log line.
     let measured = crate::capture::Target::new(region, false)
         .ok()
-        .and_then(|target| measure(TIMED_FRAMES, || target.frame().map(|_| ())));
+        .and_then(|mut target| measure(TIMED_FRAMES, || target.frame().map(|_| ())));
     let label = if cfg!(windows) {
         "GDI blit"
     } else {

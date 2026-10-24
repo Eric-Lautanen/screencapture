@@ -46,6 +46,8 @@ mod sha256;
 mod sound;
 mod tray;
 #[cfg(windows)]
+mod wgc;
+#[cfg(windows)]
 mod winapi;
 #[cfg(windows)]
 mod window_picker;

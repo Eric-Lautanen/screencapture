@@ -100,6 +100,9 @@ pub struct Plan {
     pub cursor: bool,
     /// Destination folder for the finished file.
     pub media_dir: PathBuf,
+    /// The clicked window whose own content is recorded, instead of the
+    /// desktop rectangle that frame sits in. `None` records the screen.
+    pub window: Option<usize>,
 }
 
 /// Frame counts the worker publishes for the reporting path.
@@ -130,14 +133,15 @@ pub struct Recorder {
 }
 
 /// The frame source behind one recording. Desktop duplication serves
-/// whole-screen grabs; every other plan (partial regions, window bounds,
-/// cursor drawing) stays GDI by design.
+/// whole-screen grabs; every other plan (partial regions, a picked window,
+/// cursor drawing) goes through the platform capture backend.
 enum Source {
     /// Compositor frames, lent to the encoder cheaply.
     #[cfg(windows)]
     Duplication(Duplicator),
-    /// GDI blits on Windows; each platform's native backend elsewhere.
-    Blit(Target),
+    /// One region — or one window's own content — through the platform
+    /// backend: GDI blits on Windows, the native compositor elsewhere.
+    Capture(Target),
 }
 
 impl Source {
@@ -149,7 +153,7 @@ impl Source {
         match self {
             #[cfg(windows)]
             Self::Duplication(duplication) => duplication.frame(),
-            Self::Blit(target) => target.frame(),
+            Self::Capture(target) => target.frame(),
         }
     }
 }
@@ -448,29 +452,73 @@ fn catch_up(fps: u32) -> u64 {
     u64::from(fps.max(2)) / 2
 }
 
-/// Choose the frame source: desktop duplication when the plan fits it
-/// and the compositor cooperates, the GDI blit otherwise; other systems
-/// always use their native backend.
+/// What a plan asks for, decided before any source is opened.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Wanted {
+    /// The picked window, through Windows Graphics Capture.
+    Window,
+    /// A whole display, straight from desktop duplication.
+    #[cfg(windows)]
+    Duplication,
+    /// A desktop rectangle through the platform backend.
+    Region,
+}
+
+/// Which source a plan is asking for.
+///
+/// A picked window wins even when its frame is exactly one display: a
+/// maximized window covers the screen, and duplication would hand back the
+/// desktop with whatever sits on top of it — the very bug window capture
+/// exists to fix.
+fn wanted(region: Region, plan: &Plan) -> Wanted {
+    if plan.window.is_some() {
+        return Wanted::Window;
+    }
+    #[cfg(windows)]
+    if crate::dxgi::eligible(region) {
+        return Wanted::Duplication;
+    }
+    #[cfg(not(windows))]
+    let _ = region;
+    Wanted::Region
+}
+
+/// Choose and open the frame source, demoting to the plain region backend
+/// with a log line whenever a richer source refuses.
 ///
 /// # Errors
-/// Propagates the backend setup failure; duplication failures only
-/// demote the plan to GDI after a printed notice.
+/// Propagates the region backend's setup failure; a refused window or
+/// duplication source only demotes the plan.
 fn pick_source(region: &Region, plan: &Plan) -> io::Result<Source> {
-    #[cfg(windows)]
-    {
-        if crate::dxgi::eligible(*region) {
-            match Duplicator::open(*region, plan.cursor) {
-                Ok(duplication) => return Ok(Source::Duplication(duplication)),
-                Err(reason) => {
-                    crate::log::note(
+    match wanted(*region, plan) {
+        #[cfg(windows)]
+        Wanted::Window => {
+            if let Some(handle) = plan.window {
+                match Target::window(handle, *region, plan.cursor) {
+                    Ok(target) => return Ok(Source::Capture(target)),
+                    Err(error) => crate::log::note(
                         "capture",
-                        &format!("desktop duplication unavailable ({reason}); using GDI"),
-                    );
+                        &format!(
+                            "window capture unavailable ({error}); recording the screen instead"
+                        ),
+                    ),
                 }
             }
+            Ok(Source::Capture(Target::new(*region, plan.cursor)?))
         }
+        #[cfg(windows)]
+        Wanted::Duplication => match Duplicator::open(*region, plan.cursor) {
+            Ok(duplication) => Ok(Source::Duplication(duplication)),
+            Err(reason) => {
+                crate::log::note(
+                    "capture",
+                    &format!("desktop duplication unavailable ({reason}); using GDI"),
+                );
+                Ok(Source::Capture(Target::new(*region, plan.cursor)?))
+            }
+        },
+        _ => Ok(Source::Capture(Target::new(*region, plan.cursor)?)),
     }
-    Ok(Source::Blit(Target::new(*region, plan.cursor)?))
 }
 
 /// The output frame whenever it differs from the capture.
@@ -486,7 +534,7 @@ fn scale_for(plan: &Plan) -> Option<(u32, u32)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Counters, Plan, Recorder, catch_up, frames_due, scale_for};
+    use super::{Counters, Plan, Recorder, Wanted, catch_up, frames_due, scale_for, wanted};
     use crate::encoder::Video;
     use crate::recording::Profile;
     use std::path::PathBuf;
@@ -503,6 +551,7 @@ mod tests {
             codec: Video::DEFAULT,
             cursor: false,
             media_dir: PathBuf::new(),
+            window: None,
         };
         assert_eq!(scale_for(&equal), None);
         let smaller = Plan {
@@ -521,6 +570,7 @@ mod tests {
             codec: Video::DEFAULT,
             cursor: false,
             media_dir: PathBuf::new(),
+            window: None,
         };
         // 16:10 through a 16:9 profile: full height, no letterbox bars.
         assert_eq!(scale_for(&plan), Some((1152, 720)));
@@ -585,6 +635,63 @@ mod tests {
         let dropped = Instant::now();
         drop(recorder);
         assert!(dropped.elapsed() < Duration::from_secs(1));
+    }
+
+    /// A picked window must not fall into duplication just because its
+    /// frame happens to cover a whole display (a maximized window): that
+    /// path records the desktop, occluders included, which is exactly what
+    /// selecting the application avoids.
+    #[test]
+    fn a_picked_window_outranks_a_whole_display() {
+        let plan = Plan {
+            origin: (0, 0),
+            size: (1920, 1080),
+            profile: Profile::by_id("hd-1080p60").expect("profile exists"),
+            codec: Video::DEFAULT,
+            cursor: false,
+            media_dir: PathBuf::new(),
+            window: Some(0x1234),
+        };
+        let display = crate::capture::Region {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        assert_eq!(wanted(display, &plan), Wanted::Window);
+        // The same rectangle without a window is a whole-display grab, so
+        // the assertion above is not vacuous on this platform.
+        #[cfg(windows)]
+        assert_eq!(
+            wanted(
+                display,
+                &Plan {
+                    window: None,
+                    ..plan
+                }
+            ),
+            Wanted::Duplication
+        );
+    }
+
+    #[test]
+    fn a_region_plan_without_a_window_asks_for_its_own_backend() {
+        let plan = Plan {
+            origin: (0, 0),
+            size: (640, 480),
+            profile: Profile::by_id("sd-480p30").expect("profile exists"),
+            codec: Video::DEFAULT,
+            cursor: false,
+            media_dir: PathBuf::new(),
+            window: None,
+        };
+        let region = crate::capture::Region {
+            x: 10,
+            y: 10,
+            width: 640,
+            height: 480,
+        };
+        assert_ne!(wanted(region, &plan), Wanted::Window);
     }
 
     #[test]

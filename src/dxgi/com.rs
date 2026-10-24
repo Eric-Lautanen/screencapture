@@ -44,7 +44,7 @@ impl<T: Complete> Com<T> {
     /// foreign v-table and release it on drop, which is why adoption is an
     /// `unsafe` step rather than a plain constructor: the raw pointer alone
     /// cannot prove the reference exists.
-    pub(super) unsafe fn own(raw: *mut c_void) -> Self {
+    pub(crate) unsafe fn own(raw: *mut c_void) -> Self {
         Self {
             connection: raw.cast::<*mut T>(),
         }
@@ -78,7 +78,7 @@ impl<T: Complete> Com<T> {
     }
 
     /// The interface memory when it still presents a v-table.
-    fn view(&self) -> Option<&T> {
+    pub(crate) fn view(&self) -> Option<&T> {
         if self.connection.is_null() {
             return None;
         }

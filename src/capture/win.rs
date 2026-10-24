@@ -1,7 +1,11 @@
-//! GDI frame capture: one backend per recording keeps the screen DC,
-//! memory DC, and a top-down BGRA DIB alive; frames reuse the cached
-//! bitmap. This is the slow-but-always-available Windows path behind
-//! desktop duplication.
+//! Windows frame capture: a GDI blit of a desktop rectangle, or the
+//! window's own composition frames through Windows Graphics Capture.
+//!
+//! The blit keeps the screen DC, memory DC, and a top-down BGRA DIB alive
+//! and reuses the cached bitmap, which makes it the slow-but-always-
+//! available path behind desktop duplication. Window capture exists for the
+//! one thing a blit cannot do: save the selected application instead of
+//! whatever is stacked on top of it.
 
 use crate::guard::ScreenDc;
 use crate::pin_layout;
@@ -89,12 +93,25 @@ pub fn prepare_dpi() {
     unsafe { SetProcessDpiAwarenessContext(CONTEXT_PER_MONITOR_AWARE_V2 as *mut c_void) };
 }
 
-/// One GDI capture backend bound to one region.
+/// One Windows capture backend bound to one region.
 pub struct Backend {
+    source: Source,
+}
+
+/// Where the frames come from.
+enum Source {
+    /// GDI blit of a desktop rectangle.
+    Screen(Screen),
+    /// The window's own frames, occluders and all.
+    Window(crate::wgc::Window),
+}
+
+/// The GDI blit chain for one region.
+struct Screen {
     region: Region,
     /// Desktop DC borrowed for the backend's lifetime and released by its
     /// own guard, so no manual `ReleaseDC` can be skipped.
-    screen_dc: ScreenDc,
+    desktop: ScreenDc,
     memory_dc: Hdc,
     bitmap: Hbitmap,
     previous_bitmap: Hbitmap,
@@ -110,6 +127,43 @@ impl Backend {
     /// # Errors
     /// Fails when any GDI handle for the setup is refused.
     pub fn open(region: Region, include_cursor: bool) -> io::Result<Self> {
+        Ok(Self {
+            source: Source::Screen(Screen::open(region, include_cursor)?),
+        })
+    }
+
+    /// Capture only `window`'s own content, at the `region` its frame
+    /// occupies: another window on top of it is not in the frames.
+    ///
+    /// # Errors
+    /// Fails when Windows will not hand this process the window's frames
+    /// (protected content, or a build before Windows 10 1903).
+    pub fn window(handle: usize, region: Region, include_cursor: bool) -> io::Result<Self> {
+        Ok(Self {
+            source: Source::Window(crate::wgc::Window::open(
+                handle,
+                (region.width, region.height),
+                include_cursor,
+            )?),
+        })
+    }
+
+    /// One frame as top-down BGRA rows of `width * 4` bytes, valid until
+    /// the next grab.
+    ///
+    /// # Errors
+    /// Fails when the source refuses the grab.
+    pub fn frame(&mut self) -> io::Result<&[u8]> {
+        match &mut self.source {
+            Source::Screen(screen) => screen.frame(),
+            Source::Window(window) => window.frame(),
+        }
+    }
+}
+
+impl Screen {
+    /// Bind the blit chain to `region`.
+    fn open(region: Region, include_cursor: bool) -> io::Result<Self> {
         let Some(screen_dc) = ScreenDc::desktop() else {
             return Err(io::Error::other("GetDC for the screen failed"));
         };
@@ -118,7 +172,7 @@ impl Backend {
         };
         Ok(Self {
             region,
-            screen_dc,
+            desktop: screen_dc,
             memory_dc: setup.memory_dc,
             bitmap: setup.bitmap,
             previous_bitmap: setup.previous_bitmap,
@@ -134,7 +188,7 @@ impl Backend {
     ///
     /// # Errors
     /// Fails when `BitBlt` refuses the blit.
-    pub fn frame(&self) -> io::Result<&[u8]> {
+    fn frame(&self) -> io::Result<&[u8]> {
         let width = i32::try_from(self.region.width).map_err(invalid_region)?;
         let height = i32::try_from(self.region.height).map_err(invalid_region)?;
         // SAFETY: handles belong to this backend; coordinates describe
@@ -146,7 +200,7 @@ impl Backend {
                 0,
                 width,
                 height,
-                self.screen_dc.dc(),
+                self.desktop.dc(),
                 self.region.x,
                 self.region.y,
                 self.raster,
@@ -244,7 +298,7 @@ fn stride_for(width: u32) -> usize {
     usize::try_from(width).unwrap_or(0) * 4
 }
 
-impl Drop for Backend {
+impl Drop for Screen {
     fn drop(&mut self) {
         // SAFETY: release in reverse creation order; DCs and bitmap are
         // ours exclusively.

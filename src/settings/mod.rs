@@ -56,7 +56,9 @@ pub enum CaptureMode {
     Full,
     /// Draw a rectangle on screen first (interactive).
     Region,
-    /// A window's bounds, auto-detected at record time.
+    /// One window: clicked in the interactive pass (which saves that
+    /// window's own content), or auto-detected under the cursor by the
+    /// command line.
     Window,
 }
 
