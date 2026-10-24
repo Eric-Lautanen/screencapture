@@ -22,11 +22,20 @@ and the same capture pipeline headless on macOS and Linux.</p>
 
 ## Screenshots
 
-<p align="center">
-  <img src="assets/settings-window.png" width="460" alt="The screencapture Settings window" />
-  <br />
-  <sub><strong>Settings</strong> — capture mode, profile, codec, chimes, hotkeys, and folders in one window.</sub>
-</p>
+<table align="center">
+  <tr>
+    <td align="center" valign="top">
+      <img src="assets/settings-window.png" width="440" alt="The screencapture Settings window" />
+      <br />
+      <sub><strong>Settings</strong> — capture mode, profile, codec, chimes, hotkeys, and folders.</sub>
+    </td>
+    <td align="center" valign="top">
+      <img src="assets/tray-menu.png" width="200" alt="The screencapture tray menu" />
+      <br />
+      <sub><strong>Tray menu</strong> — quick actions, profile, and a one-click chime mute.</sub>
+    </td>
+  </tr>
+</table>
 
 ## Why screencapture
 
