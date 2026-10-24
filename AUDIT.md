@@ -491,3 +491,213 @@ Residual limitations: macOS and Linux capture paths remain header-verified
 and cross-compiled, not live-run on that hardware; GitHub's read-only
 `refs/pull/*` objects from the earlier history rewrite cannot be purged
 without repository recreation or GitHub Support.
+## 9. Code review — v0.1.4 snapshot (2026-10-24)
+
+Scope: every module under `src/`, the two workflows, the installer script,
+and the user docs. This pass changed one doc line (the README hotkey note
+below) and nothing else; the baseline was `cargo fmt --check` clean, clippy
+clean on all three CI targets, and 147 tests green (142 unit, 3 icon, 2
+version).
+
+Ranking: **D** = defect (wrong or fragile behavior), **R** = robustness,
+**C** = cleanup. Effort is S (<30 min), M (a session), L (needs hardware).
+Blast radius names the code that can regress.
+
+| # | Sev | Finding | Effort | Blast radius |
+|---|-----|---------|--------|--------------|
+| D1 | D | Probing a hotkey lifts every live binding and re-registers it | S | `tray/win`, `settings_dialog` |
+| D2 | D | Tray-side diagnostics bypass the log; the ring flushes only at stop/exit | S | `log`, `recorder`, `settings_dialog`, `tray/win` |
+| D3 | D | `--record` treats the next flag as its optional duration | S | `cli` |
+| R1 | R | `Recorder`'s `Drop` can block the pump for the whole finalize budget | S | `recorder`, `app` |
+| R2 | R | Settings rows are positioned by raw pixel literals | M | `settings_dialog/rows` |
+| R3 | R | Region casts fall back to 0, and `ScreenDc::dc` panics on an invariant | S | `selector`, `overlay`, `guard`, `capture/win` |
+| C1 | C | Win32 boilerplate is re-declared in seven modules | M | `winapi` + six frontends |
+| C2 | C | A Settings save round-trips typed values through 13 strings | M | `settings_dialog`, `settings_apply`, `settings` |
+| C3 | C | `read_document` repeats one validation block 13 times | S | `settings` |
+| C4 | C | `record_demo` and `photo_demo` duplicate region resolution | S | `app/demo` |
+| C5 | C | `apply_settings` hand-writes 13 document keys | S | `app/settings_apply` |
+| C6 | C | Six source files are past the 500-line convention | M | `app`, `dxgi/mod`, `recorder`, `tray/win/mod`, `rows`, `window_picker` |
+| C7 | C | `autostart::registered` creates the registry key it reads | S | `autostart` |
+| C8 | C | The CLI surface and the documented defaults have no test | S | `tests/`, `README` |
+
+### D1. The hotkey probe can kill a working binding
+
+`hotkey_available` (`src/tray/win/mod.rs:171`) unregisters all three
+bindings, probes one combo on a spare id, then re-registers everything
+(`register_hotkeys` at `:198`). The Settings window calls it once per saved
+field, so a probe runs while the user's real bindings are lifted. If
+another process takes one of those combos in that window — or the
+re-registration fails for any reason — a hotkey that worked a moment ago
+stops working until the app restarts. That is the exact failure class this
+release fixed for the shipped default, now reachable from Settings.
+
+Fix: keep the ids that actually registered (a thread-local `Vec<i32>`
+filled by `register_hotkeys`) and answer "free" for a combo the app already
+owns, without lifting anything. Every other combo is probed on the calling
+thread with `RegisterHotKey(std::ptr::null_mut(), ...)`, which needs no
+window and no teardown of live bindings.
+
+### D2. Diagnostics vanish exactly where they are needed
+
+`log::note` writes to stderr and to an in-memory ring; `flush_to` is called
+only on stop, settings save, and exit (`src/app.rs:125`, `:507`). The tray
+has no console, so tray-side `eprintln!` calls are lost outright: the DXGI
+demotion notice (`src/recorder.rs:465`), control-creation failures
+(`src/settings_dialog/rows.rs:469`), and the tray icon fallback
+(`src/tray/win/ico.rs:46`). A crash or a Task Manager kill also discards the
+whole ring.
+
+Fix: route those three sites through `log::note`, and flush the ring when a
+`warn`/`error` line is added (or on the existing watchdog tick). One
+`flush_to` per failure is cheap and turns "nothing happens" reports into a
+log line — this session's photo failure was undiagnosable for exactly this
+reason.
+
+### D3. `--record` eats the argument after it
+
+`parse` reads the duration with `items.next().map_or("3", ...)`
+(`src/cli.rs:136`), so `screencapture --record --mode full` consumes
+`--mode` as the duration and fails with "requires a duration in seconds".
+The default is meant for a bare `--record`. Fix: only consume the next
+token as a duration when it does not start with `-`.
+
+### R1. `Recorder::drop` can stall the message pump
+
+`Drop` requests a stop and calls `join_within(stop_budget(..))`
+(`src/recorder.rs:355`), and `stop_budget` is the engine's finalize budget
+plus five seconds — at least 15 s and up to 305 s for a large file. Today
+only an early-return path drops a live recorder on the pump thread, so it
+is rare, but a 15-second freeze in the tray would look like a hang. Fix:
+give `Drop` a short budget (one or two seconds) and leave the worker to the
+existing watchdog/exit drain.
+
+### R2. The Settings layout is a list of pixel literals
+
+`rows.rs` positions every control with raw y values (`group(window, 16,
+244, 458, 56, ...)` at `:49`, buttons at `:85`, `:251`, `:261`, and so on)
+while the group heights must be kept in agreement by hand. The 0.1.4 work
+made the dialog fit a small screen by scaling the whole design, which
+works, but nothing prevents the next row from overlapping the previous one
+or sliding under the button row.
+
+Fix: make the layout a `const` table of rows (label, kind, group, offset)
+and emit it in one pass. A test can then assert rows are ordered,
+non-overlapping, and end above the buttons — the class of bug that hid Save
+on a 768-high laptop.
+
+### R3. Silent casts hide impossible geometry
+
+Both drawing frontends convert region extents with
+`i32::try_from(..).unwrap_or(0)` (`src/overlay/mod.rs:158`,
+`src/selector/mod.rs:87`), which turns an absurd region into an empty one
+instead of an error. `ScreenDc::dc` (`src/guard.rs:53`) `expect`s a DC that
+`borrow` may have refused (the constructors guard it today, so it is an
+invariant assertion, not a live bug). Prefer `ok_or_else`/`Option` so a
+future caller cannot turn a refused handle into a panic on the pump thread.
+
+### C1. Win32 declarations and helpers live in seven places
+
+Measured in this tree: `wide()` is defined five times, `module_handle()`
+six, `RegisterClassExW` is called from seven sites each with its own
+`WNDCLASSEXW` literal, `GetModuleHandleW(null)` is called nine times, there
+are twelve `#[link(name = "user32")]` blocks, and `DeleteObject` (3×),
+`SetWindowPos` (2×), `SetBkMode` (2×), `SetTextColor` (2×), `SelectObject`
+(2×), and `InvalidateRect` (2×) are declared in more than one module.
+`overlay/mod.rs` additionally re-declares `WS_POPUP`, `WS_EX_TOPMOST`,
+`WS_EX_TOOLWINDOW`, `WM_LBUTTONDOWN`/`UP`, and `SWP_NOACTIVATE`, all of
+which `winapi.rs` already exports.
+
+Fix: `winapi.rs` keeps the types, constants, and one `#[link]` per DLL; a
+new `win/window.rs` owns `wide`, `module_handle`, and a `register_class`
+helper. Frontends keep only their specialty calls. This is mechanical and
+shrinks every frontend.
+
+### C2. Settings make a string round-trip
+
+`Settings` → `settings_dialog::Answers` (13 `String` fields,
+`src/settings_dialog/mod.rs:72`) → `Document` (`Value::Str`) → reparsed by
+`settings::load`. Every save therefore validates one representation and
+persists another, and a disagreement shows up later as a `warn` line with
+the edit silently dropped. A typed edit (`CaptureMode`, `Profile`, `Video`,
+`Hotkey`, `PathBuf`) would remove the parse/format pairs on both sides and
+the "did it survive the file?" question with them.
+
+### C3. `read_document` repeats itself
+
+`src/settings/mod.rs:288` is 107 lines, 13 of which are the same shape:
+`if raw.is_some() && parsed.is_none() { problems.push(format!("invalid
+…; using {}", default)) }`. A small helper — `fn parsed_or<T>(raw, parsed,
+default, what) -> (T, Option<String>)` — would cut roughly half the
+function and make a new setting a four-line addition.
+
+### C4. `demo.rs` resolves the same region twice
+
+`record_demo` (`src/app/demo.rs:88`) and `photo_demo` (`:169`) both carry
+the same `if let Some(rect) … else match mode { Full, Region, Window }`
+block, including the Windows selector and its cancel answer. Extract
+`fn resolve_region(loaded, mode, display, rect) -> io::Result<Option<Region>>`
+and let both callers own only what differs.
+
+### C5. `apply_settings` writes keys by hand
+
+`src/app/settings_apply.rs:57-80` is 13 consecutive `document.set(...)`
+calls with section and key strings, which `settings::read_document`
+mirrors. A single table of `(section, key, value)` constructors — or
+read/modify/write through one `Settings::write_document` — keeps the schema
+in one place.
+
+### C6. Six files past the 500-line convention
+
+`app.rs` 752, `dxgi/mod.rs` 612, `recorder.rs` 596, `tray/win/mod.rs` 564,
+`settings_dialog/rows.rs` 514, `window_picker.rs` 502. The earlier audit
+closed this by splitting `settings.rs`; the tree has drifted back. The
+cheapest splits are `app.rs` (runtime vs. recording start vs. hotkey
+defaults) and `tray/win/mod.rs` (icon, menu, hotkeys, pump).
+
+### C7. `autostart::registered` creates what it reads
+
+`open_for_access` (`src/autostart.rs:91`) calls `RegCreateKeyExW` even for
+`KEY_QUERY_VALUE`, so a status check can create the `Run` key, and on a
+profile where that creation is refused the check answers "not registered"
+instead of "cannot tell". Use `RegOpenKeyExW` for reads and keep the create
+call for writes.
+
+### C8. Two cheap tests are missing
+
+There is no integration test for the CLI surface (`tests/cli.rs`), so
+flag-combination rules (`--rect` vs `--display`, duration bounds, `--photo
+--mode`) are only covered where they happen to have unit tests, and nothing
+pins the defaults the README documents: `Hotkey::RECORD`/`PHOTO`/`CHIMES`,
+`Profile::DEFAULT`, and the `[media]` subfolder layout. A four-test
+`tests/docs.rs` would fail the moment code and README disagree.
+
+### What this codebase already does well
+
+- Zero dependencies, `std` plus hand-written FFI, and no `TODO`/`FIXME`/
+  `unimplemented!` anywhere in `src/`.
+- 288 `SAFETY` comments against 315 `unsafe` blocks, no `unsafe impl`, and
+  ABI layouts pinned with compile-time `pin_layout!` assertions.
+- Ownership is structured: `Feed`, `Recorder`, `Hook`, `ScreenDc`,
+  `MouseCapture`, `EscapeWatch`, `Border`, and `Open` all release in `Drop`,
+  so early returns do not leak.
+- Testable seams where it matters: `dxgi/policy.rs` isolates GPU decisions,
+  `Video::choose` takes the probe as a closure, `config::Document` round
+  trips, and the capture chime is verified by zero-crossing analysis.
+- Error text is consistently actionable ("run `screencapture --check`",
+  "place ffmpeg/ffmpeg beside the executable", hint lines in `doctor.rs`).
+- Release hygiene: `lto = "fat"`, `strip = true`, lints denied in the
+  manifest, pinned engine with an integrity record, and a version test that
+  guards the four hand-written version spots.
+
+### Observation, not a defect
+
+`Profile::fit` deliberately raises small captures to the profile box (tested
+at `src/recording.rs:196`), so the shipped 4K60 default turns a 1920x1200
+desktop into a 3456x2160 encode. On the reference machine that measured
+29.5 fps captured against 60 fps written: correct output, half the frames
+fresh. Clamping the upscale, or defaulting to `hd-1080p60` or `uhd-4k30`, is
+a product decision rather than a code fault, but it is the single biggest
+performance lever a default install has.
+
+Suggested order: D1, D2, D3 (all small, all user-visible); then R2 + C4 + C5
+(one pass over the settings surface); then C1 (mechanical, wide) and C6.

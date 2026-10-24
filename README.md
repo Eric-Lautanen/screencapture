@@ -121,6 +121,13 @@ Combos accept `ctrl`, `alt`, `shift`, and `win` plus a digit, letter, or
 `F1`–`F12`. The Settings window validates all three and probes them with a live
 `RegisterHotKey` check, then re-registers without a restart.
 
+Vendor overlays commonly claim `ctrl+shift+x`. When Windows refuses a default
+combo that is still untouched, startup moves it to the first free alternate
+(`ctrl+shift+9`, then `ctrl+alt+9`, and the matching `8`/`7` digits for the
+photo and chime hotkeys), saves it, and logs the swap. A combo you chose
+yourself is never rewritten; if it is taken, the tray balloon and the log say
+so and Settings shows the conflict.
+
 ### Tray menu
 
 | Item | Action |
