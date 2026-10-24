@@ -117,31 +117,83 @@ mod native {
         Some(format!("\"{display}\""))
     }
 
+    /// Whether the login registration exists *and* still launches this
+    /// executable. A value left behind by a previous install answers
+    /// `false`, so the startup sync rewrites it instead of silently
+    /// starting the old path (or nothing, once that path is gone).
     pub(super) fn registered() -> bool {
-        if let Ok(key) = open_for_access(KEY_QUERY_VALUE) {
-            let name = wide(VALUE_NAME);
-            let mut size = 0u32;
-            let status = {
-                // SAFETY: `name` is null-terminated; only the optional
-                // out-parameter `data_size` is written.
-                unsafe {
-                    RegQueryValueExW(
-                        key,
-                        name.as_ptr(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        std::ptr::null_mut(),
-                        &raw mut size,
-                    )
-                }
-            };
-            let _ = {
-                // SAFETY: closing the key opened by `open_for_access`.
-                unsafe { RegCloseKey(key) }
-            };
-            return status == ERROR_SUCCESS;
+        let Ok(key) = open_for_access(KEY_QUERY_VALUE) else {
+            return false;
+        };
+        let name = wide(VALUE_NAME);
+        let mut size = 0u32;
+        let status = {
+            // SAFETY: `name` is null-terminated; only the optional
+            // out-parameter `data_size` is written.
+            unsafe {
+                RegQueryValueExW(
+                    key,
+                    name.as_ptr(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &raw mut size,
+                )
+            }
+        };
+        let stored = if status == ERROR_SUCCESS {
+            read_command(key, name.as_ptr(), size)
+        } else {
+            None
+        };
+        let _ = {
+            // SAFETY: closing the key opened by `open_for_access`.
+            unsafe { RegCloseKey(key) }
+        };
+        stored.is_some_and(|command| launches_this_exe(&command))
+    }
+
+    /// The registered command string; `None` when the value is empty,
+    /// absurdly large, or unreadable.
+    fn read_command(key: Hkey, name: *const u16, size: u32) -> Option<String> {
+        /// Generous ceiling for one `Run` command; real entries are a path.
+        const MAX_BYTES: u32 = 4096;
+        if !(2..=MAX_BYTES).contains(&size) {
+            return None;
         }
-        false
+        let units = usize::try_from(size).ok()? / 2 + 1;
+        let mut buffer = vec![0u16; units];
+        let mut copied = size;
+        let status = {
+            // SAFETY: `buffer` holds `units` UTF-16 slots (at least `size`
+            // bytes); `copied` is the in/out byte count for the value.
+            unsafe {
+                RegQueryValueExW(
+                    key,
+                    name,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    buffer.as_mut_ptr().cast(),
+                    &raw mut copied,
+                )
+            }
+        };
+        if status != ERROR_SUCCESS {
+            return None;
+        }
+        let end = buffer
+            .iter()
+            .position(|unit| *unit == 0)
+            .unwrap_or(buffer.len());
+        Some(String::from_utf16_lossy(&buffer[..end]))
+    }
+
+    /// Whether `command` names this executable; quotes around the path are
+    /// the form [`set`] writes, but a hand-edited unquoted entry counts too.
+    fn launches_this_exe(command: &str) -> bool {
+        let trimmed = command.trim().trim_matches('"');
+        std::env::current_exe()
+            .is_ok_and(|current| trimmed.eq_ignore_ascii_case(&current.display().to_string()))
     }
 
     pub(super) fn set(enable: bool) -> io::Result<()> {
@@ -198,6 +250,21 @@ mod native {
             Ok(())
         } else {
             Err(io::Error::from_raw_os_error(status))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::launches_this_exe;
+
+        #[test]
+        fn only_this_executable_counts_as_registered() {
+            let current = std::env::current_exe().expect("the test binary has a path");
+            // Both forms the app writes and a hand edit might leave behind.
+            assert!(launches_this_exe(&format!("\"{}\"", current.display())));
+            assert!(launches_this_exe(&current.display().to_string()));
+            // A value pointing at a previous install is stale, not registered.
+            assert!(!launches_this_exe("C:\\old\\screencapture.exe"));
         }
     }
 }
