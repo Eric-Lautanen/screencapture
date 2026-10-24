@@ -5,49 +5,46 @@ mod ffi;
 mod ico;
 mod menu;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::thread_local;
 
 use self::ffi::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GETMESSAGE_QUIT, GetForegroundWindow, GetMessageW, Guid, Hicon, Hwnd, KillTimer, Lparam,
-    Lresult, Msg, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NotifyIconDataW, Point,
-    PostQuitMessage, RegisterClassExW, RegisterHotKey, SetTimer, Shell_NotifyIconW,
-    TranslateMessage, UnregisterClassW, UnregisterHotKey, WM_COMMAND, WM_CREATE, WM_DESTROY,
-    WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WM_USER, WndClassExW, Wparam,
+    GETMESSAGE_QUIT, GetMessageW, Guid, Hicon, Hwnd, KillTimer, Lparam, Lresult, Msg, NIF_ICON,
+    NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_WARNING, NIM_ADD, NIM_DELETE, NIM_MODIFY, NotifyIconDataW,
+    Point, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterHotKey, SetTimer,
+    Shell_NotifyIconW, TranslateMessage, UnregisterClassW, UnregisterHotKey, WM_COMMAND, WM_CREATE,
+    WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WM_USER, WndClassExW, Wparam,
 };
 use super::{Error, Event};
-use crate::hotkeys::Binding;
+use crate::hotkeys::{Binding, MOD_NOREPEAT, combo_modifiers};
 use crate::recording::Profile;
+use crate::settings::Hotkey;
 
 /// Tray notification callback message id (custom to this window).
 const TRAY_CALLBACK: u32 = WM_USER + 1;
-
 /// Tray icon identifier within this process.
 const TRAY_ID: u32 = 1;
-
 /// Class name for the hidden message window (leaked to the OS).
 const CLASS_NAME: &str = "ScreencaptureTray";
-
 /// Title for the hidden message window.
 const WINDOW_NAME: &str = "Screencapture";
-
 /// Tooltip shown next to the tray icon.
 const TOOLTIP: &str = "screencapture";
 
 /// Menu command ids; all sit in the low word of `WM_COMMAND`.
 const ID_RECORD: Wparam = 1;
 const ID_PHOTO: Wparam = 2;
-const ID_AUTOSTART: Wparam = 3;
-const ID_RECORD_REGION: Wparam = 4;
-const ID_RECORD_WINDOW: Wparam = 5;
+const ID_SETTINGS: Wparam = 3;
+/// The quick capture-chime mute entry.
+const ID_CHIMES: Wparam = 4;
+/// Sent by the recording border's Stop button through [`post_stop`].
+const ID_STOP: Wparam = 5;
 const ID_PROFILE_BASE: Wparam = 100;
-/// Per-display entries live in the half-open range from
-/// `ID_DISPLAY_BASE` up to `ID_EXIT`; the gap keeps future static ids out
-/// of the dynamic range.
+/// Per-display entries live in `ID_DISPLAY_BASE..ID_EXIT`.
 const ID_DISPLAY_BASE: Wparam = 120;
 const ID_EXIT: Wparam = 200;
-
 /// Frame-timer id for `WM_TIMER`.
 const TIMER_ID: usize = 1;
 
@@ -55,9 +52,11 @@ thread_local! {
     static HANDLER: RefCell<Handler> = const { RefCell::new(None) };
     static WINDOW: RefCell<Option<Hwnd>> = const { RefCell::new(None) };
     static BINDINGS: RefCell<Vec<Binding>> = const { RefCell::new(Vec::new()) };
-    /// The window focused just before the tray menu opened, so "record
-    /// window" targets the application the user was working in.
-    static PREVIOUS_FOREGROUND: RefCell<Option<usize>> = const { RefCell::new(None) };
+    /// Events that arrived while a handler dispatch still owned the
+    /// borrow; replayed in order when the outer dispatch returns.
+    static PENDING: RefCell<VecDeque<Event>> = const { RefCell::new(VecDeque::new()) };
+    /// Chime state for the menu's check mark, kept in step with settings.
+    static CHIMES: Cell<bool> = const { Cell::new(true) };
 }
 
 type Handler = Option<Box<dyn FnMut(Event)>>;
@@ -123,8 +122,33 @@ where
     Ok(())
 }
 
-/// Turn `Option<u32>` into timer state: `None` kills the frame timer.
-pub(super) fn set_frame_timer(interval_ms: Option<u32>) {
+/// Record the chime state the tray menu should render on its next open.
+pub(super) fn set_chimes(enabled: bool) {
+    CHIMES.with(|slot| slot.set(enabled));
+}
+
+/// Whether captures currently chime; the menu renders the inverse as a
+/// check beside its mute entry.
+pub(super) fn chimes_enabled() -> bool {
+    CHIMES.with(Cell::get)
+}
+
+/// Swap the global hotkey registrations for a fresh set (the settings
+/// window rebinds): the old registrations lift off first, so a combo
+/// that moved registers cleanly, and failures print honestly.
+pub(super) fn set_bindings(new: Vec<Binding>) {
+    let window = WINDOW.with_borrow(|slot| *slot);
+    if let Some(window) = window {
+        unregister_hotkeys(window);
+        BINDINGS.with_borrow_mut(|slot| *slot = new);
+        register_hotkeys(window);
+    } else {
+        BINDINGS.with_borrow_mut(|slot| *slot = new);
+    }
+}
+
+/// Turn `Option<u32>` into timer state: `None` kills the watchdog timer.
+pub(super) fn set_watchdog_timer(interval_ms: Option<u32>) {
     let Some(window) = WINDOW.with_borrow(|slot| *slot) else {
         return;
     };
@@ -140,9 +164,35 @@ pub(super) fn set_frame_timer(interval_ms: Option<u32>) {
     }
 }
 
-/// The window handle stashed by [`stash_foreground`], as plain bits.
-pub(super) fn previous_foreground() -> Option<usize> {
-    PREVIOUS_FOREGROUND.with_borrow(|slot| *slot)
+/// Whether Windows would accept `combo` right now, after lifting this
+/// process's own registrations so it cannot report a conflict with
+/// itself. The settings window asks this while a hotkey field records
+/// the user's keys.
+pub(super) fn hotkey_available(combo: Hotkey) -> bool {
+    let modifiers = combo_modifiers(combo) | MOD_NOREPEAT;
+    let window = WINDOW.with_borrow(|slot| *slot);
+    match window {
+        Some(window) => {
+            unregister_hotkeys(window);
+            let free = probe(window, modifiers, combo.key);
+            register_hotkeys(window);
+            free
+        }
+        None => probe(std::ptr::null_mut(), modifiers, combo.key),
+    }
+}
+
+/// One `RegisterHotKey` probe, removed immediately when it succeeds.
+fn probe(window: Hwnd, modifiers: u32, key: u32) -> bool {
+    /// Outside the ids the tray uses for its two bindings.
+    const PROBE_ID: i32 = 0x7FFE;
+    // SAFETY: a registration on our own window (or thread); removed at once.
+    let registered = unsafe { RegisterHotKey(window, PROBE_ID, modifiers, key) } != 0;
+    if registered {
+        // SAFETY: symmetric removal of the probe above.
+        unsafe { UnregisterHotKey(window, PROBE_ID) };
+    }
+    registered
 }
 
 fn register_hotkeys(window: Hwnd) {
@@ -156,8 +206,28 @@ fn register_hotkeys(window: Hwnd) {
                 "warn  hotkey id {} registration failed (already in use?)",
                 binding.id
             );
+            notify_hotkey_taken();
         }
     }
+}
+
+/// Say in the tray that a saved hotkey could not be registered. The log
+/// alone is invisible to a tray-only user; the balloon is the only sign
+/// that a combo needs changing.
+fn notify_hotkey_taken() {
+    let Some(window) = WINDOW.with_borrow(|slot| *slot) else {
+        return;
+    };
+    let mut data = icon_data(window, std::ptr::null_mut());
+    data.flags = NIF_INFO;
+    data.info_flags = NIIF_WARNING;
+    fill_text(&mut data.info_title, "Hotkey unavailable");
+    fill_text(
+        &mut data.info,
+        "A configured hotkey is already used by another app. Open Settings to choose another.",
+    );
+    // SAFETY: `data` is a local initialized struct bound to the live icon.
+    let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &raw mut data) };
 }
 
 fn unregister_hotkeys(window: Hwnd) {
@@ -231,9 +301,6 @@ unsafe extern "system" fn on_message(
         // Mouse-up notifications arrive in `l_param` as small positives.
         let clicks = u32::try_from(l_param).unwrap_or(0);
         if clicks == WM_LBUTTONUP || clicks == WM_RBUTTONUP {
-            // Remember what the user had focused before our menu took
-            // focus; "record window" needs that application.
-            stash_foreground();
             // SAFETY: `window` is the tray window owned by the pump thread.
             unsafe {
                 menu::show(window);
@@ -245,7 +312,7 @@ unsafe extern "system" fn on_message(
         return dispatch_command(w_param & 0xffff, window);
     }
     if message == WM_TIMER && w_param == TIMER_ID {
-        emit(Event::Tick);
+        emit(Event::Watchdog);
         return 0;
     }
     if message == WM_HOTKEY {
@@ -268,10 +335,10 @@ unsafe extern "system" fn on_message(
 fn dispatch_command(command: Wparam, window: Hwnd) -> Lresult {
     match command & 0xffff {
         ID_RECORD => emit(Event::Record),
-        ID_RECORD_REGION => emit(Event::RecordRegion),
-        ID_RECORD_WINDOW => emit(Event::RecordWindow),
         ID_PHOTO => emit(Event::Photo),
-        ID_AUTOSTART => emit(Event::ToggleAutostart),
+        ID_SETTINGS => emit(Event::OpenSettings),
+        ID_CHIMES => emit(Event::ToggleChimes),
+        ID_STOP => emit(Event::Stop),
         ID_EXIT => {
             emit(Event::Exit);
             // SAFETY: the tray window belongs to the pump thread; destroy it
@@ -297,6 +364,16 @@ fn dispatch_command(command: Wparam, window: Hwnd) -> Lresult {
     0
 }
 
+/// Post the stop command to the tray window so the border is not
+/// destroyed while its own window procedure is still on the stack.
+pub(super) fn post_stop() {
+    let Some(window) = WINDOW.with_borrow(|slot| *slot) else {
+        return;
+    };
+    // SAFETY: posting to this thread's own window; no out-parameters.
+    unsafe { PostMessageW(window, WM_COMMAND, ID_STOP, 0) };
+}
+
 fn dispatch_hotkey(id: Wparam) {
     let role = BINDINGS.with_borrow(|slot| {
         slot.iter()
@@ -304,39 +381,58 @@ fn dispatch_hotkey(id: Wparam) {
             .map(|binding| binding.role)
     });
     if let Some(role) = role {
-        emit(match role {
+        let event = match role {
             crate::hotkeys::Role::Record => Event::Record,
             crate::hotkeys::Role::Photo => Event::Photo,
+            crate::hotkeys::Role::Chimes => Event::ToggleChimes,
+        };
+        // Drop hotkeys that fire while a modal surface owns the handler.
+        HANDLER.with(|slot| {
+            if let Ok(mut borrower) = slot.try_borrow_mut()
+                && let Some(handler) = borrower.as_mut()
+            {
+                handler(event);
+            }
         });
     }
 }
 
 fn emit(event: Event) {
-    HANDLER.with(|slot| {
-        if let Some(handler) = slot.borrow_mut().as_mut() {
-            handler(event);
-        }
-    });
+    if dispatch(event) {
+        drain();
+    }
 }
 
-/// Note the currently focused window into `PREVIOUS_FOREGROUND`, exposed
-/// through [`super::previous_foreground`] for window-mode captures.
-fn stash_foreground() {
-    // SAFETY: reads the foreground handle only; nothing is stored.
-    let window = unsafe { GetForegroundWindow() };
-    let value = if window.is_null() {
-        None
-    } else {
-        Some(window as usize)
-    };
-    PREVIOUS_FOREGROUND.with_borrow_mut(|slot| *slot = value);
+/// One dispatch attempt: `true` when the handler answered the event,
+/// `false` when it was queued behind a dispatch still on the stack.
+fn dispatch(event: Event) -> bool {
+    HANDLER.with(|slot| {
+        if let Ok(mut borrower) = slot.try_borrow_mut() {
+            if let Some(handler) = borrower.as_mut() {
+                handler(event);
+            }
+            true
+        } else {
+            PENDING.with_borrow_mut(|queue| queue.push_back(event));
+            false
+        }
+    })
+}
+
+/// Replay queued events while the handler answers.
+fn drain() {
+    while let Some(event) = PENDING.with_borrow_mut(VecDeque::pop_front) {
+        if !dispatch(event) {
+            return;
+        }
+    }
 }
 
 fn add_icon(window: Hwnd) -> Lresult {
     // SAFETY: builds the authored icon on the tray's own thread.
     let icon = unsafe { ico::app_or_fallback() };
     let mut data = icon_data(window, icon);
-    set_tip(&mut data.tip, TOOLTIP);
+    fill_text(&mut data.tip, TOOLTIP);
     // SAFETY: `data` is a local, fully initialized struct bound to `window`.
     if unsafe { Shell_NotifyIconW(NIM_ADD, &raw mut data) } == 0 {
         -1
@@ -361,17 +457,14 @@ fn icon_data(window: Hwnd, icon: Hicon) -> NotifyIconDataW {
         version: 0,
         info_title: [0; 64],
         info_flags: 0,
-        guid: Guid {
-            data1: 0,
-            data2: 0,
-            data3: 0,
-            data4: [0; 8],
-        },
+        guid: Guid::default(),
     }
 }
 
-fn set_tip(tip: &mut [u16; 128], text: &str) {
-    for (slot, character) in tip.iter_mut().zip(wide(text)) {
+/// Copy `text` into a fixed UTF-16 buffer, zero-filling the remainder.
+fn fill_text(buffer: &mut [u16], text: &str) {
+    buffer.fill(0);
+    for (slot, character) in buffer.iter_mut().zip(wide(text)) {
         *slot = character;
     }
 }
@@ -380,4 +473,84 @@ fn remove_icon(window: Hwnd) {
     let mut data = icon_data(window, std::ptr::null_mut());
     // SAFETY: `data` is a local, fully initialized struct bound to `window`.
     let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &raw mut data) };
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    use super::{BINDINGS, HANDLER, PENDING, dispatch_hotkey, emit};
+    use crate::settings::Hotkey;
+    use crate::tray::Event;
+
+    /// The regression behind the abort users could hit: dispatching an
+    /// event *from inside a handler* (a modal picker pumping messages
+    /// re-enters the tray window procedure) once panicked the `RefCell`
+    /// borrow. Queued dispatch answers the event after the outer one.
+    #[test]
+    fn reentrant_dispatch_queues_and_replays() {
+        let handled = Rc::new(RefCell::new(Vec::<String>::new()));
+        HANDLER.with(|slot| {
+            let seen = Rc::clone(&handled);
+            *slot.borrow_mut() = Some(Box::new(move |event| {
+                let tag = match event {
+                    Event::Record => "record",
+                    Event::Photo => "photo",
+                    _ => "other",
+                };
+                seen.borrow_mut().push(tag.to_owned());
+                if let Event::Record = event {
+                    // Double dispatch while the borrow is still alive:
+                    // queued by the fix, panicked before it. The replay
+                    // happens when the outer dispatch returns, so the
+                    // Photo event runs after this handler ends.
+                    emit(Event::Photo);
+                }
+            }));
+        });
+
+        emit(Event::Record);
+
+        let seen = handled.borrow().clone();
+        assert_eq!(seen, vec!["record", "photo"], "both events answer");
+        assert!(PENDING.with_borrow(std::collections::VecDeque::is_empty));
+        HANDLER.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    #[test]
+    fn the_chime_binding_emits_the_mute_toggle() {
+        let fired = Rc::new(Cell::new(false));
+        BINDINGS.with_borrow_mut(|bindings| {
+            *bindings = crate::hotkeys::bindings(Hotkey::RECORD, Hotkey::PHOTO, Hotkey::CHIMES);
+        });
+        HANDLER.with(|slot| {
+            let seen = Rc::clone(&fired);
+            *slot.borrow_mut() = Some(Box::new(move |event| {
+                if matches!(event, Event::ToggleChimes) {
+                    seen.set(true);
+                }
+            }));
+        });
+        dispatch_hotkey(3);
+        assert!(fired.get(), "binding 3 toggles the chimes");
+        HANDLER.with(|slot| *slot.borrow_mut() = None);
+        BINDINGS.with_borrow_mut(Vec::clear);
+    }
+
+    #[test]
+    fn the_menu_entry_emits_the_mute_toggle() {
+        let fired = Rc::new(Cell::new(false));
+        HANDLER.with(|slot| {
+            let seen = Rc::clone(&fired);
+            *slot.borrow_mut() = Some(Box::new(move |event| {
+                if matches!(event, Event::ToggleChimes) {
+                    seen.set(true);
+                }
+            }));
+        });
+        let _ = super::dispatch_command(super::ID_CHIMES, std::ptr::null_mut());
+        assert!(fired.get(), "the menu entry toggles the chimes");
+        HANDLER.with(|slot| *slot.borrow_mut() = None);
+    }
 }

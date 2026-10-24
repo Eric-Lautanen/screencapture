@@ -4,8 +4,12 @@ mod app;
 mod autostart;
 mod capture;
 mod cli;
+#[cfg(windows)]
+mod clipboard;
 mod clock;
 mod config;
+#[cfg(target_os = "macos")]
+mod corefoundation;
 #[cfg(target_os = "macos")]
 mod coregraphics;
 mod doctor;
@@ -15,9 +19,16 @@ mod dxgi;
 mod dylib;
 mod encoder;
 mod ffmpeg;
+#[cfg(windows)]
+mod guard;
 mod hotkeys;
 mod instance;
+/// Layout pins: `pin_layout!` is crate-exported by [`layout`], so every
+/// FFI module can call `crate::pin_layout!` in place.
+mod layout;
 mod log;
+#[cfg(windows)]
+mod overlay;
 mod paths;
 mod pipe;
 mod recorder;
@@ -26,10 +37,15 @@ mod screen;
 #[cfg(windows)]
 mod selector;
 mod settings;
+#[cfg(windows)]
+mod settings_dialog;
 mod sha256;
+mod sound;
 mod tray;
 #[cfg(windows)]
 mod winapi;
+#[cfg(windows)]
+mod window_picker;
 #[cfg(target_os = "linux")]
 mod xlib;
 

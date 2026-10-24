@@ -1,24 +1,27 @@
 //! Tray lifecycle: platform-specific presenter behind one small API.
 
+use crate::hotkeys::Binding;
 use crate::recording::Profile;
+use crate::settings::Hotkey;
 
 /// Actions the tray asks the application to perform.
 #[derive(Clone, Copy, Debug)]
 pub enum Event {
     /// Start or stop a recording, honoring the configured capture mode.
     Record,
-    /// Start a recording from a rectangle the user draws on screen.
-    RecordRegion,
-    /// Records the application window under the cursor / last foreground.
-    RecordWindow,
+    /// Photograph the selection `[capture] mode` names — the same
+    /// selection path "Record" uses, different output.
+    Photo,
+    /// Open the settings window.
+    OpenSettings,
     /// Record one named display fullscreen (1-based, tray "Display N").
     RecordDisplay(u32),
-    /// Capture a still photo.
-    Photo,
-    /// The frame timer fired; capture and encode one frame.
-    Tick,
-    /// Flip login autostart on or off in OS and settings.
-    ToggleAutostart,
+    /// The recording watchdog fired; check the capture worker's health.
+    Watchdog,
+    /// Stop the active recording (the recording border's Stop button).
+    Stop,
+    /// Flip the capture chime from the tray's quick mute entry.
+    ToggleChimes,
     /// Switch the active capture profile.
     ProfileSelected(Profile),
     /// Quit the process cleanly.
@@ -42,6 +45,28 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// Whether Windows would accept `combo` as a global hotkey right now.
+/// The app's own registrations are lifted for the probe, so a combo
+/// already used by screencapture answers free; another process holding
+/// it answers taken. Used by the settings window while a field records
+/// the keys the user presses.
+#[must_use]
+#[cfg_attr(
+    not(windows),
+    expect(dead_code, reason = "only the Windows settings window probes combos")
+)]
+pub fn hotkey_available(combo: Hotkey) -> bool {
+    #[cfg(windows)]
+    {
+        win::hotkey_available(combo)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = combo;
+        true
+    }
+}
+
 /// Run the tray loop; returns when the user picks exit or the loop fails.
 /// `bindings` are registered as global hotkeys for the loop lifetime.
 ///
@@ -63,25 +88,60 @@ where
     }
 }
 
-/// Enable/disable the frame timer that emits [`Event::Tick`].
-pub fn set_frame_timer(interval_ms: Option<u32>) {
+/// Ask the tray to stop the active recording. The recording border's
+/// Stop button and the recording's Escape watch call this: it posts the
+/// command instead of stopping inline, so the border that owns the button
+/// can be destroyed while the button's own window procedure is still on
+/// the stack.
+#[cfg_attr(
+    not(windows),
+    expect(
+        dead_code,
+        reason = "only the Windows recording border has a Stop chip"
+    )
+)]
+pub fn stop_requested() {
     #[cfg(windows)]
-    win::set_frame_timer(interval_ms);
+    win::post_stop();
+}
+
+/// Keep the tray's quick mute entry in step with the settings: called at
+/// startup, after a Settings save, and by the toggle itself.
+pub fn set_chimes(enabled: bool) {
+    #[cfg(windows)]
+    win::set_chimes(enabled);
+    #[cfg(not(windows))]
+    {
+        let _ = enabled;
+    }
+}
+
+/// Enable/disable the recording watchdog that emits [`Event::Watchdog`].
+pub fn set_watchdog_timer(interval_ms: Option<u32>) {
+    #[cfg(windows)]
+    win::set_watchdog_timer(interval_ms);
     #[cfg(not(windows))]
     {
         let _ = interval_ms;
     }
 }
 
-/// The window handle the user had focused just before the tray menu
-/// opened, as a plain integer (Windows handle bits). "Record window"
-/// targets that application.
-#[must_use]
-pub fn previous_foreground() -> Option<usize> {
+/// Swap the global hotkey bindings live (settings-window saves move the
+/// old registrations off and register the new combos).
+#[cfg_attr(
+    not(windows),
+    expect(
+        dead_code,
+        reason = "the tray lands later on this platform; the seam stays ready"
+    )
+)]
+pub fn set_bindings(bindings: &[Binding]) {
     #[cfg(windows)]
-    return win::previous_foreground();
+    win::set_bindings(bindings.to_vec());
     #[cfg(not(windows))]
-    None
+    {
+        let _ = bindings;
+    }
 }
 
 #[cfg(windows)]
@@ -94,12 +154,12 @@ mod win;
 fn catalogued() -> [Event; 9] {
     [
         Event::Record,
-        Event::RecordRegion,
-        Event::RecordWindow,
-        Event::RecordDisplay(1),
         Event::Photo,
-        Event::Tick,
-        Event::ToggleAutostart,
+        Event::OpenSettings,
+        Event::RecordDisplay(1),
+        Event::Watchdog,
+        Event::Stop,
+        Event::ToggleChimes,
         Event::ProfileSelected(Profile::PROFILES[0]),
         Event::Exit,
     ]
