@@ -40,6 +40,7 @@ mod native {
             initial_owner: i32,
             name: *const u16,
         ) -> *mut c_void;
+        fn SetLastError(error: u32);
         fn GetLastError() -> u32;
     }
 
@@ -53,6 +54,11 @@ mod native {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
+        // `CreateMutexW` only promises `ERROR_ALREADY_EXISTS` on the existing
+        // case; clear the slot so a new mutex cannot inherit an unrelated
+        // prior error and masquerade as a second instance.
+        // SAFETY: plain thread-local last-error slot.
+        unsafe { SetLastError(0) };
         let handle = unsafe {
             // SAFETY: `name` outlives the call; attributes and initial
             // ownership are intentionally unused.
