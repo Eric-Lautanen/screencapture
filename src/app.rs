@@ -270,7 +270,10 @@ fn photograph(loaded: &mut Loaded, runtime: &mut Runtime) {
     match result {
         Ok(selection) => match take_photo(loaded, selection) {
             Ok(photo) => log::note("photo", &photo.describe()),
-            Err(error) => log::note("error", &format!("cannot take a photo: {error}")),
+            Err(error) => {
+                log::note("error", &format!("cannot take a photo: {error}"));
+                tray::warn("Cannot take a photo", &error.to_string());
+            }
         },
         Err(error) => log::note("error", &error.to_string()),
     }
@@ -316,21 +319,25 @@ fn begin(loaded: &mut Loaded, runtime: &mut Runtime, selection: Result<Selection
     }
     selection.region = sane_region(selection.region);
     #[cfg(windows)]
-    let border = show_border(selection.region);
+    let region = selection.region;
     match start_recording(loaded, selection) {
         Ok((recorder, engine)) => {
             runtime.recorder = Some(recorder);
             runtime.engine = Some(engine);
             #[cfg(windows)]
             {
-                runtime.border = border;
+                // The frame goes up once the recording is actually running:
+                // drawing it first flashed a border for a capture that never
+                // started, which is exactly the failure the log alone was
+                // hiding.
+                runtime.border = show_border(region);
                 runtime.escape = watch_escape();
             }
         }
         Err(error) => {
-            #[cfg(windows)]
-            drop(border);
-            log::note("error", &format!("cannot start recording: {error}"));
+            let message = format!("cannot start recording: {error}");
+            log::note("error", &message);
+            tray::warn("Cannot record", &error.to_string());
         }
     }
 }
@@ -391,18 +398,20 @@ fn start_recording(
         cursor: loaded.settings.cursor,
         media_dir: loaded.settings.video_dir.clone(),
         window: selection.window,
+        audio: loaded.settings.audio,
     };
     let recorder = Recorder::start(&binary, &plan)?;
     tray::set_watchdog_timer(Some(WATCHDOG_MS));
     log::note(
         "record",
         &format!(
-            "{} ({} from {},{} @ {} fps, {} to stop)",
+            "{} ({} from {},{} @ {} fps, {}, {} to stop)",
             recorder.output.display(),
             size_note(region, profile),
             region.x,
             region.y,
             profile.fps,
+            loaded.settings.audio.describe(),
             loaded.settings.hotkey,
         ),
     );

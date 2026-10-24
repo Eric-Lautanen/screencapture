@@ -54,19 +54,54 @@ pub fn input_args(stream: Stream) -> Vec<String> {
     ]
 }
 
+/// The mixed-audio input for one recording: the pipe the audio worker
+/// writes and the AAC bitrate the engine gives the track.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Sound<'a> {
+    /// Named pipe carrying 48 kHz stereo s16 samples.
+    pub path: &'a str,
+    /// `-b:a` value, from [`crate::audio::Quality::bitrate`].
+    pub bitrate: &'a str,
+}
+
 /// Full argument vector for a recording; `frame` is the output size the
 /// caller computed from the capture's aspect ratio, or `None` to keep the
-/// capture size.
+/// capture size, and `audio` describes the pipe the mixed capture stream
+/// arrives on, or `None` for a silent recording.
 #[must_use]
 pub fn record_args(
     stream: Stream,
     codec_args: &[String],
     frame: Option<(u32, u32)>,
     output: &Path,
+    audio: Option<Sound<'_>>,
 ) -> Vec<String> {
     let mut args = base_args();
     args.extend(input_args(stream));
     args.extend(["-i".to_owned(), "pipe:0".to_owned()]);
+    if let Some(sound) = audio {
+        // Raw PCM at the exact shape the audio worker writes. Two inputs
+        // mean stream selection is no longer automatic: the video is the
+        // first input's one stream, the mix is the second's.
+        args.extend([
+            "-f".to_owned(),
+            "s16le".to_owned(),
+            "-ar".to_owned(),
+            "48000".to_owned(),
+            "-ac".to_owned(),
+            "2".to_owned(),
+            "-i".to_owned(),
+            sound.path.to_owned(),
+            "-map".to_owned(),
+            "0:v:0".to_owned(),
+            "-map".to_owned(),
+            "1:a:0".to_owned(),
+            "-c:a".to_owned(),
+            "aac".to_owned(),
+            "-b:a".to_owned(),
+            sound.bitrate.to_owned(),
+        ]);
+    }
     if let Some((width, height)) = frame {
         // Resample to the frame the profile allows at the capture's own
         // aspect ratio. No padding: a 16:10 window through a 16:9 profile
@@ -133,6 +168,14 @@ pub struct Feed {
 impl Feed {
     /// Spawn ffmpeg with `args`, stdin piped for frame writes.
     ///
+    /// All three streams are named here, stderr included. A tray detaches
+    /// its console with `FreeConsole`, which leaves the process's standard
+    /// handles pointing at something that no longer exists; a child that
+    /// inherited one of those failed to spawn at all (Windows reports
+    /// `ERROR_NOT_SUPPORTED`, os error 50), so a photo wrote nothing and a
+    /// recording flashed its border and vanished. Nothing reads the
+    /// engine's stderr in a tray anyway.
+    ///
     /// # Errors
     /// Fails when the engine cannot be spawned or its stdin is unavailable.
     pub fn spawn(
@@ -145,9 +188,16 @@ impl Feed {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::null());
         crate::child::quiet(&mut command);
-        let mut child = command.spawn()?;
+        let mut child = command.spawn().map_err(|error| {
+            // The path belongs in the message: "the request is not
+            // supported" alone names neither the engine nor the file.
+            io::Error::new(
+                error.kind(),
+                format!("cannot start {}: {error}", binary.path.display()),
+            )
+        })?;
         let Some(stdin) = child.stdin.take() else {
             // A child spawned without its stdin still has to be reaped;
             // killing it here keeps the failure path from leaking one.
@@ -233,9 +283,74 @@ impl Drop for Feed {
 
 #[cfg(test)]
 mod tests {
-    use super::{Stream, still_args};
+    use super::{Stream, record_args, still_args};
     use crate::settings::StillDepth;
     use std::path::Path;
+
+    /// A named audio pipe adds a second input, the mapping that keeps the
+    /// video first, and the AAC encoder for it.
+    #[test]
+    fn a_sound_recording_names_the_audio_pipe() {
+        let stream = Stream {
+            width: 1280,
+            height: 720,
+            fps: 30,
+        };
+        let args = record_args(
+            stream,
+            &["-c:v".to_owned(), "libx264".to_owned()],
+            None,
+            Path::new("out.mp4"),
+            Some(super::Sound {
+                path: r"\\.\pipe\screencapture-1-1",
+                bitrate: "192k",
+            }),
+        );
+        let joined = args.join(" ");
+        assert!(joined.contains("-i \\\\.\\pipe\\screencapture-1-1"));
+        assert!(joined.contains("-map 0:v:0 -map 1:a:0"));
+        assert!(joined.contains("-c:a aac -b:a 192k"));
+        assert_eq!(args.last().map(String::as_str), Some("out.mp4"));
+    }
+
+    /// A silent recording names no audio input at all: one input, no maps.
+    #[test]
+    fn a_silent_recording_keeps_one_input() {
+        let stream = Stream {
+            width: 1280,
+            height: 720,
+            fps: 30,
+        };
+        let args = record_args(
+            stream,
+            &["-c:v".to_owned(), "libx264".to_owned()],
+            None,
+            Path::new("out.mp4"),
+            None,
+        );
+        let joined = args.join(" ");
+        assert!(!joined.contains("-map"));
+        assert!(!joined.contains("s16le"));
+    }
+
+    /// A spawn the system refuses has to say which engine it tried: the
+    /// bare OS text ("the request is not supported") sent the last hunt
+    /// through the installer, the settings file, and the capture backend
+    /// before anyone looked at the path.
+    #[test]
+    fn a_refused_spawn_names_the_engine() {
+        let binary = crate::ffmpeg::Binary {
+            path: std::path::PathBuf::from("screencapture-no-such-engine.exe"),
+        };
+        let Err(error) = super::Feed::spawn(&binary, &[], Path::new("out.mp4")) else {
+            panic!("a missing engine cannot start");
+        };
+        let text = error.to_string();
+        assert!(
+            text.contains("screencapture-no-such-engine.exe"),
+            "the message names the engine: {text}"
+        );
+    }
 
     /// Manual check of the finish budget: an engine that never exits is
     /// killed instead of waited on. Ignored because it burns five seconds.
@@ -300,6 +415,7 @@ mod tests {
             &[],
             Some((1152, 720)),
             Path::new("out.mp4"),
+            None,
         );
         let index = args
             .iter()
@@ -322,8 +438,33 @@ mod tests {
             &[],
             None,
             Path::new("out.mp4"),
+            None,
         );
         assert!(!args.contains(&"-vf".to_owned()));
+    }
+
+    #[test]
+    fn the_audio_bitrate_follows_the_quality() {
+        let quality = crate::audio::Quality::Speech;
+        let args = record_args(
+            Stream {
+                width: 640,
+                height: 360,
+                fps: 30,
+            },
+            &[],
+            None,
+            Path::new("out.mp4"),
+            Some(super::Sound {
+                path: r"\\.\pipe\screencapture-test",
+                bitrate: quality.bitrate(),
+            }),
+        );
+        let index = args
+            .iter()
+            .position(|arg| arg == "-b:a")
+            .expect("a sound recording names a bitrate");
+        assert_eq!(args[index + 1], "96k", "speech writes a smaller track");
     }
 
     #[test]

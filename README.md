@@ -28,7 +28,7 @@ and the same capture pipeline headless on macOS and Linux.</p>
     <td align="center" valign="top">
       <img src="assets/settings-window.png" width="440" alt="The screencapture Settings window" />
       <br />
-      <sub><strong>Settings</strong> — capture mode, profile, codec, chimes, hotkeys, and folders.</sub>
+      <sub><strong>Settings</strong> — capture mode, profile, codec, audio sources and quality, chimes, hotkeys, and folders.</sub>
     </td>
     <td align="center" valign="top">
       <img src="assets/tray-menu.png" width="200" alt="The screencapture tray menu" />
@@ -46,9 +46,13 @@ and the same capture pipeline headless on macOS and Linux.</p>
   or drag a rectangle. The selection outline and recording border never appear in
   the saved image.
 - **Keep your aspect ratio.** A profile is a size ceiling, not a new shape. A 16:10
-  window through a 720p profile becomes 1152×720, with no black bars.
+  window through a 720p profile becomes 1152×720, with no black bars — and a
+  screen smaller than the box keeps its own pixels instead of being upscaled.
 - **Paste without the file hunt.** Every still is saved as a PNG and placed on the
   Windows clipboard as a bitmap plus the finished PNG — one `Ctrl+V` away.
+- **Hear it too.** A recording carries system sound and the microphone, mixed
+  into one 48 kHz AAC stereo track at speech, standard, or full quality. A
+  missing or blocked device is a logged note, never a failed take.
 - **H.264 first.** The bundled engine's x264 is the default; AMF, QSV, NVENC,
   and Media Foundation are probed with their real encoder arguments and fall
   back to x264 with a notice when the machine cannot run them. If x264 itself
@@ -177,6 +181,29 @@ A still, or a stopped recording, answers with a soft three-note chime on
 Windows. Mute it from the tray menu, with `ctrl+shift+m`, or in Settings.
 Every still is also copied to the Windows clipboard.
 
+A capture that cannot start says so: the log beside the videos names the
+reason, and the tray shows a warning balloon with the same text, so a hotkey
+press never fails silently. `screencapture --check` prints the engine it
+resolved and whether it runs.
+
+Recordings carry an AAC stereo audio track. `[recording] system_audio` records
+what the default playback device plays and is on by default; `mic` records the
+default microphone and is off by default, so a take never surprises you with
+your own voice. Both switches are in Settings and in the file. The two sources
+are mixed against the recording clock, so a late packet becomes a moment of
+silence instead of drift. A machine with no playback or capture device records
+without that source — the video is never lost to missing sound.
+
+`audio_quality` sets what the track gets: `speech` (96 kbps) for a voice-over,
+`standard` (128 kbps), or the `high` default (192 kbps) that keeps music
+intact. Settings offers the same three choices, and the track is encoded once,
+after the mix, so the choice never touches the picture.
+
+The video profile is a ceiling, not a target: a 1920×1200 screen recorded with
+the 4K profile writes 1920×1200 at the capture's own 60 fps instead of an
+upscaled 3840×2160 file. Upscaling added no detail and tripled the pixels a
+player had to decode, which is what made 4K takes stutter on playback.
+
 ### Command line
 
 ```text
@@ -224,9 +251,15 @@ chimes = true
 depth = 8
 
 [recording]
-profile = uhd-4k60
+profile = hd-1080p60
 codec = x264
 cursor = false
+# Sound: system_audio records the default playback device, mic the
+# default microphone; both mix into one AAC stereo track.
+mic = false
+system_audio = true
+# audio_quality: speech (96 kbps), standard (128 kbps), high (192 kbps).
+audio_quality = high
 autostart = true
 
 [media]
@@ -234,8 +267,10 @@ videos = "C:\Users\you\Videos\Screencapture"
 images = "C:\Users\you\Pictures\Screencapture"
 ```
 
-Run `screencapture --init` to write the complete template. Unknown keys are
-preserved, and invalid values fall back to safe defaults with a logged note.
+Run `screencapture --init` to write the complete commented template (it
+refuses to overwrite an existing file). Unknown keys are preserved, and
+invalid values fall back to safe defaults with a logged note — the note names
+the accepted values, and `screencapture --check` prints the parsed result.
 
 ## Platform support
 
@@ -248,6 +283,7 @@ preserved, and invalid values fall back to safe defaults with a logged note.
 | Window recording | ✅ own content (Graphics Capture) | ✅ compositor window list | ✅ X client rect |
 | Exact rectangle (`--rect`) | ✅ | ✅ | ✅ |
 | Still photos (PNG) | ✅ | ✅ | ✅ |
+| Recording audio (system + mic, 3 quality levels) | ✅ WASAPI loopback and capture | — | — |
 | Clipboard handoff | ✅ | — | — |
 | Capture chimes | ✅ | — | — |
 | Autostart | ✅ registry | ✅ LaunchAgent | ✅ XDG entry |
@@ -268,6 +304,10 @@ frame and writes as many copies as the wall clock says are due, so a missed
 deadline becomes a repeated frame rather than a short clip. The tray pump only
 starts, stops, and watches the worker, keeping menus and the Stop chip
 responsive mid-recording.
+
+Audio runs beside the frames: WASAPI loopback and the microphone are mixed
+into one 48 kHz stereo PCM stream on that same wall clock, which the engine
+reads from a named pipe as a second input.
 
 Windows records whole displays through Desktop Duplication, with the mouse
 pointer composited in software, and every other target through GDI. A picked

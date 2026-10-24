@@ -1158,6 +1158,104 @@ Plan of record, in build order. Every session ends with
 - [x] Code signing was scoped, then dropped: the binaries ship unsigned and
   the release notes point at the public source and the published checksums.
 
+## Session 32 - Recording audio, and a two-column Settings sheet (done)
+
+- [x] `src/audio/` records sound through hand-written WASAPI FFI: the default
+  playback device through loopback (`RENDER`) and the default microphone
+  through capture (`CAPTURE`), both opened as `IAudioClient` shared-mode
+  streams and read with an event handle. No crate dependency was added.
+- [x] The two sources are mixed on the recording clock rather than on arrival:
+  a worker drains both into queues and writes 10 ms chunks of 48 kHz stereo
+  `s16`, filling a gap with silence and trimming a queue that runs fast, so
+  audio stays aligned with the paced video.
+- [x] The mix reaches the engine through a named pipe it reads as a second
+  input (`-f s16le -ar 48000 -ac 2`), mapped as AAC in the same MP4. A source
+  that refuses is a logged note, never a failed take: the recording simply
+  carries the sources that opened.
+- [x] `[recording] mic = false` and `system_audio = true` are the switches,
+  parsed independently so a bad value only costs that one source, seeded into
+  the template with a comment, and validated in `settings::tests`.
+- [x] The Settings window was rebuilt as a two-column sheet — Capture,
+  Recording and Still photo on the left; Audio and Hotkeys on the right; full
+  width Application and Folders bands beneath — at 728x514 designed pixels.
+  The shorter, wider shape fits a 1366x768 laptop at its native scale, where
+  the old 490x676 sheet had to shrink. `assets/settings-window.png` was
+  recaptured from the new window.
+- [x] The Audio group carries both recording switches and a one-line note;
+  the microphone and system switches persist through Save like every other
+  control (verified by driving the dialog and reading the written file).
+- [x] Verified live: a 2 s full-display recording is H.264 3456x2160 plus AAC
+  48 kHz stereo, 1.95 s of audio under 2.02 s of video; a desktop notification
+  during a take measured `max_volume: -19.7 dB` against `-44.4 dB` mean.
+- [x] Cross-target gates stay green: the non-Windows `audio` stubs answer no
+  prepared sources and an inert handle, with narrowly scoped `expect`s where
+  the stub must keep the Windows signature; clippy is clean on the five
+  supported targets.
+
+## Session 33 - A silent failure made visible (done)
+
+- [x] The installed 0.1.9 build stopped saving stills and recordings for a
+  stretch: every still failed with `cannot start the encoder: The request is
+  not supported. (os error 50)` and every recording failed before its first
+  frame, so the red border and its Stop chip appeared and were gone in the
+  same breath. The log also showed photos never reached a folder at all, so
+  the shell known-folder lookup was not the cause; the engine never started.
+- [x] The recording frame is now shown *after* `Recorder::start` answers Ok,
+  not before it. A capture that refuses to start no longer flashes a border
+  for a recording that does not exist.
+- [x] A failed start now says so in the tray as a warning balloon
+  (`tray::warn`), with the same text the log gets. The log alone is
+  invisible to a tray-only user, which is how the flash read as "broken".
+- [x] A refused spawn names the engine (`cannot start <path>: <os error>`);
+  the bare OS text sent the last hunt through the installer, the settings
+  file, and the capture backend before anyone looked at the path.
+- [x] The engine is spawned with all three streams named — stderr included —
+  so nothing is inherited from a tray that called `FreeConsole`. An
+  inherited standard handle is the documented way `CreateProcess` fails
+  with `ERROR_NOT_SUPPORTED` after a console is detached.
+- [x] Audio review, with two real fixes: the audio worker joins the
+  multithreaded apartment before polling clients activated on the setup
+  thread, and a packet the engine flags silent (or reports without lending
+  a buffer) keeps its duration instead of being dropped, which would have
+  pulled every later sample earlier against the video.
+- [x] A/V alignment: the audio worker counts from the same `Instant` the
+  frames are paced by, so its connect time becomes silence at the head of
+  the track. A 3 s recording went from 2.92 s of audio against 3.02 s of
+  video to 3.01 s against 3.02 s; the beeps still measure -6.9 dB peak.
+- [x] Tests: `a_refused_spawn_names_the_engine` pins the diagnostic, and
+  `append_packet`'s three cases pin packets that carry no samples, carry
+  the silent flag, or decode little-endian stereo. The capture loop now
+  takes one `Session` value instead of eight arguments.
+
+## Session 34 - Playback that keeps up, and an audio quality choice (done)
+
+- [x] The video profile is a ceiling, not a target: a capture inside the
+  profile box keeps its own pixels instead of being upscaled into it. The
+  1920x1200 screen had recorded the 4K profile as 3456x2160 (and a full-screen
+  video as 3840x2116), which is four times the pixels to encode and decode
+  with no detail to show for it; that is why 4K takes stuttered on playback
+  while 1080p takes did not. `Profile::fit` now caps and never enlarges.
+- [x] Measured on a fresh 6 s take of the same screen while the pointer moved:
+  1920x1200 @ 60 fps, 5.4 Mb/s, 60 distinct frames in every moving second
+  (against 52 Mb/s and a 3840x2116 frame for the same content before).
+- [x] `[recording] audio_quality` chooses the AAC track's bitrate — `speech`
+  (96 kbps), `standard` (128 kbps), or `high` (192 kbps, the default, so an
+  existing file keeps what it had). Settings exposes the same three choices
+  in the Audio group, and Save persists the id.
+- [x] Verified live: a 3 s take with `audio_quality = speech` writes a 99,631
+  b/s AAC track (48 kHz stereo) under 3.017 s of video from 3.010 s of audio,
+  and driving the dialog's combo to Speech writes `audio_quality = speech`.
+- [x] `hd-1080p60` is the shipped default profile, and the template writes
+  `recording::DEFAULT.id` instead of a hand-copied id, so the default cannot
+  drift from the profile table again. `assets/settings-window.png` was
+  recaptured from the new sheet with the default settings.
+- [x] `--init` writes the commented template itself rather than a rendered
+  document, which had been stripping every comment (including the ones that
+  explain the audio keys). The write goes through a temporary file and a
+  rename, and still refuses to touch an existing file. The start-of-take log
+  line now names the audio shape (`system+mic audio at high`) and
+  `--check` prints `audio: system=… mic=… quality=…`.
+
 ## Deferred backlog
 
 - numbered display names via `EnumDisplayDevices`; mac multi-display
@@ -1174,4 +1272,7 @@ Plan of record, in build order. Every session ends with
   owner), where stills currently land on disk only;
 - a real 16-bit (or HDR) capture route for the session-13 depth hook;
   per-vendor HEVC quality mapping (needs an eyeball session);
-  installer run/uninstall cycle (needs elevation + GUI, or CI).
+  installer run/uninstall cycle (needs elevation + GUI, or CI);
+- audio device pickers (both streams currently take the default playback and
+  recording devices), a live level meter in Settings, and non-Windows audio
+  capture (macOS `AVCaptureScreenInput` audio, Linux PulseAudio/PipeWire).

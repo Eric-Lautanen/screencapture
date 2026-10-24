@@ -69,6 +69,17 @@ fn apply_settings(loaded: &mut Loaded, runtime: &mut Runtime, answers: &Answers)
     document.set("recording", "profile", Value::Str(answers.profile.clone()));
     document.set("recording", "codec", Value::Str(answers.codec.clone()));
     document.set("recording", "cursor", Value::Bool(answers.cursor));
+    document.set("recording", "mic", Value::Bool(answers.audio.mic));
+    document.set(
+        "recording",
+        "system_audio",
+        Value::Bool(answers.audio.system),
+    );
+    document.set(
+        "recording",
+        "audio_quality",
+        Value::Str(answers.audio.quality.id().to_owned()),
+    );
     document.set("recording", "autostart", Value::Bool(answers.autostart));
     document.set("photo", "depth", Value::Str(answers.depth.clone()));
     // Choosing one folder for both outputs splits it into `video` and

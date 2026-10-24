@@ -1,10 +1,10 @@
 //! The tray Settings window: Win32 controls over the typed settings view,
 //! so every schema-visible choice is editable in one place — capture mode
-//! and display, recording profile and codec, photo depth, cursor,
-//! autostart, and capture chimes, the record/photo/chime hotkey combos
-//! (free modifier+key text, validated before accept), and the destination
-//! folders, where videos
-//! and images each get their own field plus a native folder browse.
+//! and display, recording profile and codec, cursor, the recorded audio
+//! sources and their quality, photo depth, autostart, and capture chimes, the
+//! record/photo/chime hotkey combos (free modifier+key text, validated
+//! before accept), and the destination folders, where videos and images
+//! each get their own field plus a native folder browse.
 //! A modal loop runs on the calling thread; Save answers
 //! [`Answers`] (validated), Cancel or close answers `None` and leaves
 //! all state untouched. Control rows live in [`rows`], raw Win32 in
@@ -61,6 +61,9 @@ const EDIT_IMAGES: i32 = 111;
 const BTN_BROWSE_VIDEOS: i32 = 112;
 const BTN_BROWSE_IMAGES: i32 = 113;
 const CHECK_CHIMES: i32 = 114;
+const CHECK_SYSTEM_AUDIO: i32 = 116;
+const CHECK_MIC: i32 = 117;
+const COMBO_AUDIO_QUALITY: i32 = 118;
 /// Standard dialog ids: `IsDialogMessageW` sends `IDOK` for Enter and
 /// `IDCANCEL` for Escape, so the buttons must carry those identities.
 const BTN_SAVE: i32 = 1;
@@ -83,6 +86,8 @@ pub struct Answers {
     pub codec: String,
     /// Whether recordings redraw the mouse pointer.
     pub cursor: bool,
+    /// Which audio sources recordings carry.
+    pub audio: crate::audio::Wanted,
     /// Whether the app launches at login.
     pub autostart: bool,
     /// New photo depth (`8` or `16`).
@@ -356,6 +361,11 @@ fn save(window: Hwnd) {
     let videos = edit_text(EDIT_VIDEOS);
     let images = edit_text(EDIT_IMAGES);
     let cursor = check_state(CHECK_CURSOR);
+    let audio = crate::audio::Wanted {
+        mic: check_state(CHECK_MIC),
+        system: check_state(CHECK_SYSTEM_AUDIO),
+        quality: crate::audio::Quality::CHOICES[combo_choice(COMBO_AUDIO_QUALITY)],
+    };
     let autostart = check_state(CHECK_AUTOSTART);
     let chimes = check_state(CHECK_CHIMES);
 
@@ -425,6 +435,7 @@ fn save(window: Hwnd) {
             profile,
             codec,
             cursor,
+            audio,
             autostart,
             depth,
             chimes,

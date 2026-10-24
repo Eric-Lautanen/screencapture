@@ -1,6 +1,7 @@
 //! `screencapture`: professional 4K screen recording and still-image capture.
 
 mod app;
+mod audio;
 mod autostart;
 mod capture;
 mod child;

@@ -7,6 +7,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::audio;
 use crate::config::{Document, Value};
 use crate::encoder::Video;
 use crate::paths;
@@ -160,6 +161,8 @@ pub struct Settings {
     pub autostart: bool,
     /// Include the mouse pointer in captures.
     pub cursor: bool,
+    /// Which audio sources recordings include.
+    pub audio: audio::Wanted,
     /// Still-photo channel depth.
     pub photo_depth: StillDepth,
     /// Play a soft chime when a still is taken or a recording is stopped.
@@ -225,9 +228,46 @@ pub fn load(config: Option<&Path>) -> Loaded {
 }
 
 fn default_document() -> Document {
+    Document::from_text(&template_text()).expect("built-in default template must parse")
+}
+
+/// The commented settings template with this machine's default folders:
+/// what a new file starts from, and what `--init` writes, so the file a
+/// user opens explains every key instead of listing bare values.
+#[must_use]
+pub fn template_text() -> String {
     let videos = paths::video_dir().unwrap_or_else(|| PathBuf::from(DEFAULT_DIRECTORY));
     let images = paths::image_dir().unwrap_or_else(|| PathBuf::from(DEFAULT_DIRECTORY));
-    Document::from_text(&template(&videos, &images)).expect("built-in default template must parse")
+    template(&videos, &images)
+}
+
+/// Write the commented template to `path`, creating its directory, via a
+/// temporary file and a rename so a half-written settings file is never
+/// left where the next launch would read it.
+///
+/// # Errors
+/// Propagates a directory, write, or rename failure.
+pub fn write_template(path: &Path) -> io::Result<()> {
+    // A bare file name has an empty parent, which `create_dir_all` must
+    // not be handed.
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(".tmp");
+    let temporary = PathBuf::from(temporary);
+    if let Err(error) = fs::write(&temporary, template_text()) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn template(videos: &Path, images: &Path) -> String {
@@ -261,7 +301,7 @@ fn template(videos: &Path, images: &Path) -> String {
             "depth = 8\n",
             "\n",
             "[recording]\n",
-            "profile = uhd-4k60\n",
+            "profile = {profile}\n",
             "# codec: x264 (universal default), x265 (HEVC on CPU), or a\n",
             "# hardware accelerator: amf | qsv | nvenc | mf (H.264) and\n",
             "# amf-hevc | qsv-hevc | nvenc-hevc | mf-hevc (HEVC). Hardware\n",
@@ -269,6 +309,14 @@ fn template(videos: &Path, images: &Path) -> String {
             "# another hardware H.264 unit, and only then CPU x265.\n",
             "codec = x264\n",
             "cursor = false\n",
+            "# Audio: mic records the default microphone, off by default so a\n",
+            "# recording never surprises you with your own voice;\n",
+            "# system_audio records what the default playback device plays.\n",
+            "mic = false\n",
+            "system_audio = true\n",
+            "# audio_quality: the track's AAC bitrate — speech (96 kbps),\n",
+            "# standard (128 kbps), or high (192 kbps, the default).\n",
+            "audio_quality = high\n",
             "autostart = true\n",
             "\n",
             "[engine]\n",
@@ -283,7 +331,8 @@ fn template(videos: &Path, images: &Path) -> String {
         ),
         videos = videos.display(),
         images = images.display(),
-        mode = DEFAULT_CAPTURE_MODE
+        mode = DEFAULT_CAPTURE_MODE,
+        profile = crate::recording::DEFAULT.id
     )
 }
 
@@ -313,6 +362,7 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
     let depth_raw = document.value("photo", "depth");
     let depth = still_depth(depth_raw);
     let mut problems = Vec::new();
+    let audio = audio_settings(document, &mut problems);
     if depth_raw.is_some() && depth.is_none() {
         problems.push(format!("invalid photo depth; using {}", StillDepth::Eight));
     }
@@ -330,16 +380,7 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
             "invalid capture mode; using {DEFAULT_CAPTURE_MODE}"
         ));
     }
-    // A file can carry `region` from Windows (or from that older default):
-    // without the overlay the pick cannot run, so capture the whole display
-    // instead of failing the recording before it starts.
-    let mode = mode.unwrap_or(DEFAULT_CAPTURE_MODE);
-    let mode = if mode == CaptureMode::Region && !cfg!(windows) {
-        problems.push("the region picker needs Windows; using full capture".to_owned());
-        CaptureMode::Full
-    } else {
-        mode
-    };
+    let mode = usable_mode(mode.unwrap_or(DEFAULT_CAPTURE_MODE), &mut problems);
     if display_raw.is_some() && display.is_none() {
         problems.push(format!(
             "invalid capture display; using {}",
@@ -386,6 +427,7 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
         chime_hotkey,
         autostart: autostart.unwrap_or(true),
         cursor: cursor.unwrap_or(false),
+        audio,
         photo_depth: depth.unwrap_or(StillDepth::Eight),
         chimes: chimes.unwrap_or(true),
         video_dir,
@@ -393,6 +435,18 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
         engine: engine_path(document),
     };
     (settings, problems)
+}
+
+/// The capture mode this platform can actually run: the picker is
+/// Windows-only, so a `region` value elsewhere captures the whole display
+/// instead of failing before the recording starts.
+fn usable_mode(mode: CaptureMode, problems: &mut Vec<String>) -> CaptureMode {
+    if mode == CaptureMode::Region && !cfg!(windows) {
+        problems.push("the region picker needs Windows; using full capture".to_owned());
+        CaptureMode::Full
+    } else {
+        mode
+    }
 }
 
 /// A photo-depth value: bare text (`"8"`, quoted or not) and bare
@@ -458,6 +512,45 @@ fn same_path(a: &Path, b: &Path) -> bool {
             .to_ascii_lowercase()
     };
     normalize(a) == normalize(b)
+}
+
+/// The two audio switches and the track's quality, defaulted
+/// independently: the microphone stays off so a recording never surprises
+/// anyone with their own voice, the system mix stays on because it is what
+/// a screen recording is for, and the track keeps its full bitrate.
+fn audio_settings(document: &Document, problems: &mut Vec<String>) -> audio::Wanted {
+    let mic_raw = document.value("recording", "mic");
+    let mic = mic_raw.and_then(Value::as_bool);
+    let system_raw = document.value("recording", "system_audio");
+    let system = system_raw.and_then(Value::as_bool);
+    let quality_raw = document
+        .value("recording", "audio_quality")
+        .and_then(Value::as_str);
+    let quality = quality_raw.and_then(audio::Quality::parse);
+    if mic_raw.is_some() && mic.is_none() {
+        problems.push("invalid mic flag; using false".to_owned());
+    }
+    if system_raw.is_some() && system.is_none() {
+        problems.push("invalid system_audio flag; using true".to_owned());
+    }
+    if quality_raw.is_some() && quality.is_none() {
+        // Name the accepted values: a typo is otherwise only a note that
+        // the value was ignored, with no way to find the right spelling.
+        let choices: Vec<&str> = audio::Quality::CHOICES
+            .iter()
+            .map(|choice| choice.id())
+            .collect();
+        problems.push(format!(
+            "invalid audio_quality; using {} (choices: {})",
+            audio::Quality::default().id(),
+            choices.join(", ")
+        ));
+    }
+    audio::Wanted {
+        mic: mic.unwrap_or(false),
+        system: system.unwrap_or(true),
+        quality: quality.unwrap_or_default(),
+    }
 }
 
 fn image_directory(document: &Document) -> PathBuf {

@@ -228,26 +228,31 @@ fn register_hotkeys(window: Hwnd) {
     LIVE.with_borrow_mut(|slot| *slot = live);
 }
 
-/// Say in the tray that a saved hotkey could not be registered. The log
-/// alone is invisible to a tray-only user; the balloon is the only sign
-/// that a combo needs changing, so it names the action that lost one.
-fn notify_hotkey_taken(role: crate::hotkeys::Role) {
+/// Say something in the tray. The log alone is invisible to a tray-only
+/// user, so a capture that refused to start — or a hotkey another app
+/// took — has to reach the screen as well.
+pub(super) fn warn(title: &str, message: &str) {
     let Some(window) = WINDOW.with_borrow(|slot| *slot) else {
         return;
     };
     let mut data = icon_data(window, std::ptr::null_mut());
     data.flags = NIF_INFO;
     data.info_flags = NIIF_WARNING;
-    fill_text(&mut data.info_title, "Hotkey unavailable");
-    fill_text(
-        &mut data.info,
+    fill_text(&mut data.info_title, title);
+    fill_text(&mut data.info, message);
+    // SAFETY: `data` is a local initialized struct bound to the live icon.
+    let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &raw mut data) };
+}
+
+/// A saved hotkey could not be registered: name the action that lost it.
+fn notify_hotkey_taken(role: crate::hotkeys::Role) {
+    warn(
+        "Hotkey unavailable",
         &format!(
             "The {} hotkey is already used by another app. Open Settings to choose another.",
             role.label()
         ),
     );
-    // SAFETY: `data` is a local initialized struct bound to the live icon.
-    let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &raw mut data) };
 }
 
 fn unregister_hotkeys(window: Hwnd) {

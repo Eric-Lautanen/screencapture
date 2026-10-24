@@ -67,6 +67,8 @@ pub(super) type StopAction = fn();
 
 pub(super) const SWP_NOACTIVATE: u32 = 0x0010;
 pub(super) const SWP_SHOWWINDOW: u32 = 0x0040;
+pub(super) const SWP_NOMOVE: u32 = 0x0002;
+pub(super) const SWP_NOSIZE: u32 = 0x0001;
 pub(super) const HWND_TOPMOST: Hwnd = -1isize as Hwnd;
 
 /// Frame thickness and dash pattern, in physical pixels.
@@ -229,6 +231,21 @@ impl Border {
             );
             InvalidateRect(self.window, std::ptr::null(), 1);
             UpdateWindow(self.window);
+            // Both windows are topmost, and within that band the one raised
+            // last wins: without this the outline's `HWND_TOPMOST` promotion
+            // puts the dashed edge over the Stop chip whenever the frame is
+            // placed or moved. Re-raising the chip keeps it on top.
+            if let Some(stop) = self.stop {
+                SetWindowPos(
+                    stop,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                );
+            }
         }
     }
 }

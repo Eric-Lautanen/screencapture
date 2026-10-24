@@ -11,7 +11,7 @@ use super::{
 fn builtin_template_round_trips_through_defaults() {
     let document = default_document();
     let (settings, problems) = read_document(&document);
-    assert_eq!(settings.profile.id, "uhd-4k60");
+    assert_eq!(settings.profile.id, "hd-1080p60");
     assert_eq!(settings.hotkey, Hotkey::RECORD);
     assert_eq!(settings.photo, Hotkey::PHOTO);
     assert_eq!(settings.chime_hotkey, Hotkey::CHIMES);
@@ -21,6 +21,13 @@ fn builtin_template_round_trips_through_defaults() {
     assert!(!settings.cursor);
     assert_eq!(settings.photo_depth, StillDepth::Eight);
     assert!(settings.chimes, "captures are audible by default");
+    assert!(!settings.audio.mic, "the microphone starts muted");
+    assert!(settings.audio.system, "system sound is on by default");
+    assert_eq!(
+        settings.audio.quality,
+        crate::audio::Quality::High,
+        "the track starts at full quality"
+    );
     assert!(settings.engine.is_none());
     assert_eq!(problems.len(), 0);
     let reparsed = Document::from_text(&document.to_text()).expect("rendered text must reparse");
@@ -219,7 +226,7 @@ fn invalid_values_fall_back_with_problems() {
     .expect("sample must parse");
     let (settings, problems) = read_document(&document);
     assert_eq!(settings.hotkey, Hotkey::RECORD);
-    assert_eq!(settings.profile.id, "uhd-4k60");
+    assert_eq!(settings.profile.id, "hd-1080p60");
     assert!(settings.autostart);
     assert_eq!(problems.len(), 3);
 }
@@ -281,4 +288,82 @@ fn invalid_booleans_report_their_fallbacks() {
     assert!(settings.autostart);
     assert!(!settings.cursor);
     assert_eq!(problems.len(), 2);
+}
+
+/// The two audio switches answer independently, and each has its own
+/// fallback: an unreadable value never turns the microphone on by accident.
+#[test]
+fn audio_switches_default_and_fall_back_separately() {
+    let document = Document::from_text("[recording]\nmic = true\nsystem_audio = false\n")
+        .expect("sample must parse");
+    let (settings, problems) = read_document(&document);
+    assert!(settings.audio.mic);
+    assert!(!settings.audio.system);
+    assert_eq!(problems.len(), 0);
+
+    let invalid = Document::from_text("[recording]\nmic = maybe\nsystem_audio = loud\n")
+        .expect("sample must parse");
+    let (settings, problems) = read_document(&invalid);
+    assert!(!settings.audio.mic, "an invalid mic flag stays muted");
+    assert!(
+        settings.audio.system,
+        "an invalid system flag keeps sound on"
+    );
+    assert_eq!(problems.len(), 2);
+    assert!(problems.iter().any(|problem| problem.contains("mic")));
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.contains("system_audio"))
+    );
+}
+
+/// `--init` writes the commented template, not a bare rendered document:
+/// the comments are the only place the quality values are explained, and
+/// the file has to parse back to the same defaults the app runs with.
+#[test]
+fn the_init_template_carries_its_comments() {
+    let directory =
+        std::env::temp_dir().join(format!("screencapture-template-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    let path = directory.join("settings.ini");
+    super::write_template(&path).expect("write the template");
+    let text = std::fs::read_to_string(&path).expect("read it back");
+    for wanted in [
+        "# screencapture settings",
+        "# audio_quality: the track's AAC bitrate",
+        "audio_quality = high",
+        "profile = hd-1080p60",
+    ] {
+        assert!(text.contains(wanted), "missing {wanted:?}: {text}");
+    }
+    let document = Document::from_text(&text).expect("the written template must parse");
+    let (settings, problems) = read_document(&document);
+    assert_eq!(problems, Vec::<String>::new());
+    assert_eq!(settings.profile.id, "hd-1080p60");
+    assert_eq!(settings.audio.quality, crate::audio::Quality::High);
+    assert!(!directory.join("settings.ini.tmp").exists());
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// The track's quality follows its key and falls back to the full bitrate,
+/// never to a thinner track the user did not ask for.
+#[test]
+fn audio_quality_parses_and_falls_back() {
+    let document =
+        Document::from_text("[recording]\naudio_quality = speech\n").expect("sample must parse");
+    let (settings, problems) = read_document(&document);
+    assert_eq!(settings.audio.quality, crate::audio::Quality::Speech);
+    assert_eq!(problems.len(), 0);
+
+    let invalid =
+        Document::from_text("[recording]\naudio_quality = tinny\n").expect("sample must parse");
+    let (settings, problems) = read_document(&invalid);
+    assert_eq!(settings.audio.quality, crate::audio::Quality::High);
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.contains("audio_quality")),
+        "the unreadable value is reported: {problems:?}"
+    );
 }

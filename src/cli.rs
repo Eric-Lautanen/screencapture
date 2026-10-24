@@ -23,7 +23,7 @@ USAGE:
     screencapture --rect X,Y,W,H  capture one rectangle (region records, photos)
     screencapture --photo [--mode ...]  take one still photo, then exit
     screencapture --check      diagnose install path, settings, and engine
-    screencapture --init       write the default settings file if missing
+    screencapture --init       write the commented settings template if missing
     screencapture --config P   use a specific settings file
     screencapture --version    print the version
     screencapture --help       print this help
