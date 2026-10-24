@@ -1134,6 +1134,35 @@ Plan of record, in build order. Every session ends with
   plus 3 icon integration tests. Release build, installer, and CLI smoke.
 - [x] Tag `v0.1.1` and publish the rebuilt setup plus its SHA-256 checksum.
 
+
+## Session 31 - Signed release pipeline (setup complete, onboarding pending)
+
+- [x] `.github/workflows/release.yml` runs on `v*` tags, requires the tag to be
+  on `main` and to match `Cargo.toml`, runs the full gates, fetches the pinned
+  FFmpeg engine, and builds the NSIS installer.
+- [x] Signing order is deliberate: SignPath signs `screencapture.exe` first,
+  the installer is rebuilt around that signed executable, and then
+  `screencapture-setup.exe` is signed. Both files are verified for a valid
+  Authenticode status and timestamp before publishing.
+- [x] Two artifact configurations and the `signpath/` XML live in the repo;
+  `scripts/verify-signature.ps1` is reusable for local verification.
+- [x] README carries the required SignPath Foundation code-signing policy,
+  roles, attribution, and privacy statement; `docs/SIGNING.md` records the
+  one-time onboarding, secret/variable setup, tag flow, and failure modes.
+- [x] `CompanyName` was added to the NSIS version resource so the installer
+  can carry the same metadata restriction as the application.
+- [x] Bumped the tree to `0.1.2` in `Cargo.toml`, `Cargo.lock`, the exe version
+  resource, and the NSIS script, so `v0.1.2` can be the first signed tag.
+- [x] `tests/version.rs` fails when the package version and the hand-written
+  exe-resource and NSIS versions disagree, so the normal test gate guards the
+  bump instead of the tag run.
+- [x] CI compiles the installer script and checks the built setup's product
+  version on every push, so a broken or stale script fails before a
+  release tag.
+- [ ] Apply to SignPath Foundation, add `SIGNPATH_API_TOKEN` and the five
+  repository variables, and approve the first signed release. The `v0.1.1`
+  release remains unsigned; `v0.1.2` is the pending signed tag.
+
 ## Deferred backlog
 
 - numbered display names via `EnumDisplayDevices`; mac multi-display
