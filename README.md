@@ -286,6 +286,9 @@ from the pinned [`autobuild-2026-10-18-13-01`](https://github.com/BtbN/FFmpeg-Bu
 release (`ffmpeg version n9.0.2-28-g669f5ab083-20261018`), shipped with
 `ffprobe.exe` and its license text. The archive SHA-256 is
 `a38198cc130ed3fa02097d0baebcea9c1b8a9d9d3d1d8161d691d1f03709158b`.
+The corresponding source is FFmpeg commit
+[`669f5ab083`](https://github.com/FFmpeg/FFmpeg/commit/669f5ab083c7732c10f1ce9e4f1915960dd88457),
+built by [BtbN's scripts](https://github.com/BtbN/FFmpeg-Builds).
 
 [`scripts/fetch-ffmpeg.ps1`](scripts/fetch-ffmpeg.ps1) downloads that exact
 archive with PowerShell and .NET, checks its byte count and SHA-256, and
