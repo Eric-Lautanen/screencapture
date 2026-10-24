@@ -47,3 +47,5 @@ once repo packaging lands there.
 - Setup and the uninstaller use `assets/icon.ico`; the installed exe carries
   the same multi-size icon as a resource.
 - `EstimatedSize` is computed at install time with `${GetSize}`.
+- Signed releases use the tag-triggered workflow and SignPath setup in
+  `docs/SIGNING.md`.

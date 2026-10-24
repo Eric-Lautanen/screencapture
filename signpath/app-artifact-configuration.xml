@@ -1,0 +1,14 @@
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <!-- actions/upload-artifact stores this artifact as a ZIP. -->
+  <parameters>
+    <parameter name="version" required="true"/>
+  </parameters>
+  <zip-file>
+    <pe-file path="screencapture.exe"
+             product-name="screencapture"
+             product-version="${version}"
+             company-name="Eric Lautanen">
+      <authenticode-sign/>
+    </pe-file>
+  </zip-file>
+</artifact-configuration>
