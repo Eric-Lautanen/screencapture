@@ -419,6 +419,7 @@ mod native {
             assert!(text.contains("<key>RunAtLoad</key>"));
         }
 
+        #[cfg(target_os = "macos")]
         #[test]
         fn the_plist_path_lives_in_launch_agents() {
             let path = document_path(Path::new("/Users/ericl"), None);
@@ -448,6 +449,7 @@ mod native {
             );
         }
 
+        #[cfg(target_os = "linux")]
         #[test]
         fn the_xdg_path_honors_the_config_home() {
             let home = Path::new("/home/ericl");

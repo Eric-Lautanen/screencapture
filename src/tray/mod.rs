@@ -173,6 +173,6 @@ mod parity {
     /// mac target too; both keep the enum alive).
     #[test]
     fn events_construct_on_every_platform() {
-        assert_eq!(catalogued().len(), 8);
+        assert_eq!(catalogued().len(), 9);
     }
 }
