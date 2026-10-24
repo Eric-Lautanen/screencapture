@@ -3,6 +3,7 @@
 mod app;
 mod autostart;
 mod capture;
+mod child;
 mod cli;
 #[cfg(windows)]
 mod clipboard;

@@ -146,6 +146,7 @@ impl Feed {
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::inherit());
+        crate::child::quiet(&mut command);
         let mut child = command.spawn()?;
         let Some(stdin) = child.stdin.take() else {
             // A child spawned without its stdin still has to be reaped;
