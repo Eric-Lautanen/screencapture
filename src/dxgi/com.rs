@@ -27,9 +27,7 @@ impl<T: Complete> Com<T> {
     /// An empty handle: holding nothing, dropping releases nothing. Used to
     /// park a stale session before its replacement is created, because the
     /// driver refuses a second duplication while the first one lives.
-    ///
-    /// # Safety
-    /// Always safe as a value; calls through it answer `ADRIFT`.
+    /// Calls through it answer `ADRIFT`.
     #[must_use]
     pub fn vacant() -> Self {
         Self {
@@ -41,9 +39,12 @@ impl<T: Complete> Com<T> {
     /// null answers.
     ///
     /// # Safety
-    /// `raw` must be a live interface pointer with a counted reference
-    /// handed to us.
-    pub fn own(raw: *mut c_void) -> Self {
+    /// `raw` must be a live interface pointer carrying the one reference
+    /// the creation call handed us. A dangling pointer here would read a
+    /// foreign v-table and release it on drop, which is why adoption is an
+    /// `unsafe` step rather than a plain constructor: the raw pointer alone
+    /// cannot prove the reference exists.
+    pub(super) unsafe fn own(raw: *mut c_void) -> Self {
         Self {
             connection: raw.cast::<*mut T>(),
         }
@@ -65,7 +66,9 @@ impl<T: Complete> Com<T> {
         if hr != S_OK || cast.is_null() {
             return Err(hr);
         }
-        Ok(Com::own(cast))
+        // SAFETY: `QueryInterface` returned S_OK with a non-null interface
+        // that holds the reference it just added for us.
+        Ok(unsafe { Com::own(cast) })
     }
 
     /// The raw object pointer, for entry points typed `void *`.
@@ -135,7 +138,9 @@ impl Com<FactoryVt> {
         if hr != S_OK || out.is_null() {
             return Err(hr);
         }
-        Ok(Com::own(out))
+        // SAFETY: `EnumAdapters1` returned S_OK with a non-null adapter
+        // whose reference is now ours.
+        Ok(unsafe { Com::own(out) })
     }
 }
 
@@ -156,7 +161,9 @@ impl Com<AdapterVt> {
         if hr != S_OK || out.is_null() {
             return Err(hr);
         }
-        Ok(Com::own(out))
+        // SAFETY: `EnumOutputs` returned S_OK with a non-null output whose
+        // reference is now ours.
+        Ok(unsafe { Com::own(out) })
     }
 }
 
@@ -200,7 +207,9 @@ impl Com<Output1Vt> {
         if hr != S_OK || out.is_null() {
             return Err(hr);
         }
-        Ok(Com::own(out))
+        // SAFETY: `DuplicateOutput` returned S_OK with a non-null session
+        // whose reference is now ours.
+        Ok(unsafe { Com::own(out) })
     }
 }
 
@@ -249,7 +258,9 @@ impl Com<DuplicationVt> {
         if hr != S_OK || resources.is_null() {
             return Err(hr);
         }
-        Ok((Some(Com::own(resources)), info))
+        // SAFETY: `AcquireNextFrame` returned S_OK with a non-null resource
+        // that holds its reference until `ReleaseFrame`.
+        Ok((Some(unsafe { Com::own(resources) }), info))
     }
 
     /// `GetFramePointerShape` with an empty buffer: the size-probe leg of
@@ -371,7 +382,9 @@ impl Com<DeviceVt> {
         if hr != S_OK || out.is_null() {
             return Err(hr);
         }
-        Ok(Com::own(out))
+        // SAFETY: `CreateTexture2D` returned S_OK with a non-null texture
+        // whose reference is now ours.
+        Ok(unsafe { Com::own(out) })
     }
 }
 
@@ -393,11 +406,13 @@ impl Com<ContextVt> {
         };
     }
 
-    /// `Map`: lock the staging texture for CPU reads.
+    /// `Map`: lock the staging texture for CPU reads. The answer unmaps
+    /// itself on drop, so every call site cannot help but pair `Map` with
+    /// `Unmap`, even when the copy in between panics.
     ///
     /// # Errors
     /// Fails with the raw `HRESULT` when the GPU queue is in trouble.
-    pub fn lock(&self, texture: &Com<TextureVt>) -> Result<Mapped, i32> {
+    pub fn lock<'a>(&'a self, texture: &'a Com<TextureVt>) -> Result<Locked<'a>, i32> {
         let mut mapped: Mapped = Mapped::default();
         let Some(table) = self.view() else {
             return Err(ADRIFT);
@@ -417,11 +432,16 @@ impl Com<ContextVt> {
         if hr != S_OK {
             return Err(hr);
         }
-        Ok(mapped)
+        Ok(Locked {
+            context: self,
+            texture,
+            mapped,
+        })
     }
 
-    /// `Unmap`: hand the staging texture back to the GPU.
-    pub fn unlock(&self, texture: &Com<TextureVt>) {
+    /// `Unmap`: hand the staging texture back to the GPU. Only [`Locked`]
+    /// calls this, which is what keeps every mapping paired.
+    fn unlock(&self, texture: &Com<TextureVt>) {
         let Some(table) = self.view() else {
             return;
         };
@@ -430,5 +450,54 @@ impl Com<ContextVt> {
         unsafe {
             unlock(self.connection.cast::<c_void>(), texture.raw(), 0);
         };
+    }
+}
+
+/// A staging texture locked for CPU reads; dropping hands it back.
+///
+/// The guard borrows the context and the texture, so the mapped bytes
+/// cannot outlive the lock, and it is neither `Copy` nor `Clone`, so one
+/// mapping is unmapped exactly once. Before this guard, each call site had
+/// to remember the `unlock` after the read, and a panic in between left the
+/// texture mapped for the rest of the recording.
+pub struct Locked<'a> {
+    context: &'a Com<ContextVt>,
+    texture: &'a Com<TextureVt>,
+    mapped: Mapped,
+}
+
+impl Locked<'_> {
+    /// Bytes per mapped row: the driver's pitch, not the frame's width.
+    #[must_use]
+    pub fn row_pitch(&self) -> usize {
+        usize::try_from(self.mapped.row_pitch).unwrap_or(0)
+    }
+
+    /// The mapped pixels: `rows` rows of [`Self::row_pitch`] bytes each.
+    ///
+    /// # Safety
+    /// `rows` must not exceed the locked texture's height. The driver
+    /// mapped exactly that many rows, so claiming more would form a slice
+    /// past the mapping. The guard keeps the mapping alive for the borrow.
+    #[must_use]
+    pub unsafe fn bytes(&self, rows: usize) -> &[u8] {
+        if self.mapped.data.is_null() {
+            return &[];
+        }
+        // SAFETY: the caller bounds `rows` by the texture height and the
+        // guard still holds the lock, so `rows * pitch` bytes are mapped
+        // and readable until this borrow ends.
+        unsafe {
+            std::slice::from_raw_parts(
+                self.mapped.data.cast::<u8>(),
+                self.row_pitch().saturating_mul(rows),
+            )
+        }
+    }
+}
+
+impl Drop for Locked<'_> {
+    fn drop(&mut self) {
+        self.context.unlock(self.texture);
     }
 }

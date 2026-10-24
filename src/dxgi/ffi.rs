@@ -100,7 +100,9 @@ pub fn spawn_factory() -> Result<Com<FactoryVt>, ProcError> {
     if hr != S_OK || out.is_null() {
         return Err(ProcError::Call(hr));
     }
-    Ok(Com::own(out))
+    // SAFETY: `CreateDXGIFactory1` returned S_OK with a non-null factory
+    // whose reference is now ours.
+    Ok(unsafe { Com::own(out) })
 }
 
 /// `D3D11CreateDevice(adapter, UNKNOWN, null, 0, null, 0, SDK, ...)`.
@@ -137,7 +139,9 @@ pub fn spawn_device(
     if hr != S_OK || device.is_null() || context.is_null() {
         return Err(ProcError::Call(hr));
     }
-    Ok((Com::own(device), Com::own(context)))
+    // SAFETY: `D3D11CreateDevice` returned S_OK with non-null device and
+    // context interfaces, each holding the reference it handed us.
+    Ok((unsafe { Com::own(device) }, unsafe { Com::own(context) }))
 }
 
 fn load(
