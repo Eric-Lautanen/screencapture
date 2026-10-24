@@ -14,6 +14,77 @@ pub enum Role {
     Chimes,
 }
 
+impl Role {
+    /// The word this role is called by in messages and settings keys.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Record => "record",
+            Self::Photo => "photo",
+            Self::Chimes => "chimes",
+        }
+    }
+
+    /// The `[hotkeys]` key this role is stored under.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        self.label()
+    }
+}
+
+/// One action's hotkey ladder: the built-in default plus the alternates
+/// tried when another application already owns that default.
+///
+/// `ctrl+shift+x` is claimed by common vendor software (graphics and
+/// capture overlays), which left recordings dead on machines where the
+/// default never registered. A default that Windows refuses is replaced
+/// by the first free alternate and saved, so the hotkey works on first
+/// run instead of only warning about the conflict.
+pub struct Ladder {
+    /// Which action this ladder belongs to.
+    pub role: Role,
+    /// The built-in default, as shipped in settings.
+    pub default: Hotkey,
+    /// Free combos tried in order when the default is taken.
+    pub alternates: [&'static str; 2],
+}
+
+impl Ladder {
+    /// The combo that should replace `current` — `None` when the setting
+    /// needs no change (it was customized, its default is free, or every
+    /// alternate is taken too). `free` answers whether Windows would hand
+    /// out a combo right now.
+    #[must_use]
+    pub fn replacement(&self, current: Hotkey, free: impl Fn(Hotkey) -> bool) -> Option<Hotkey> {
+        if current != self.default || free(self.default) {
+            return None;
+        }
+        self.alternates
+            .iter()
+            .filter_map(|text| Hotkey::parse(text))
+            .find(|combo| free(*combo))
+    }
+}
+
+/// The ladders for the three shippable actions.
+pub const LADDERS: [Ladder; 3] = [
+    Ladder {
+        role: Role::Record,
+        default: Hotkey::RECORD,
+        alternates: ["ctrl+shift+9", "ctrl+alt+9"],
+    },
+    Ladder {
+        role: Role::Photo,
+        default: Hotkey::PHOTO,
+        alternates: ["ctrl+shift+8", "ctrl+alt+8"],
+    },
+    Ladder {
+        role: Role::Chimes,
+        default: Hotkey::CHIMES,
+        alternates: ["ctrl+shift+7", "ctrl+alt+7"],
+    },
+];
+
 /// One OS-level hotkey binding.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Binding {
@@ -79,7 +150,9 @@ pub fn bindings(record: Hotkey, photo: Hotkey, chimes: Hotkey) -> Vec<Binding> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, Role, bindings, combo_modifiers};
+    use super::{
+        LADDERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, Role, bindings, combo_modifiers,
+    };
     use crate::settings::Hotkey;
 
     #[test]
@@ -116,5 +189,44 @@ mod tests {
             combo_modifiers(Hotkey::parse("alt+f1").expect("parses")),
             MOD_ALT
         );
+    }
+
+    /// The record ladder: a taken default is replaced by its first free
+    /// alternate, and a free default is left exactly as shipped.
+    #[test]
+    fn a_taken_default_falls_back_to_the_next_free_combo() {
+        let ladder = &LADDERS[0];
+        assert_eq!(ladder.role, Role::Record);
+        let replacement = ladder.replacement(Hotkey::RECORD, |combo| combo != Hotkey::RECORD);
+        assert_eq!(replacement, Hotkey::parse("ctrl+shift+9"));
+        assert_eq!(ladder.replacement(Hotkey::RECORD, |_| true), None);
+    }
+
+    /// Every alternate taken keeps the configured combo: a wrong hotkey
+    /// that the user can see beats silently moving their binding again.
+    #[test]
+    fn a_saturated_ladder_keeps_the_configured_combo() {
+        let ladder = &LADDERS[0];
+        assert_eq!(ladder.replacement(Hotkey::RECORD, |_| false), None);
+    }
+
+    /// A combo the user chose is never rewritten on their behalf.
+    #[test]
+    fn customised_combos_are_left_alone() {
+        let ladder = &LADDERS[0];
+        let custom = Hotkey::parse("alt+f4").expect("parses");
+        assert_eq!(ladder.replacement(custom, |_| false), None);
+    }
+
+    /// Every alternate in every ladder parses: a typo there would simply
+    /// disable the fallback.
+    #[test]
+    fn alternates_are_valid_combos() {
+        for ladder in &LADDERS {
+            for text in ladder.alternates {
+                assert!(Hotkey::parse(text).is_some(), "{text} must parse");
+                assert_ne!(ladder.default, Hotkey::parse(text).expect("parses"));
+            }
+        }
     }
 }

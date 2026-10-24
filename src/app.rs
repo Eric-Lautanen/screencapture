@@ -21,7 +21,7 @@ use crate::overlay;
 use crate::recorder::{Plan, Recorder};
 use crate::recording::Profile;
 use crate::screen;
-use crate::settings::{self, CaptureMode, DisplayChoice, Loaded};
+use crate::settings::{self, CaptureMode, DisplayChoice, Hotkey, Loaded};
 use crate::tray::{self, Event};
 
 pub(super) mod demo;
@@ -108,6 +108,7 @@ pub fn run(config: Option<&Path>) -> ExitCode {
     if let Err(error) = sync_autostart(&mut loaded) {
         log::note("warn", &format!("autostart: {error}"));
     }
+    adopt_free_hotkeys(&mut loaded);
     let bindings = hotkeys::bindings(
         loaded.settings.hotkey,
         loaded.settings.photo,
@@ -610,6 +611,57 @@ fn update_profile(loaded: &mut Loaded, profile: Profile) {
         && let Err(error) = loaded.document.persist(path)
     {
         log::note("error", &format!("cannot save settings: {error}"));
+    }
+}
+
+/// Replace a built-in default hotkey that another application already
+/// owns with the first free alternate, save it, and say so in the log.
+///
+/// A default is a guess about someone else's machine: vendor overlays
+/// claim `ctrl+shift+x` often enough that a fresh install can otherwise
+/// ship a record hotkey that never fires. Only untouched defaults move;
+/// a combo the user chose stays theirs.
+fn adopt_free_hotkeys(loaded: &mut Loaded) {
+    let mut adopted: Vec<(hotkeys::Role, Hotkey, Hotkey)> = Vec::new();
+    for ladder in &hotkeys::LADDERS {
+        let current = match ladder.role {
+            hotkeys::Role::Record => loaded.settings.hotkey,
+            hotkeys::Role::Photo => loaded.settings.photo,
+            hotkeys::Role::Chimes => loaded.settings.chime_hotkey,
+        };
+        let Some(replacement) = ladder.replacement(current, tray::hotkey_available) else {
+            continue;
+        };
+        match ladder.role {
+            hotkeys::Role::Record => loaded.settings.hotkey = replacement,
+            hotkeys::Role::Photo => loaded.settings.photo = replacement,
+            hotkeys::Role::Chimes => loaded.settings.chime_hotkey = replacement,
+        }
+        loaded.document.set(
+            "hotkeys",
+            ladder.role.key(),
+            Value::Str(replacement.to_combo()),
+        );
+        adopted.push((ladder.role, current, replacement));
+    }
+    if adopted.is_empty() {
+        return;
+    }
+    if let Some(path) = loaded.path.as_deref()
+        && let Err(error) = loaded.document.persist(path)
+    {
+        log::note("error", &format!("cannot save settings: {error}"));
+    }
+    for (role, previous, replacement) in adopted {
+        log::note(
+            "warn",
+            &format!(
+                "{} hotkey {} is used by another app; using {} instead",
+                role.label(),
+                previous.to_combo(),
+                replacement.to_combo()
+            ),
+        );
     }
 }
 
