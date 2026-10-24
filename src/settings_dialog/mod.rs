@@ -381,9 +381,10 @@ fn save(window: Hwnd) {
         );
         return;
     }
-    // The live probe lifts this process's own registrations, so the
-    // current combos answer free; another process holding one is a real
-    // conflict that would make `RegisterHotKey` fail after a save.
+    // A combo this process already holds answers free without a probe,
+    // and the probe never lifts the live bindings; another process holding
+    // one is a real conflict that would make `RegisterHotKey` fail after a
+    // save.
     for (name, combo) in [
         ("record", parsed_record),
         ("photo", parsed_photo),
