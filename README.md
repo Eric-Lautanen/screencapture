@@ -268,7 +268,8 @@ Free code signing provided by SignPath.io, certificate by SignPath Foundation.
 - Approvers: Eric Lautanen
 
 Every signing request is manually approved before a release is published. The
-unsigned `v0.1.1` release predates this policy.
+`v0.1.1` and `v0.1.2` releases are unsigned; signing applies from the first
+release after onboarding completes.
 
 This program will not transfer any information to other networked systems
 unless specifically requested by the user or the person installing or operating

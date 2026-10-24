@@ -4,14 +4,15 @@ Windows release artifacts use the SignPath Foundation open-source signing
 program. The signer is **SignPath Foundation**, not the project maintainer:
 the Foundation holds the certificate and vouches for the verified build.
 
-The pipeline is committed but **onboarding is not complete**. The `v0.1.1`
-release is unsigned. Do not push a `v*` tag until the setup below is finished;
-the release workflow fails before building if its signing configuration is
-missing.
+The pipeline is committed but **onboarding is not complete**, so `v0.1.1` and
+`v0.1.2` ship unsigned. A tag whose signing configuration is missing fails
+before building, unless the repository variable `ALLOW_UNSIGNED_TAG` names that
+exact tag — that single tag is then published unsigned, deliberately and
+visibly. Every other tag still requires signing.
 
 ## What is signed
 
-Two separate SignPath requests are made for every release:
+When SignPath is configured, two separate requests are made for every release:
 
 1. `screencapture.exe` is signed first.
 2. The NSIS installer is built around that signed executable, then
@@ -67,6 +68,21 @@ The signing workflow waits up to one hour for each request.
    [Code signing policy](../README.md#code-signing-policy), including the
    SignPath attribution, team roles, and privacy statement.
 
+## Publishing one release without signing
+
+While onboarding is open, one tag can be released unsigned by naming it in the
+repository variable `ALLOW_UNSIGNED_TAG`:
+
+```powershell
+gh variable set ALLOW_UNSIGNED_TAG --body "v0.1.2"
+```
+
+Only a tag equal to that value gets through; a typo, a different tag, or a
+missing variable still fails the release before it builds. The job logs a
+warning, the release notes state that the binaries are unsigned, and
+`SHA256SUMS.txt` is still published. Delete the variable once signing works so
+the gate is fully closed again.
+
 ## Cutting a signed release
 
 1. Bump `Cargo.toml`, `Cargo.lock`, `assets/icon.rc`, and the NSIS version
@@ -117,8 +133,9 @@ The published `SHA256SUMS.txt` covers both release executables.
 
 ## Common failures
 
-- **Missing SignPath configuration** — add the secret and variables above;
-  the workflow intentionally fails before building.
+- **Missing SignPath configuration** — add the secret and variables above, or
+  name the one tag you mean to publish unsigned in `ALLOW_UNSIGNED_TAG`;
+  otherwise the workflow intentionally fails before building.
 - **Tag does not match `Cargo.toml`** — bump the version and use `v<version>`.
 - **Tag is not on `main`** — create release tags only from merged `main`, not
   from a branch or an unmerged commit.

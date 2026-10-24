@@ -1159,6 +1159,9 @@ Plan of record, in build order. Every session ends with
 - [x] CI compiles the installer script and checks the built setup's product
   version on every push, so a broken or stale script fails before a
   release tag.
+- [x] A tag can be published unsigned only when `ALLOW_UNSIGNED_TAG` names
+  that exact tag, so `v0.1.2` ships while onboarding is open and every
+  other tag still requires signing.
 - [ ] Apply to SignPath Foundation, add `SIGNPATH_API_TOKEN` and the five
   repository variables, and approve the first signed release. The `v0.1.1`
   release remains unsigned; `v0.1.2` is the pending signed tag.
