@@ -44,4 +44,6 @@ once repo packaging lands there.
 ## Notes
 
 - Uninstall keeps user settings and recordings (intentional).
+- Setup and the uninstaller use `assets/icon.ico`; the installed exe carries
+  the same multi-size icon as a resource.
 - `EstimatedSize` is computed at install time with `${GetSize}`.

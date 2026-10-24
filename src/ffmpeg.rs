@@ -115,6 +115,12 @@ pub fn discover(configured: Option<&Path>) -> Option<Binary> {
     if let Ok(workdir) = env::current_dir() {
         candidates.push((workdir.join("vendor/ffmpeg").join(ENGINE_FILE), true));
     }
+    // Windows never falls back to a bare name: Command would search the
+    // current directory and PATH, so a stray ffmpeg.exe beside the
+    // working directory could be launched instead of the shipped engine.
+    // The installer layout and an explicit [engine] path are the only
+    // sources there.
+    #[cfg(not(windows))]
     candidates.push((PathBuf::from(ENGINE_FILE), false));
 
     candidates

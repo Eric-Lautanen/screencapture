@@ -1,13 +1,12 @@
-//! Standalone icon generator for the tray: renders the screencapture mark
-//! at several sizes and packs them into `assets/icon.ico` (ICO/BI_RGB,
-//! 32-bit BGRA, alpha with all-zero masks). std only.
+//! Legacy standalone icon generator kept for reference: renders the old
+//! mark at several sizes and packs it into `target/icon-legacy.ico`
+//! (ICO/BI_RGB, 32-bit BGRA). It never writes the shipped assets; the
+//! real icon is authored in `assets/icon.svg` and its platform outputs
+//! are validated by `tests/icons.rs`. std only.
 //!
-//! Regenerate with:
+//! Run with:
 //!     rustc --edition 2024 tools/gen_icon.rs -o target/gen_icon.exe
 //!     .\target\gen_icon.exe
-//!
-//! Design: an ink rounded-square tile with a light "screen" panel and a
-//! red record dot in the top-right, matching a screen-recorder's role.
 
 use std::fs::File;
 use std::io::BufWriter;
@@ -239,7 +238,7 @@ fn main() {
     let images: Vec<(usize, Vec<u8>)> =
         SIZES.iter().copied().zip(rendered.iter().map(pack_bitmap)).collect();
     let packed = pack_ico(&images);
-    let destination = Path::new("assets/icon.ico");
+    let destination = Path::new("target/icon-legacy.ico");
     if let Some(parent) = destination.parent() {
         _ = std::fs::create_dir_all(parent);
     }

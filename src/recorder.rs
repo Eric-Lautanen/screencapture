@@ -175,7 +175,7 @@ impl Recorder {
         // The recorder owns its output path, so it also owns the directory
         // that path needs; the CLI and tray paths must behave alike.
         std::fs::create_dir_all(&plan.media_dir)?;
-        let output = clock::stamped_path(&plan.media_dir, plan.codec.extension());
+        let output = clock::stamped_path(&plan.media_dir, plan.codec.extension())?;
         let args = pipe::record_args(
             Stream {
                 width: plan.size.0,
@@ -221,6 +221,7 @@ impl Recorder {
         let worker = match worker {
             Ok(worker) => worker,
             Err(error) => {
+                let _ = std::fs::remove_file(&output);
                 return Err(io::Error::other(format!(
                     "cannot start the capture worker: {error}"
                 )));
@@ -237,10 +238,12 @@ impl Recorder {
             }),
             Ok(Err(error)) => {
                 let _ = worker.join();
+                let _ = std::fs::remove_file(&output);
                 Err(error)
             }
             Err(_) => {
                 let _ = worker.join();
+                let _ = std::fs::remove_file(&output);
                 Err(io::Error::other(
                     "the capture worker exited before the recording started",
                 ))

@@ -268,7 +268,7 @@ cargo test --all-targets --locked
 
 Clippy runs with pedantic lints denied and no `allow` blocks. Cross-check the
 ARM and Intel halves with `cargo clippy --target <triple> --all-targets`; the
-five targets are kept warning-free.
+installed cross targets are kept warning-free.
 
 [GitHub Actions](.github/workflows/ci.yml) runs the native gates on
 `windows-latest`, `macos-latest`, and `ubuntu-latest` for every push and pull

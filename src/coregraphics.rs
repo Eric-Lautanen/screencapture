@@ -8,6 +8,7 @@ use crate::pin_layout;
 use std::ffi::c_void;
 use std::io;
 use std::mem;
+use std::sync::OnceLock;
 
 use crate::dylib;
 
@@ -80,7 +81,8 @@ type EventCreateProc = unsafe extern "C" fn(*const c_void) -> Ref;
 type EventLocationProc = unsafe extern "C" fn(Ref) -> [f64; 2];
 
 /// Every export used by the macOS backends; each signature matches the
-/// SDK header exactly. One load per construction, closed on drop.
+/// SDK header exactly. The process-wide copy is loaded once and shared.
+#[derive(Clone, Copy)]
 pub struct Api {
     /// `CGWindowListCreateImage`.
     pub window_list_image: WindowListImageProc,
@@ -124,14 +126,22 @@ pub struct Api {
     pub event_location: EventLocationProc,
 }
 
+/// The one loaded CoreGraphics surface; repeated lookups share it.
+static API: OnceLock<Api> = OnceLock::new();
+
 impl Api {
-    /// Load CoreGraphics and resolve every export. The library handle is
-    /// parked loaded for the process lifetime (same policy as the
-    /// Windows dxgi loader), so the resolved pointers stay valid.
+    /// Load CoreGraphics and resolve every export, once per process. The
+    /// library handle is parked loaded for the process lifetime (same
+    /// policy as the Windows dxgi loader), so the resolved pointers stay
+    /// valid. Later calls return the cached copy instead of leaking a new
+    /// `dlopen` reference on every capture.
     ///
     /// # Errors
     /// The framework is absent or dropped an expected export.
     pub fn load() -> io::Result<Self> {
+        if let Some(api) = API.get() {
+            return Ok(*api);
+        }
         let library = dylib::Library::open(FRAMEWORK)?;
         let api = Self {
             // SAFETY: each export exists in CoreGraphics with exactly the
@@ -162,6 +172,11 @@ impl Api {
         // like the Windows dxgi loader; closing it would invalidate the
         // function pointers above.
         mem::forget(library);
+        // A concurrent loader may have won the cache race; its copy is
+        // just as valid, and the extra library reference stays parked.
+        if API.set(api).is_ok() {
+            return Ok(API.get().copied().unwrap_or(api));
+        }
         Ok(api)
     }
     /// An owned device-RGB color space; release it with

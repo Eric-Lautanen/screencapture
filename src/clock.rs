@@ -3,24 +3,44 @@
 //! One stamp per file; local-time conversion arrives with the settings
 //! surface for it. The calendar math is Howard Hinnant's civil algorithm.
 
+use std::fs::OpenOptions;
+use std::io;
 use std::path::{Path, PathBuf};
+
+/// How many suffixes to try before giving up on a saturated directory.
+const MAX_NAME_ATTEMPTS: u32 = 10_000;
 
 /// Fresh stamped file path inside `media_dir`; appends `-2`, `-3`, ... on
 /// same-second clashes so back-to-back captures never overwrite each other.
-#[must_use]
-pub fn stamped_path(media_dir: &Path, ext: &str) -> PathBuf {
-    stamped_path_for(media_dir, &stamp(), ext)
+/// The chosen name is reserved with `create_new`, so two processes racing
+/// for the same second cannot both select it.
+///
+/// # Errors
+/// The directory cannot be written or no free name was found.
+pub fn stamped_path(media_dir: &Path, ext: &str) -> io::Result<PathBuf> {
+    reserve_path_for(media_dir, &stamp(), ext)
 }
 
-fn stamped_path_for(media_dir: &Path, stamp: &str, ext: &str) -> PathBuf {
+fn reserve_path_for(media_dir: &Path, stamp: &str, ext: &str) -> io::Result<PathBuf> {
     let stem = format!("screencapture-{stamp}");
-    let mut path = media_dir.join(format!("{stem}.{ext}"));
-    let mut counter = 1;
-    while path.exists() {
-        counter += 1;
-        path = media_dir.join(format!("{stem}-{counter}.{ext}"));
+    for attempt in 1..=MAX_NAME_ATTEMPTS {
+        let path = if attempt == 1 {
+            media_dir.join(format!("{stem}.{ext}"))
+        } else {
+            media_dir.join(format!("{stem}-{attempt}.{ext}"))
+        };
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => {
+                drop(file);
+                return Ok(path);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
     }
-    path
+    Err(io::Error::other(
+        "cannot reserve a unique capture file name after 10000 attempts",
+    ))
 }
 
 /// Stamp of "now", UTC, in `YYYYMMDD-HHMMSS` form.
@@ -70,7 +90,7 @@ fn civil_from_days(days: u64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{civil_from_days, from_epoch, stamped_path_for};
+    use super::{civil_from_days, from_epoch, reserve_path_for};
 
     #[test]
     fn same_second_captures_never_overwrite_each_other() {
@@ -78,10 +98,11 @@ mod tests {
             std::env::temp_dir().join(format!("screencapture-stamp-path-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
-        let first = stamped_path_for(&dir, "20261020-120000", "mp4");
+        let first = reserve_path_for(&dir, "20261020-120000", "mp4").expect("reserve first");
         assert_eq!(first, dir.join("screencapture-20261020-120000.mp4"));
-        std::fs::write(&first, b"clip").expect("write first");
-        let second = stamped_path_for(&dir, "20261020-120000", "mp4");
+        assert!(first.is_file(), "the name is reserved on disk");
+        assert_eq!(std::fs::metadata(&first).expect("first metadata").len(), 0);
+        let second = reserve_path_for(&dir, "20261020-120000", "mp4").expect("reserve second");
         assert_eq!(second, dir.join("screencapture-20261020-120000-2.mp4"));
         let _ = std::fs::remove_dir_all(&dir);
     }
