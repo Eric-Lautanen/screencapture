@@ -107,30 +107,58 @@ fn legacy_media_directory_keeps_recordings_moving() {
 
 #[test]
 fn recordings_get_their_own_folder_by_default() {
-    let (Some(root), Some(expected)) =
-        (crate::paths::legacy_video_dir(), crate::paths::video_dir())
-    else {
+    let Some(expected) = crate::paths::video_dir() else {
         return; // no home directory in this environment
     };
-    assert_eq!(expected, root.join("Screencapture"));
 
     // A fresh default config points at the subfolder.
     let (settings, problems) = read_document(&default_document());
     assert_eq!(settings.video_dir, expected);
     assert_eq!(problems.len(), 0);
 
-    // A config from before the subfolder follows the new default...
-    let legacy = Document::from_text(&format!("[media]\nvideos = \"{}\"\n", root.display()))
-        .expect("sample must parse");
-    let (settings, problems) = read_document(&legacy);
-    assert_eq!(settings.video_dir, expected);
-    assert_eq!(problems.len(), 0);
+    // Every folder an earlier build wrote as its default follows today's
+    // answer instead of pinning a path the user never chose.
+    for legacy in crate::paths::legacy_media_dirs() {
+        let document =
+            Document::from_text(&format!("[media]\nvideos = \"{}\"\n", legacy.display()))
+                .expect("sample must parse");
+        let (settings, problems) = read_document(&document);
+        assert_eq!(settings.video_dir, expected, "legacy {}", legacy.display());
+        assert_eq!(problems.len(), 0);
+    }
 
     // ...while a folder the user actually chose is kept untouched.
     let chosen =
         Document::from_text("[media]\nvideos = \"C:\\clips\\mine\"\n").expect("sample must parse");
     let (settings, _) = read_document(&chosen);
     assert_eq!(settings.video_dir, PathBuf::from("C:\\clips\\mine"));
+}
+
+/// The reason this migration exists: an account whose `Pictures` folder
+/// was redirected (`OneDrive`'s Known Folder Move does it to every signed-in
+/// profile) keeps a stale profile copy, and a config written against it
+/// must follow the shell to the folder the user actually opens.
+#[test]
+fn stills_follow_the_pictures_folder_the_shell_names() {
+    let Some(expected) = crate::paths::image_dir() else {
+        return; // no home directory in this environment
+    };
+    let (settings, problems) = read_document(&default_document());
+    assert_eq!(settings.image_dir, expected);
+    assert_eq!(problems.len(), 0);
+
+    for legacy in crate::paths::legacy_media_dirs() {
+        let document =
+            Document::from_text(&format!("[media]\nimages = \"{}\"\n", legacy.display()))
+                .expect("sample must parse");
+        let (settings, _) = read_document(&document);
+        assert_eq!(settings.image_dir, expected, "legacy {}", legacy.display());
+    }
+    // A folder the user chose, even one that looks similar, is kept.
+    let chosen =
+        Document::from_text("[media]\nimages = \"D:\\shots\\mine\"\n").expect("sample must parse");
+    let (settings, _) = read_document(&chosen);
+    assert_eq!(settings.image_dir, PathBuf::from("D:\\shots\\mine"));
 }
 
 #[test]

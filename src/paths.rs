@@ -29,15 +29,31 @@ pub fn video_dir() -> Option<PathBuf> {
     video_root().map(|videos| videos.join(APP_DIR))
 }
 
-/// Where recordings used to land by default, before the subfolder: the
-/// settings loader treats this exact folder as "never chosen" so an
-/// existing config follows the new default instead of writing loose
-/// files beside the user's own videos.
-pub(crate) fn legacy_video_dir() -> Option<PathBuf> {
-    video_root()
+/// The folders earlier builds wrote as their own defaults, in full.
+///
+/// A settings file that still names one of these never chose anything: it
+/// is following a default that has since moved, so the loader lets today's
+/// default win instead. This matters most on Windows, where `OneDrive`'s
+/// Known Folder Move redirects `Pictures` — and every screenshot written
+/// to the old profile path is a file the user cannot find.
+pub(crate) fn legacy_media_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    // The pre-subfolder roots, wherever each platform still puts them.
+    if let Some(root) = legacy_video_root() {
+        dirs.push(root.join(APP_DIR));
+        dirs.push(root);
+    }
+    if cfg!(windows)
+        && let Some(pictures) = home_dir().map(|home| home.join("Pictures").join(APP_DIR))
+    {
+        dirs.push(pictures);
+    }
+    dirs
 }
 
-fn video_root() -> Option<PathBuf> {
+/// The videos root as this build's predecessors resolved it, before the
+/// shell lookup: the profile folder, never the redirected one.
+fn legacy_video_root() -> Option<PathBuf> {
     if cfg!(windows) {
         home_dir().map(|home| home.join("Videos"))
     } else if cfg!(target_os = "macos") {
@@ -50,16 +66,42 @@ fn video_root() -> Option<PathBuf> {
     }
 }
 
+/// The user's videos folder, as the shell resolves it: that answer follows
+/// a redirect (Folder Redirection, or a folder the user moved) instead of
+/// assuming the profile copy is the one Explorer shows.
+#[cfg(windows)]
+fn video_root() -> Option<PathBuf> {
+    crate::known_folder::videos().or_else(legacy_video_root)
+}
+
+#[cfg(not(windows))]
+fn video_root() -> Option<PathBuf> {
+    legacy_video_root()
+}
+
+/// The user's pictures folder, by the same rules as [`video_root`].
+#[cfg(windows)]
+fn image_root() -> Option<PathBuf> {
+    crate::known_folder::pictures().or_else(profile_pictures)
+}
+
+#[cfg(not(windows))]
+fn image_root() -> Option<PathBuf> {
+    profile_pictures()
+}
+
+fn profile_pictures() -> Option<PathBuf> {
+    home_dir().map(|home| home.join("Pictures"))
+}
+
 /// Default destination folder for still photos.
 pub fn image_dir() -> Option<PathBuf> {
-    if cfg!(windows) {
-        home_dir().map(|home| home.join("Pictures").join(APP_DIR))
-    } else if cfg!(target_os = "macos") {
-        home_dir().map(|home| home.join("Pictures").join(APP_DIR))
+    if cfg!(windows) || cfg!(target_os = "macos") {
+        image_root().map(|pictures| pictures.join(APP_DIR))
     } else {
         match env::var_os("XDG_PICTURES_DIR") {
             Some(xdg) if Path::new(&xdg).is_absolute() => Some(PathBuf::from(xdg).join(APP_DIR)),
-            _ => home_dir().map(|home| home.join("Pictures").join(APP_DIR)),
+            _ => image_root().map(|pictures| pictures.join(APP_DIR)),
         }
     }
 }

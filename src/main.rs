@@ -24,6 +24,8 @@ mod ffmpeg;
 mod guard;
 mod hotkeys;
 mod instance;
+#[cfg(windows)]
+mod known_folder;
 /// Layout pins: `pin_layout!` is crate-exported by [`layout`], so every
 /// FFI module can call `crate::pin_layout!` in place.
 mod layout;

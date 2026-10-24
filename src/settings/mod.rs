@@ -415,9 +415,9 @@ fn video_directory(document: &Document) -> PathBuf {
         .filter(|directory| !directory.trim().is_empty())
         .map(PathBuf::from);
     match chosen {
-        Some(directory) if !is_legacy_video_default(&directory) => directory,
-        // Unset, or the folder recordings used to land in: adopt the
-        // `Videos/Screencapture` default so recordings get their own
+        Some(directory) if !is_legacy_media_default(&directory) => directory,
+        // Unset, or a folder recordings used to land in by default: adopt
+        // the `Videos/Screencapture` default so recordings get their own
         // folder like stills already do.
         _ => paths::video_dir().unwrap_or_else(|| PathBuf::from(DEFAULT_DIRECTORY)),
     }
@@ -436,11 +436,15 @@ pub(crate) fn split_shared_media(video: PathBuf, image: PathBuf) -> (PathBuf, Pa
     }
 }
 
-/// Whether `directory` is exactly the pre-subfolder default. Compared
-/// case-insensitively and without a trailing separator, since Windows
-/// paths in settings files are written by hand.
-fn is_legacy_video_default(directory: &Path) -> bool {
-    paths::legacy_video_dir().is_some_and(|legacy| same_path(directory, &legacy))
+/// Whether `directory` is exactly one of the folders earlier builds wrote
+/// as a default. Such a config never chose anything, so it follows today's
+/// default instead of pinning a folder the user never picked — which is how
+/// a config written before `OneDrive` redirected `Pictures` keeps writing
+/// screenshots to the copy nobody opens.
+fn is_legacy_media_default(directory: &Path) -> bool {
+    paths::legacy_media_dirs()
+        .iter()
+        .any(|legacy| same_path(directory, legacy))
 }
 
 /// Two paths naming the same folder, ignoring case and trailing
@@ -455,11 +459,16 @@ fn same_path(a: &Path, b: &Path) -> bool {
 }
 
 fn image_directory(document: &Document) -> PathBuf {
-    match document.value("media", "images").and_then(Value::as_str) {
-        Some(directory) if !directory.trim().is_empty() => PathBuf::from(directory),
-        // The legacy `directory` key deliberately does NOT answer here:
-        // existing configs pointed it at the recordings folder, and the
-        // user asked for photos to keep their own (Pictures) default.
+    let chosen = document
+        .value("media", "images")
+        .and_then(Value::as_str)
+        .filter(|directory| !directory.trim().is_empty())
+        .map(PathBuf::from);
+    // The legacy `directory` key deliberately does NOT answer here:
+    // existing configs pointed it at the recordings folder, and the user
+    // asked for photos to keep their own (Pictures) default.
+    match chosen {
+        Some(directory) if !is_legacy_media_default(&directory) => directory,
         _ => paths::image_dir().unwrap_or_else(|| PathBuf::from(DEFAULT_DIRECTORY)),
     }
 }

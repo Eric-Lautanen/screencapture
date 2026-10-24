@@ -164,8 +164,12 @@ edge; Escape and the record hotkey stop it too.
 ### Output
 
 Recordings land in `Videos\Screencapture`; stills land in
-`Pictures\Screencapture`. If both folders are set to the same path, each medium
-gets its own `video` or `image` subfolder instead of mixing files.
+`Pictures\Screencapture`. Both are the folders Windows actually gives you: the
+shell's own answer, so an account whose `Pictures` folder OneDrive redirected
+(a second, empty `Pictures` often stays behind in the profile) still finds its
+screenshots where Explorer opens. Videos normally stay local. If both folders
+are set to the same path, each medium gets its own `video` or `image`
+subfolder instead of mixing files.
 
 A still, or a stopped recording, answers with a soft three-note chime on
 Windows. Mute it from the tray menu, with `ctrl+shift+m`, or in Settings.
