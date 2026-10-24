@@ -5,3 +5,33 @@
 // RT_MANIFEST (24), id 1: common controls v6 and per-monitor DPI, so
 // dialogs use the modern themed controls instead of the Win95 look.
 1 24 "app.manifest"
+
+// File properties shown by Explorer, task manager, and crash reports.
+1 VERSIONINFO
+FILEVERSION 0,1,0,0
+PRODUCTVERSION 0,1,0,0
+FILEFLAGSMASK 0x3fL
+FILEFLAGS 0x0L
+FILEOS 0x40004L
+FILETYPE 0x1L
+FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Eric Lautanen\0"
+            VALUE "FileDescription", "screencapture\0"
+            VALUE "FileVersion", "0.1.0\0"
+            VALUE "InternalName", "screencapture\0"
+            VALUE "LegalCopyright", "Copyright 2026 the screencapture authors\0"
+            VALUE "OriginalFilename", "screencapture.exe\0"
+            VALUE "ProductName", "screencapture\0"
+            VALUE "ProductVersion", "0.1.0\0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

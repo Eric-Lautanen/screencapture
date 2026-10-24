@@ -304,28 +304,38 @@ fn sane_region(region: Region) -> Region {
     }
 }
 
-/// Probe hardware choices up front so an unavailable accelerator demotes
-/// to x264 with a notice instead of failing mid-flight.
-fn effective_codec(binary: &ffmpeg::Binary, loaded: &Loaded) -> Video {
+/// Probe the configured encoder and fall back in a fixed order: x264,
+/// then each hardware H.264 unit, and only then CPU x265. H.264 is the
+/// primary output on every machine, so a missing accelerator can never
+/// silently turn a recording into HEVC. Probing happens before the worker
+/// starts, so an unusable engine is an honest error, not a dead stream.
+fn effective_codec(binary: &ffmpeg::Binary, loaded: &Loaded) -> io::Result<Video> {
     let requested = loaded.settings.codec;
-    if requested == Video::X264
-        || binary.supports_encoder_cached(requested, &loaded.settings.profile)
-    {
-        return requested;
+    let profile = &loaded.settings.profile;
+    let codec = requested
+        .choose(|video| binary.supports_encoder_cached(video, profile))
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "no usable video encoder (requested {}); run `screencapture --check`",
+                requested.name()
+            ))
+        })?;
+    if codec != requested {
+        log::note(
+            "warn",
+            &format!(
+                "encoder: {} is not usable on this machine; recording with {} instead",
+                requested.name(),
+                codec.name()
+            ),
+        );
     }
-    log::note(
-        "warn",
-        &format!(
-            "encoder: {} is not usable on this machine; recording with x264 instead",
-            requested.name()
-        ),
-    );
-    Video::X264
+    Ok(codec)
 }
 
 fn start_recording(loaded: &Loaded, region: Region) -> io::Result<(Recorder, ffmpeg::Binary)> {
     let binary = engine(loaded)?;
-    let codec = effective_codec(&binary, loaded);
+    let codec = effective_codec(&binary, loaded)?;
     let profile = loaded.settings.profile;
     let plan = Plan {
         origin: (region.x, region.y),
@@ -545,15 +555,18 @@ fn engine(loaded: &Loaded) -> io::Result<ffmpeg::Binary> {
         .ok_or_else(|| io::Error::other("FFmpeg engine not found; run `screencapture --check`"))
 }
 
-/// Probe a configured hardware encoder while the tray idles.
+/// Probe the configured encoder while the tray idles. When it is not
+/// x264, probe x264 too: it is the first fallback, so a later demotion
+/// does not pay for a cold synthetic encode between click and recording.
 fn warm_codec(loaded: &Loaded) {
     let requested = loaded.settings.codec;
-    if requested.is_hardware()
-        && let Ok(binary) = engine(loaded)
-    {
+    if let Ok(binary) = engine(loaded) {
         let profile = loaded.settings.profile;
         std::thread::spawn(move || {
             let _ = binary.supports_encoder_cached(requested, &profile);
+            if requested != Video::X264 {
+                let _ = binary.supports_encoder_cached(Video::X264, &profile);
+            }
         });
     }
 }

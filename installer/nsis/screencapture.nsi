@@ -20,16 +20,25 @@ ManifestDPIAware true
 !define APPNAME "Screencapture"
 !define COMPANY "Eric"
 !define EXENAME "screencapture.exe"
+!define VERSION "0.1.0"
+!define VERSIONNUM "0.1.0.0"
 !define DESC "Professional 4K screen recorder and still-image capture."
 
 !include "MUI2.nsh"
 !include "FileFunc.nsh"
 
-Name "${APPNAME}"
+Name "${APPNAME} ${VERSION}"
 OutFile "${ROOT}\installer\screencapture-setup.exe"
 InstallDir "$PROGRAMFILES64\${APPNAME}"
 InstallDirRegKey HKCU "Software\${APPNAME}" "InstallDir"
 RequestExecutionLevel admin
+
+VIProductVersion "${VERSIONNUM}"
+VIAddVersionKey /LANG=1033 "ProductName" "${APPNAME}"
+VIAddVersionKey /LANG=1033 "ProductVersion" "${VERSION}"
+VIAddVersionKey /LANG=1033 "FileDescription" "${APPNAME} setup"
+VIAddVersionKey /LANG=1033 "FileVersion" "${VERSION}"
+VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright 2026 the screencapture authors"
 
 ; ── Pages ────────────────────────────────────────────────────────────────
 !define MUI_ABORTWARNING
@@ -51,7 +60,12 @@ Section "Install"
     File "${ROOT}\target\release\${EXENAME}"
     File "${ROOT}\README.md"
     File "${ROOT}\LICENSE"
+
+    ; The engine's license/source note ships under docs\ to match the
+    ; README and the uninstaller's paths.
+    SetOutPath "$INSTDIR\docs"
     File "${ROOT}\docs\FFMPEG-LICENSE.md"
+    SetOutPath "$INSTDIR"
 
     ; The bundled engine travels verbatim with its integrity record.
     SetOutPath "$INSTDIR\ffmpeg"
@@ -67,7 +81,7 @@ Section "Install"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
         "DisplayName" "${APPNAME}"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
-        "DisplayVersion" "0.1.0"
+        "DisplayVersion" "${VERSION}"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
         "Publisher" "${COMPANY}"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
@@ -100,6 +114,8 @@ Section "Uninstall"
     Delete "$INSTDIR\README.md"
     Delete "$INSTDIR\LICENSE"
     Delete "$INSTDIR\docs\FFMPEG-LICENSE.md"
+    ; Clean up the pre-docs layout left by earlier local builds.
+    Delete "$INSTDIR\FFMPEG-LICENSE.md"
     Delete "$INSTDIR\ffmpeg\ffmpeg.exe"
     Delete "$INSTDIR\ffmpeg\ffprobe.exe"
     Delete "$INSTDIR\ffmpeg\ffmpeg.LICENSE.txt"

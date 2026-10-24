@@ -66,9 +66,10 @@ impl Binary {
 
     /// True when the engine can complete a short synthetic encode with
     /// `video`'s exact argument set: an accelerator is present, the driver
-    /// loads, and every tuner option is accepted. Hardware choices run
-    /// this before their first recording so an unusable unit demotes to
-    /// x264 instead of failing frame by frame.
+    /// loads, and every tuner option is accepted. The recorder runs this
+    /// for the configured codec and each fallback candidate before the
+    /// capture worker starts, so an unusable choice fails cleanly instead
+    /// of writing a dead stream.
     #[must_use]
     pub fn supports_encoder(&self, video: crate::encoder::Video, profile: &Profile) -> bool {
         let mut command = Command::new(&self.path);
