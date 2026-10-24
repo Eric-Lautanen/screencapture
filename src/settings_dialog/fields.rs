@@ -2,6 +2,7 @@
 //! the getters `save()` uses to collect the current combo/edit/checkbox
 //! state, plus the shell folder-pick path and its RAII `Pidl` owner.
 
+use std::fs;
 use std::path::Path;
 
 use crate::winapi::Hwnd;
@@ -145,6 +146,40 @@ pub(super) fn check_state(id: i32) -> bool {
         })
 }
 
+/// Name of the probe file [`ensure_folder`] writes and removes again.
+const WRITE_PROBE: &str = ".screencapture-write-test";
+
+/// Create `folder` if it is missing, then prove a file can be written there.
+///
+/// A folder can exist and still refuse new files — a read-only drive, an
+/// ACL that grants only reading, a path that is really a file — and a take
+/// that cannot write fails after the user has already recorded it. Asking
+/// for the folder here answers the question while the dialog is still open
+/// and the field is still in front of them.
+///
+/// # Errors
+/// The reason Save should be refused: the folder could not be created, or
+/// it exists but refuses writes.
+pub(super) fn ensure_folder(folder: &str) -> Result<(), String> {
+    let path = Path::new(folder);
+    // A file where the folder should be answers "already exists" from
+    // `create_dir_all`, which says nothing useful about what is wrong.
+    if path.exists() && !path.is_dir() {
+        return Err("is a file, not a folder".to_owned());
+    }
+    if let Err(error) = fs::create_dir_all(path) {
+        return Err(format!("cannot be created: {error}"));
+    }
+    let probe = path.join(WRITE_PROBE);
+    if let Err(error) = fs::write(&probe, []) {
+        return Err(format!("cannot be written to: {error}"));
+    }
+    // The probe is evidence, not output: failing to remove it is no reason
+    // to refuse a folder that just accepted the file.
+    let _ = fs::remove_file(&probe);
+    Ok(())
+}
+
 /// Replace the text of the edit identified by `id`.
 pub(super) fn write_edit(id: i32, text: &str) {
     DIALOG
@@ -162,4 +197,53 @@ pub(super) fn write_edit(id: i32, text: &str) {
                 SetWindowTextW(*handle, encoded.as_ptr());
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_folder;
+    use std::fs;
+    use std::path::PathBuf;
+
+    /// A scratch path under the temp directory, unique to this run.
+    fn scratch(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "screencapture-folder-{}-{name}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&path);
+        path
+    }
+
+    #[test]
+    fn a_missing_folder_is_created_and_accepted() {
+        let root = scratch("missing");
+        let folder = root.join("captures").join("2026");
+        assert_eq!(ensure_folder(&folder.to_string_lossy()), Ok(()));
+        assert!(folder.is_dir(), "the folder exists for the next take");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_file_in_the_way_is_refused() {
+        let root = scratch("file");
+        fs::create_dir_all(&root).expect("scratch folder");
+        let file = root.join("not-a-folder");
+        fs::write(&file, b"x").expect("scratch file");
+        let refused = ensure_folder(&file.to_string_lossy()).unwrap_err();
+        assert_eq!(refused, "is a file, not a folder");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_write_probe_does_not_stay_behind() {
+        let folder = scratch("probe");
+        assert_eq!(ensure_folder(&folder.to_string_lossy()), Ok(()));
+        let left: Vec<_> = fs::read_dir(&folder)
+            .expect("created folder")
+            .map(|entry| entry.expect("readable entry").file_name())
+            .collect();
+        assert!(left.is_empty(), "the probe is gone: {left:?}");
+        let _ = fs::remove_dir_all(&folder);
+    }
 }

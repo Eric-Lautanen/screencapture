@@ -38,7 +38,7 @@ use self::ffi::{
     SetTextColor, SetWindowTextW, TBM_GETPOS, TRANSPARENT, WS_CAPTION, WS_CLIPCHILDREN,
     WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_SYSMENU, WS_VISIBLE,
 };
-use self::fields::{browse_folder, check_state, combo_choice, edit_text};
+use self::fields::{browse_folder, check_state, combo_choice, edit_text, ensure_folder};
 use self::frame::{
     dpi_scale, drop_font, drop_icon, fit_scale, install_title_icon, ui_font, window_frame,
 };
@@ -397,11 +397,19 @@ fn save(window: Hwnd) {
         return;
     };
     for (name, value) in [("videos", videos.as_str()), ("images", images.as_str())] {
-        if value.trim().is_empty() || !Path::new(value.trim()).is_absolute() {
+        let folder = value.trim();
+        if folder.is_empty() || !Path::new(folder).is_absolute() {
             complain(
                 window,
                 &format!("The {name} folder needs an absolute path (e.g. C:\\Users\\me\\Videos)."),
             );
+            return;
+        }
+        // The folder is created here, while the field is still open: a
+        // capture that cannot write would otherwise fail only after the
+        // take the user just recorded.
+        if let Err(reason) = ensure_folder(folder) {
+            complain(window, &format!("The {name} folder {reason}."));
             return;
         }
     }
