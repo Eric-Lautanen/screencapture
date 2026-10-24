@@ -8,7 +8,7 @@
 
 use crate::encoder::Video;
 use crate::recording::Profile;
-use crate::settings::{Settings, StillDepth};
+use crate::settings::{Settings, StillDepth, StillQuality};
 use crate::winapi::{CreateWindowExW, Hwnd, Lparam, Wparam};
 
 use super::ffi::{
@@ -20,7 +20,7 @@ use super::ffi::{
 use super::frame::scaled;
 use super::{
     CHECK_AUTOSTART, CHECK_CHIMES, CHECK_CURSOR, CHECK_MIC, CHECK_SYSTEM_AUDIO,
-    COMBO_AUDIO_QUALITY, COMBO_CODEC, COMBO_DEPTH, COMBO_MIC_DEVICE, COMBO_PROFILE,
+    COMBO_AUDIO_QUALITY, COMBO_CODEC, COMBO_DEPTH, COMBO_MIC_DEVICE, COMBO_PROFILE, COMBO_QUALITY,
     COMBO_SYSTEM_DEVICE, DIALOG, EDIT_CHIMES, EDIT_IMAGES, EDIT_PHOTO, EDIT_RECORD, EDIT_VIDEOS,
     SLIDER_MIC_LEVEL, SLIDER_SYSTEM_LEVEL, module_handle, wide,
 };
@@ -84,8 +84,8 @@ pub(super) fn populate(settings: &Settings, window: Hwnd) {
     folders_group(settings, window);
 
     // The button row, right-aligned with the bands' own right edge.
-    push_button(window, super::BTN_SAVE, "Save", 552, 528);
-    push_button(window, super::BTN_CANCEL, "Cancel", 636, 528);
+    push_button(window, super::BTN_SAVE, "Save", 552, 580);
+    push_button(window, super::BTN_CANCEL, "Cancel", 636, 580);
     settle_children();
 }
 
@@ -156,9 +156,29 @@ fn recording_group(settings: &Settings, window: Hwnd) {
     );
 }
 
-/// `Still photo`: the channel depth.
+/// `Still photo`: what a still is encoded as, then the PNG's depth.
+///
+/// Quality comes first because it is the choice most users change; depth
+/// only means something for the lossless PNG above it.
 fn still_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 132, COL_W, 52, "Still photo");
+    group(window, COL_L, 132, COL_W, 100, "Still photo");
+    let quality_index = StillQuality::CHOICES
+        .iter()
+        .position(|quality| *quality == settings.photo_quality)
+        .unwrap_or(0);
+    let quality_entries: Vec<String> = StillQuality::CHOICES
+        .iter()
+        .map(|quality| quality.label().to_owned())
+        .collect();
+    combo_row(
+        window,
+        COMBO_QUALITY,
+        "Photo quality",
+        COL_L,
+        148,
+        &quality_entries,
+        quality_index,
+    );
     let depth_index = match settings.photo_depth {
         StillDepth::Eight => 0,
         StillDepth::Sixteen => 1,
@@ -168,7 +188,7 @@ fn still_group(settings: &Settings, window: Hwnd) {
         COMBO_DEPTH,
         "Photo depth",
         COL_L,
-        148,
+        176,
         &["8-bit".to_owned(), "16-bit".to_owned()],
         depth_index,
     );
@@ -392,27 +412,27 @@ fn device_row(
 /// `Hotkeys`: the three free combos, seeded with their canonical forms,
 /// under Still photo so the right column holds the audio sheet alone.
 fn hotkeys_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 192, COL_W, 138, "Hotkeys");
+    group(window, COL_L, 244, COL_W, 138, "Hotkeys");
     hotkey_row(
         window,
         EDIT_RECORD,
         "Record hotkey",
         &settings.hotkey.to_combo(),
-        210,
+        262,
     );
     hotkey_row(
         window,
         EDIT_PHOTO,
         "Photo hotkey",
         &settings.photo.to_combo(),
-        242,
+        294,
     );
     hotkey_row(
         window,
         EDIT_CHIMES,
         "Chime hotkey",
         &settings.chime_hotkey.to_combo(),
-        274,
+        326,
     );
     let Some(status) = create_child(
         window,
@@ -421,7 +441,7 @@ fn hotkeys_group(settings: &Settings, window: Hwnd) {
         SS_LEFT | WS_CHILD | WS_VISIBLE,
         Place {
             x: COL_L + INNER,
-            y: 306,
+            y: 358,
             width: WIDE_W,
             height: 16,
         },
@@ -435,13 +455,13 @@ fn hotkeys_group(settings: &Settings, window: Hwnd) {
 
 /// `Application`: startup and the capture chime, side by side.
 fn application_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 342, BAND_W, 60, "Application");
+    group(window, COL_L, 394, BAND_W, 60, "Application");
     checkbox(
         window,
         CHECK_AUTOSTART,
         "Start screencapture when Windows starts",
         BAND_LABEL,
-        364,
+        416,
         settings.autostart,
         300,
     );
@@ -450,7 +470,7 @@ fn application_group(settings: &Settings, window: Hwnd) {
         CHECK_CHIMES,
         "Play capture chimes",
         360,
-        364,
+        416,
         settings.chimes,
         250,
     );
@@ -458,14 +478,14 @@ fn application_group(settings: &Settings, window: Hwnd) {
 
 /// `Folders`: both destinations, each with a native Browse button.
 fn folders_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 410, BAND_W, 92, "Folders");
-    label(window, "Videos folder", BAND_LABEL, 434, BAND_LABEL_W);
+    group(window, COL_L, 462, BAND_W, 92, "Folders");
+    label(window, "Videos folder", BAND_LABEL, 486, BAND_LABEL_W);
     edit_box(
         window,
         EDIT_VIDEOS,
         &settings.video_dir.to_string_lossy(),
         BAND_RIGHT,
-        430,
+        482,
         BAND_EDIT_W,
     );
     push_button(
@@ -473,15 +493,15 @@ fn folders_group(settings: &Settings, window: Hwnd) {
         super::BTN_BROWSE_VIDEOS,
         "Browse…",
         BAND_BUTTON_X,
-        428,
+        480,
     );
-    label(window, "Images folder", BAND_LABEL, 466, BAND_LABEL_W);
+    label(window, "Images folder", BAND_LABEL, 518, BAND_LABEL_W);
     edit_box(
         window,
         EDIT_IMAGES,
         &settings.image_dir.to_string_lossy(),
         BAND_RIGHT,
-        462,
+        514,
         BAND_EDIT_W,
     );
     push_button(
@@ -489,7 +509,7 @@ fn folders_group(settings: &Settings, window: Hwnd) {
         super::BTN_BROWSE_IMAGES,
         "Browse…",
         BAND_BUTTON_X,
-        460,
+        512,
     );
 }
 

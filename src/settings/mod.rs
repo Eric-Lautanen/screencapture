@@ -50,6 +50,84 @@ impl std::fmt::Display for StillDepth {
     }
 }
 
+/// How a still is encoded: the lossless PNG that keeps every captured
+/// pixel, or a JPEG at one of three quality steps for a much smaller file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum StillQuality {
+    /// Lossless PNG; `[photo] depth` picks its pixel depth.
+    #[default]
+    Lossless,
+    /// JPEG 95: indistinguishable from the PNG on screen, a fraction of
+    /// its size.
+    High,
+    /// JPEG 85: the usual screenshot compromise.
+    Standard,
+    /// JPEG 70: for a picture pasted into a chat window, not archived.
+    Compact,
+}
+
+impl StillQuality {
+    /// Every choice, in the order Settings lists them.
+    pub const CHOICES: [Self; 4] = [Self::Lossless, Self::High, Self::Standard, Self::Compact];
+
+    /// Parse a settings value (case-insensitive).
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "lossless" | "png" => Some(Self::Lossless),
+            "high" | "jpeg-high" | "95" => Some(Self::High),
+            "standard" | "jpeg-standard" | "85" => Some(Self::Standard),
+            "compact" | "jpeg-compact" | "70" => Some(Self::Compact),
+            _ => None,
+        }
+    }
+
+    /// The file extension a still of this quality is written with.
+    #[must_use]
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Lossless => "png",
+            Self::High | Self::Standard | Self::Compact => "jpg",
+        }
+    }
+
+    /// The `-q:v` scale ffmpeg's MJPEG encoder takes for this step (lower is
+    /// better), or `None` for the PNG. The encoder's own scale is not the
+    /// percentage users pick, so the two are mapped here rather than
+    /// guessed at the call site.
+    #[must_use]
+    pub fn jpeg_qscale(self) -> Option<&'static str> {
+        match self {
+            Self::Lossless => None,
+            Self::High => Some("2"),
+            Self::Standard => Some("4"),
+            Self::Compact => Some("7"),
+        }
+    }
+
+    /// The label Settings and `--check` show for this step.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Lossless => "Lossless — PNG",
+            Self::High => "High — JPEG 95",
+            Self::Standard => "Standard — JPEG 85",
+            Self::Compact => "Compact — JPEG 70",
+        }
+    }
+}
+
+impl std::fmt::Display for StillQuality {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lossless => write!(formatter, "lossless"),
+            Self::High => write!(formatter, "high"),
+            Self::Standard => write!(formatter, "standard"),
+            Self::Compact => write!(formatter, "compact"),
+        }
+    }
+}
+
 /// Where a recording's frame comes from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CaptureMode {
@@ -199,8 +277,10 @@ pub struct Settings {
     pub audio_devices: AudioDevices,
     /// How loud each source is mixed: the level its fader sits at, in dB.
     pub audio_levels: audio::Levels,
-    /// Still-photo channel depth.
+    /// Still-photo channel depth (PNG only; a JPEG still is always 8-bit).
     pub photo_depth: StillDepth,
+    /// How a still is encoded: lossless PNG or a JPEG quality step.
+    pub photo_quality: StillQuality,
     /// Play a soft chime when a still is taken or a recording is stopped.
     pub chimes: bool,
     /// Where completed recordings land.
@@ -332,8 +412,13 @@ fn template(videos: &Path, images: &Path) -> String {
             "chimes = true\n",
             "\n",
             "[photo]\n",
+            "# quality: lossless (PNG, the default, and the only lossless\n",
+            "# choice), high (JPEG 95), standard (JPEG 85), or compact\n",
+            "# (JPEG 70). A JPEG still is always 8-bit.\n",
+            "quality = lossless\n",
             "# depth: 8 (default) or 16 (48-bit RGB PNG; both capture\n",
-            "# routes today are 8-bit, so 16 is future-proofing).\n",
+            "# routes today are 8-bit, so 16 is future-proofing). A JPEG\n",
+            "# still ignores it.\n",
             "depth = 8\n",
             "\n",
             "[recording]\n",
@@ -407,15 +492,11 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
     let cursor = cursor_raw.and_then(Value::as_bool);
     let chimes_raw = document.value("capture", "chimes");
     let chimes = chimes_raw.and_then(Value::as_bool);
-    let depth_raw = document.value("photo", "depth");
-    let depth = still_depth(depth_raw);
     let mut problems = Vec::new();
+    let (depth, quality) = still_settings(document, &mut problems);
     let audio = audio_settings(document, &mut problems);
     let audio_devices = audio_devices(document, &mut problems);
     let audio_levels = audio_levels(document, &mut problems);
-    if depth_raw.is_some() && depth.is_none() {
-        problems.push(format!("invalid photo depth; using {}", StillDepth::Eight));
-    }
     if hotkey_raw.is_some() && hotkey.is_none() {
         problems.push(format!("invalid record hotkey; using {}", Hotkey::RECORD));
     }
@@ -480,7 +561,8 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
         audio,
         audio_devices,
         audio_levels,
-        photo_depth: depth.unwrap_or(StillDepth::Eight),
+        photo_depth: depth,
+        photo_quality: quality,
         chimes: chimes.unwrap_or(true),
         video_dir,
         image_dir,
@@ -499,6 +581,36 @@ fn usable_mode(mode: CaptureMode, problems: &mut Vec<String>) -> CaptureMode {
     } else {
         mode
     }
+}
+
+/// The `[photo]` section: how a still is encoded, and the PNG's pixel
+/// depth. Each falls back on its own, so a typo in one key never changes
+/// the other.
+fn still_settings(document: &Document, problems: &mut Vec<String>) -> (StillDepth, StillQuality) {
+    let depth_raw = document.value("photo", "depth");
+    let depth = still_depth(depth_raw);
+    let quality_raw = document.value("photo", "quality");
+    let quality = quality_raw
+        .and_then(Value::as_str)
+        .and_then(StillQuality::parse);
+    if depth_raw.is_some() && depth.is_none() {
+        problems.push(format!("invalid photo depth; using {}", StillDepth::Eight));
+    }
+    if quality_raw.is_some() && quality.is_none() {
+        let choices = StillQuality::CHOICES
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        problems.push(format!(
+            "invalid photo quality; using {} (choices: {choices})",
+            StillQuality::Lossless
+        ));
+    }
+    (
+        depth.unwrap_or(StillDepth::Eight),
+        quality.unwrap_or(StillQuality::Lossless),
+    )
 }
 
 /// A photo-depth value: bare text (`"8"`, quoted or not) and bare

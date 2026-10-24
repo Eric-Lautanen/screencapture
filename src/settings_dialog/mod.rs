@@ -1,10 +1,12 @@
 //! The tray Settings window: Win32 controls over the typed settings view,
 //! so every capture option lives in one place — recording profile and
-//! codec, cursor, the audio devices, sources and levels, photo depth,
-//! autostart, capture chimes, the record/photo/chime hotkeys (free
+//! codec, cursor, the audio devices, sources and levels, the still's
+//! quality and PNG depth, autostart, capture chimes, the record/photo/chime
+//! hotkeys (free
 //! modifier+key text, validated before accept), and the destination
-//! folders, where videos and images each get their own field plus a native
-//! folder browse.
+//! folders, which each get their own field plus a native folder browse and
+//! are created and write-tested on Save, so a folder that cannot hold a take
+//! is reported while the field is still open.
 //! A modal loop runs on the calling thread; Save answers
 //! [`Answers`] (validated), Cancel or close answers `None` and leaves
 //! all state untouched. Control rows live in [`rows`], raw Win32 in
@@ -66,6 +68,7 @@ const COMBO_MIC_DEVICE: i32 = 119;
 const COMBO_SYSTEM_DEVICE: i32 = 120;
 const SLIDER_MIC_LEVEL: i32 = 121;
 const SLIDER_SYSTEM_LEVEL: i32 = 122;
+const COMBO_QUALITY: i32 = 123;
 /// Standard dialog ids: `IsDialogMessageW` sends `IDOK` for Enter and
 /// `IDCANCEL` for Escape, so the buttons must carry those identities.
 const BTN_SAVE: i32 = 1;
@@ -92,8 +95,10 @@ pub struct Answers {
     pub levels: crate::audio::Levels,
     /// Whether the app launches at login.
     pub autostart: bool,
-    /// New photo depth (`8` or `16`).
+    /// New photo depth (`8` or `16`; the PNG's pixel depth).
     pub depth: String,
+    /// New still quality (`lossless`, `high`, `standard`, or `compact`).
+    pub quality: String,
     /// Whether captures play the confirmation chime.
     pub chimes: bool,
     /// Videos folder (absolute path).
@@ -363,6 +368,7 @@ fn save(window: Hwnd) {
     let codec = codec_list()[combo_choice(COMBO_CODEC)].id().to_owned();
     let depths = ["8", "16"];
     let depth = depths[combo_choice(COMBO_DEPTH)].to_owned();
+    let quality = crate::settings::StillQuality::CHOICES[combo_choice(COMBO_QUALITY)].to_string();
     let record = edit_text(EDIT_RECORD);
     let photo = edit_text(EDIT_PHOTO);
     let chime = edit_text(EDIT_CHIMES);
@@ -409,6 +415,7 @@ fn save(window: Hwnd) {
             levels,
             autostart,
             depth,
+            quality,
             chimes,
             videos,
             images,
@@ -542,10 +549,71 @@ fn complain(window: Hwnd, text: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::{CLASS_NAME, TITLE};
+    use std::collections::BTreeSet;
 
+    use super::{
+        BTN_BROWSE_IMAGES, BTN_BROWSE_VIDEOS, BTN_CANCEL, BTN_SAVE, CHECK_AUTOSTART, CHECK_CHIMES,
+        CHECK_CURSOR, CHECK_MIC, CHECK_SYSTEM_AUDIO, CLASS_NAME, COMBO_AUDIO_QUALITY, COMBO_CODEC,
+        COMBO_DEPTH, COMBO_MIC_DEVICE, COMBO_PROFILE, COMBO_QUALITY, COMBO_SYSTEM_DEVICE,
+        EDIT_CHIMES, EDIT_IMAGES, EDIT_PHOTO, EDIT_RECORD, EDIT_VIDEOS, SLIDER_MIC_LEVEL,
+        SLIDER_SYSTEM_LEVEL, TITLE,
+    };
+
+    /// Every control needs its own id: `GetDlgItem` answers the first window
+    /// that claims one, so a duplicate would quietly read or write a
+    /// neighbour's state instead of the control the caller named.
     #[test]
-    fn constants_stay_recognizable() {
+    fn every_control_has_its_own_id() {
+        let controls = [
+            ("save", BTN_SAVE),
+            ("cancel", BTN_CANCEL),
+            ("profile", COMBO_PROFILE),
+            ("codec", COMBO_CODEC),
+            ("quality", COMBO_QUALITY),
+            ("depth", COMBO_DEPTH),
+            ("cursor", CHECK_CURSOR),
+            ("autostart", CHECK_AUTOSTART),
+            ("record hotkey", EDIT_RECORD),
+            ("photo hotkey", EDIT_PHOTO),
+            ("chime hotkey", EDIT_CHIMES),
+            ("videos folder", EDIT_VIDEOS),
+            ("images folder", EDIT_IMAGES),
+            ("browse videos", BTN_BROWSE_VIDEOS),
+            ("browse images", BTN_BROWSE_IMAGES),
+            ("chimes", CHECK_CHIMES),
+            ("system audio", CHECK_SYSTEM_AUDIO),
+            ("microphone", CHECK_MIC),
+            ("audio quality", COMBO_AUDIO_QUALITY),
+            ("mic device", COMBO_MIC_DEVICE),
+            ("system device", COMBO_SYSTEM_DEVICE),
+            ("mic level", SLIDER_MIC_LEVEL),
+            ("system level", SLIDER_SYSTEM_LEVEL),
+        ];
+        let mut seen = BTreeSet::new();
+        for (name, id) in controls {
+            assert!(seen.insert(id), "{name} reuses control id {id}");
+            // Ids 1 and 2 belong to Save and Cancel; any other control on
+            // one of them would take the keyboard route those two need.
+            assert!(
+                id > 2 || name == "save" || name == "cancel",
+                "{name} would shadow a dialog-standard id"
+            );
+        }
+    }
+
+    /// Enter and Escape reach Save and Cancel through `IsDialogMessage`,
+    /// which routes the dialog-standard ids and nothing else: renumbering
+    /// either button silently takes the keyboard away from it.
+    #[test]
+    fn enter_and_escape_keep_their_dialog_ids() {
+        assert_eq!(BTN_SAVE, 1, "IDOK");
+        assert_eq!(BTN_CANCEL, 2, "IDCANCEL");
+    }
+
+    /// The class name is how the tray, the capture probe, and the asset
+    /// scripts find this window.
+    #[test]
+    fn the_window_is_findable_by_its_class() {
         assert!(CLASS_NAME.starts_with("screencapture."));
         assert!(TITLE.contains("screencapture"));
     }

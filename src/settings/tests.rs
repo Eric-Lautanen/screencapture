@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use super::{
-    CaptureMode, DEFAULT_CAPTURE_MODE, DisplayChoice, Document, Hotkey, StillDepth,
+    CaptureMode, DEFAULT_CAPTURE_MODE, DisplayChoice, Document, Hotkey, StillDepth, StillQuality,
     default_document, read_document,
 };
 
@@ -20,6 +20,7 @@ fn builtin_template_round_trips_through_defaults() {
     assert!(settings.autostart);
     assert!(!settings.cursor);
     assert_eq!(settings.photo_depth, StillDepth::Eight);
+    assert_eq!(settings.photo_quality, StillQuality::Lossless);
     assert!(settings.chimes, "captures are audible by default");
     assert!(!settings.audio.mic, "the microphone starts muted");
     assert!(settings.audio.system, "system sound is on by default");
@@ -53,6 +54,49 @@ fn display_choice_parses_primary_and_numbers() {
     assert_eq!(DisplayChoice::parse("one"), None);
     assert_eq!(DisplayChoice::Number(3).number(), Some(3));
     assert_eq!(DisplayChoice::Primary.number(), None);
+}
+
+#[test]
+fn still_quality_parses_and_survives_the_file() {
+    for (text, quality) in [
+        ("lossless", StillQuality::Lossless),
+        ("PNG", StillQuality::Lossless),
+        ("high", StillQuality::High),
+        ("Standard", StillQuality::Standard),
+        ("compact", StillQuality::Compact),
+    ] {
+        assert_eq!(StillQuality::parse(text), Some(quality), "{text}");
+    }
+    assert_eq!(StillQuality::parse("maximum"), None);
+
+    // Each step writes its own file type, and Display/parse are the pair
+    // the settings document round-trips through.
+    for quality in StillQuality::CHOICES {
+        let text = quality.to_string();
+        assert_eq!(StillQuality::parse(&text), Some(quality), "{text}");
+        let document =
+            Document::from_text(&format!("[photo]\nquality = {text}\n")).expect("value parses");
+        let (settings, problems) = read_document(&document);
+        assert_eq!(settings.photo_quality, quality, "{text}");
+        assert_eq!(problems.len(), 0, "{text}");
+    }
+    assert_eq!(StillQuality::Lossless.extension(), "png");
+    assert_eq!(StillQuality::High.extension(), "jpg");
+    assert_eq!(StillQuality::Standard.extension(), "jpg");
+    assert_eq!(StillQuality::Compact.extension(), "jpg");
+    assert_eq!(StillQuality::High.jpeg_qscale(), Some("2"));
+    assert_eq!(StillQuality::Standard.jpeg_qscale(), Some("4"));
+    assert_eq!(StillQuality::Compact.jpeg_qscale(), Some("7"));
+    assert_eq!(StillQuality::Lossless.jpeg_qscale(), None);
+}
+
+#[test]
+fn an_unknown_still_quality_falls_back_to_lossless() {
+    let document = Document::from_text("[photo]\nquality = enormous\n").expect("sample must parse");
+    let (settings, problems) = read_document(&document);
+    assert_eq!(settings.photo_quality, StillQuality::Lossless);
+    assert_eq!(problems.len(), 1);
+    assert!(problems[0].contains("photo quality"), "{problems:?}");
 }
 
 #[test]

@@ -109,6 +109,7 @@ fn apply_settings(loaded: &mut Loaded, runtime: &mut Runtime, answers: &Answers)
         }
     }
     document.set("recording", "autostart", Value::Bool(answers.autostart));
+    document.set("photo", "quality", Value::Str(answers.quality.clone()));
     document.set("photo", "depth", Value::Str(answers.depth.clone()));
     // Choosing one folder for both outputs splits it into `video` and
     // `image` subfolders; persist the effective paths so the file shows

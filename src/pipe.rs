@@ -113,14 +113,17 @@ pub fn record_args(
     args
 }
 
-/// Full argument vector for one still photo (lossless PNG). `depth`
-/// selects the pixel depth: 16 adds the 48-bit RGB big-endian
+/// Full argument vector for one still photo. A lossless choice writes PNG,
+/// where `depth` selects the pixel depth: 16 adds the 48-bit RGB big-endian
 /// conversion the PNG encoder documents (`rgb48be`), under the same
-/// lossless compression arguments.
+/// lossless compression arguments. A JPEG choice swaps the codec for MJPEG
+/// at that step's quality, in full-resolution 4:4:4 (`yuvj444p`) because
+/// 4:2:0 makes coloured UI text fringe; `depth` does not apply to it.
 #[must_use]
 pub fn still_args(
     stream: Stream,
     depth: crate::settings::StillDepth,
+    quality: crate::settings::StillQuality,
     output: &Path,
 ) -> Vec<String> {
     let mut args = base_args();
@@ -131,15 +134,26 @@ pub fn still_args(
         "-frames:v".to_owned(),
         "1".to_owned(),
     ]);
-    if depth == crate::settings::StillDepth::Sixteen {
-        args.extend(["-vf".to_owned(), "format=rgb48be".to_owned()]);
+    if let Some(qscale) = quality.jpeg_qscale() {
+        args.extend([
+            "-c:v".to_owned(),
+            "mjpeg".to_owned(),
+            "-q:v".to_owned(),
+            qscale.to_owned(),
+            "-pix_fmt".to_owned(),
+            "yuvj444p".to_owned(),
+        ]);
+    } else {
+        if depth == crate::settings::StillDepth::Sixteen {
+            args.extend(["-vf".to_owned(), "format=rgb48be".to_owned()]);
+        }
+        args.extend([
+            "-c:v".to_owned(),
+            "png".to_owned(),
+            "-compression_level".to_owned(),
+            "9".to_owned(),
+        ]);
     }
-    args.extend([
-        "-c:v".to_owned(),
-        "png".to_owned(),
-        "-compression_level".to_owned(),
-        "9".to_owned(),
-    ]);
     args.push(output.display().to_string());
     args
 }
@@ -284,7 +298,7 @@ impl Drop for Feed {
 #[cfg(test)]
 mod tests {
     use super::{Stream, record_args, still_args};
-    use crate::settings::StillDepth;
+    use crate::settings::{StillDepth, StillQuality};
     use std::path::Path;
 
     /// A named audio pipe adds a second input, the mapping that keeps the
@@ -476,6 +490,7 @@ mod tests {
                 fps: 1,
             },
             StillDepth::Eight,
+            StillQuality::Lossless,
             Path::new("out.png"),
         );
         for wanted in [
@@ -501,6 +516,7 @@ mod tests {
                 fps: 1,
             },
             StillDepth::Sixteen,
+            StillQuality::Lossless,
             Path::new("out.png"),
         );
         assert!(args.contains(&"-vf".to_owned()));
@@ -509,6 +525,43 @@ mod tests {
         // only in their pixel form.
         for wanted in ["-c:v", "png", "-compression_level", "9"] {
             assert!(args.contains(&wanted.to_owned()));
+        }
+    }
+
+    #[test]
+    fn a_jpeg_still_asks_for_mjpeg_at_its_step() {
+        for (quality, qscale) in [
+            (StillQuality::High, "2"),
+            (StillQuality::Standard, "4"),
+            (StillQuality::Compact, "7"),
+        ] {
+            let args = still_args(
+                Stream {
+                    width: 64,
+                    height: 32,
+                    fps: 1,
+                },
+                // Depth belongs to the PNG: a JPEG is always 8-bit and
+                // must not gain the 48-bit conversion filter.
+                StillDepth::Sixteen,
+                quality,
+                Path::new("out.jpg"),
+            );
+            assert!(args.contains(&"mjpeg".to_owned()), "{quality:?}");
+            let index = args
+                .iter()
+                .position(|arg| arg == "-q:v")
+                .unwrap_or_else(|| panic!("{quality:?} names a qscale"));
+            assert_eq!(args[index + 1], qscale, "{quality:?}");
+            // 4:4:4 keeps coloured UI text from fringing, which is how a
+            // screenshot JPEG is judged.
+            assert!(args.contains(&"yuvj444p".to_owned()), "{quality:?}");
+            assert!(!args.contains(&"png".to_owned()), "{quality:?}");
+            assert!(
+                !args.contains(&"-compression_level".to_owned()),
+                "{quality:?}"
+            );
+            assert!(!args.contains(&"format=rgb48be".to_owned()), "{quality:?}");
         }
     }
 }
