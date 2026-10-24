@@ -1,4 +1,4 @@
-//! Version records: the release pipeline signs, titles, and verifies one
+//! Version records: the release pipeline builds, titles, and verifies one
 //! version, so the two files that repeat it by hand must agree with the
 //! package version. This catches a bump that misses the exe resource or the
 //! installer before a tag is pushed.

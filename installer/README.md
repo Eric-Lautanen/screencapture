@@ -49,5 +49,5 @@ a release tag.
 - Setup and the uninstaller use `assets/icon.ico`; the installed exe carries
   the same multi-size icon as a resource.
 - `EstimatedSize` is computed at install time with `${GetSize}`.
-- Signed releases use the tag-triggered workflow and SignPath setup in
-  `docs/SIGNING.md`.
+- Releases are built and published by the tag-triggered `Release` workflow;
+  the setup ships unsigned beside `SHA256SUMS.txt`.
