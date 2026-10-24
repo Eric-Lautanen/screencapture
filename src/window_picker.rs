@@ -8,9 +8,17 @@
 //! or right click cancels either way. Input arrives through low-level
 //! mouse and keyboard hooks (see [`EscapeWatch`]) and the outline is a
 //! click-through topmost window painted with the picker's dotted style.
+//!
+//! A hook callback that runs long is skipped rather than queued, so the
+//! session never assumes it saw every event: a release is answered from
+//! the point it arrives at (never the highlight it left behind), and a
+//! press always starts a fresh gesture, so a swallowed release cannot stop
+//! a later click from resolving. The gesture is tracked from these events
+//! alone: the picker consumes the press, so the system's own button state
+//! never sees it (which is why `GetAsyncKeyState` cannot answer for it).
 
 use crate::pin_layout;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::thread_local;
 
@@ -86,6 +94,25 @@ struct Track {
 
 thread_local! {
     static TRACK: RefCell<Track> = RefCell::new(Track::default());
+    /// Set while a pick owns the hooks and [`TRACK`].
+    static LIVE: Cell<bool> = const { Cell::new(false) };
+}
+
+/// The live-session claim; released on drop, so every way out of [`pick`]
+/// frees the session again.
+struct Live;
+
+impl Live {
+    /// Claim the pick session; `None` when one is already live here.
+    fn enter() -> Option<Self> {
+        (!LIVE.replace(true)).then_some(Self)
+    }
+}
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        LIVE.set(false);
+    }
 }
 
 /// Highlight the hovered window and answer the picked target.
@@ -94,6 +121,14 @@ thread_local! {
 /// Windows refused the overlay's hooks; the caller answers its
 /// cursor-under fallback instead.
 pub fn pick() -> std::io::Result<Option<Pick>> {
+    // The tray pumps messages from inside its own handler, so a menu or a
+    // dialog still on the stack can dispatch a second capture request
+    // into a re-entrant pick. That one answers "no selection": letting it
+    // run would reset `TRACK`, uninstall the live session's hooks and drop
+    // its outline halfway through the gesture.
+    let Some(_live) = Live::enter() else {
+        return Ok(None);
+    };
     TRACK.with_borrow_mut(|track| *track = Track::default());
     let instance = module_handle();
     TRACK.with_borrow_mut(|track| {
@@ -151,43 +186,32 @@ unsafe extern "system" fn on_mouse(code: i32, wparam: usize, lparam: isize) -> i
     if code >= 0 {
         // SAFETY: the payload pointer is valid per the hook contract.
         let event = unsafe { &*(lparam as *const MsllHook) };
+        let message = u32::try_from(wparam).unwrap_or(0);
         TRACK.with_borrow_mut(|track| {
-            consume = consumed(wparam);
+            consume = consumed(message);
+            // The marker stays glued to the pointer for the whole session,
+            // including the event that ends it.
+            if let Some(cursor) = &track.cursor {
+                cursor.place(event.pt);
+            }
             if track.done {
                 return;
             }
-            if wparam == WM_LBUTTONDOWN as usize && !track.dragging {
-                follow(track, event.pt);
-                track.origin = Some(event.pt);
-            } else if wparam == WM_LBUTTONUP as usize && !track.dragging {
-                confirm_click(track);
-                finish();
-            } else if wparam == WM_LBUTTONUP as usize && track.dragging {
-                confirm_drag(track);
-                finish();
-            } else if wparam == WM_MOUSEMOVE as usize {
-                if let Some(origin) = track.origin {
-                    if track.dragging {
-                        draw_marquee(track, origin, event.pt);
-                    } else if beyond_threshold(origin, event.pt) {
-                        undraw(track);
-                        track.dragging = true;
-                        draw_marquee(track, origin, event.pt);
-                    } else {
-                        follow(track, event.pt);
-                    }
-                } else {
+            match message {
+                WM_LBUTTONDOWN => {
+                    press(track, event.pt);
                     follow(track, event.pt);
                 }
-            } else if wparam == WM_RBUTTONDOWN as usize {
-                track.done = true;
-                undraw(track);
-                track.origin = None;
-                track.picked = None;
-                finish();
-            }
-            if let Some(cursor) = &track.cursor {
-                cursor.place(event.pt);
+                WM_LBUTTONUP => release(track, event.pt),
+                WM_MOUSEMOVE => moved(track, event.pt),
+                WM_RBUTTONDOWN => {
+                    track.done = true;
+                    undraw(track);
+                    track.origin = None;
+                    track.picked = None;
+                    finish();
+                }
+                _ => {}
             }
         });
     }
@@ -200,10 +224,59 @@ unsafe extern "system" fn on_mouse(code: i32, wparam: usize, lparam: isize) -> i
 
 /// Presses and releases are swallowed; motion passes through so the OS
 /// cursor moves naturally.
-fn consumed(message: usize) -> bool {
-    message == WM_LBUTTONDOWN as usize
-        || message == WM_LBUTTONUP as usize
-        || message == WM_RBUTTONDOWN as usize
+fn consumed(message: u32) -> bool {
+    matches!(message, WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN)
+}
+
+/// Start a press at `point`, whatever the previous gesture was.
+///
+/// A press that arrives while a marquee is still live means the release
+/// that should have ended it never arrived: taking the press over is what
+/// keeps a swallowed event from wedging the session, where the old marquee
+/// followed the pointer and no click could resolve it.
+fn press(track: &mut Track, point: Point) {
+    if track.dragging {
+        undraw(track);
+        track.dragging = false;
+        // Force the next `follow` to place the outline again: the stale
+        // hovered handle is the one the dropped marquee replaced.
+        track.handle = None;
+    }
+    track.origin = Some(point);
+}
+
+/// Track a move: a live marquee follows the pointer, a press past the
+/// threshold starts one, and a press that stays put only re-aims the
+/// highlight at the window under the pointer.
+fn moved(track: &mut Track, point: Point) {
+    let Some(origin) = track.origin else {
+        follow(track, point);
+        return;
+    };
+    if track.dragging {
+        draw_marquee(track, origin, point);
+    } else if beyond_threshold(origin, point) {
+        undraw(track);
+        track.dragging = true;
+        draw_marquee(track, origin, point);
+    } else {
+        follow(track, point);
+    }
+}
+
+/// End the press at `point`: a marquee answers its drag, anything else the
+/// window under the release. Re-reading the hovered window here is what
+/// keeps a press the hook missed from answering the highlight it happened
+/// to leave behind (a pick that started over the taskbar once recorded
+/// the taskbar).
+fn release(track: &mut Track, point: Point) {
+    if track.dragging {
+        confirm_drag(track);
+    } else {
+        follow(track, point);
+        confirm_click(track);
+    }
+    finish();
 }
 
 /// Confirm a plain click: the highlighted window is the answer.
@@ -353,7 +426,7 @@ mod tests {
     use super::{
         DRAG_THRESHOLD_PX, Pick, TRACK, Track, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
         WM_RBUTTONDOWN, abandon, beyond_threshold, confirm_click, confirm_drag, consumed,
-        drag_geometry,
+        drag_geometry, press,
     };
     use crate::screen::win::window_bounds;
 
@@ -368,10 +441,54 @@ mod tests {
     fn motion_passes_through_to_the_cursor() {
         // The pointer must keep moving while a pick is live; a consumed
         // move is a move the system never applies to the cursor.
-        assert!(!consumed(WM_MOUSEMOVE as usize));
-        assert!(consumed(WM_LBUTTONDOWN as usize));
-        assert!(consumed(WM_LBUTTONUP as usize));
-        assert!(consumed(WM_RBUTTONDOWN as usize));
+        assert!(!consumed(WM_MOUSEMOVE));
+        assert!(consumed(WM_LBUTTONDOWN));
+        assert!(consumed(WM_LBUTTONUP));
+        assert!(consumed(WM_RBUTTONDOWN));
+    }
+
+    #[test]
+    fn a_press_records_where_it_went_down() {
+        let mut track = Track::default();
+        let point = super::Point { x: 640, y: 480 };
+        press(&mut track, point);
+        assert_eq!(
+            track.origin.map(|origin| (origin.x, origin.y)),
+            Some((640, 480))
+        );
+        assert!(!track.dragging);
+    }
+
+    #[test]
+    fn a_press_after_a_lost_release_starts_a_new_gesture() {
+        // The marquee's release was skipped by the system. The next press
+        // must take the session over instead of being ignored: otherwise
+        // the stale marquee keeps following the pointer and only a cancel
+        // gets the picker back.
+        let mut track = Track {
+            dragging: true,
+            origin: Some(super::Point { x: 10, y: 10 }),
+            marquee: Some(super::Region {
+                x: 10,
+                y: 10,
+                width: 40,
+                height: 40,
+            }),
+            handle: Some(7),
+            ..Track::default()
+        };
+        let point = super::Point { x: 800, y: 600 };
+        press(&mut track, point);
+        assert_eq!(
+            track.origin.map(|origin| (origin.x, origin.y)),
+            Some((800, 600))
+        );
+        assert!(!track.dragging, "the stale drag is over");
+        assert!(track.marquee.is_none(), "its outline is gone");
+        assert!(
+            track.handle.is_none(),
+            "the next move re-aims the highlight"
+        );
     }
 
     /// The idle guard clears the answer instead of leaving a stale target
