@@ -21,8 +21,8 @@ ManifestDPIAware true
 !define COMPANY "Eric Lautanen"
 !define EXENAME "screencapture.exe"
 !define PRODUCTNAME "screencapture"
-!define VERSION "0.1.2"
-!define VERSIONNUM "0.1.2.0"
+!define VERSION "0.1.3"
+!define VERSIONNUM "0.1.3.0"
 !define DESC "Professional 4K screen recorder and still-image capture."
 
 !include "MUI2.nsh"
