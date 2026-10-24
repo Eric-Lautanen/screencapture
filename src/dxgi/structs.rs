@@ -5,6 +5,7 @@
 //! Everything here is plain data; the v-table shapes live in `abi.rs` and
 //! the call protocol in `com.rs`.
 
+use crate::pin_layout;
 use std::ffi::c_void;
 
 use crate::winapi::{Point, Rect};
@@ -46,19 +47,8 @@ pub const MAP_READ: u32 = 1;
 // GUIDs
 // ---------------------------------------------------------------------------
 
-/// `DEFINE_GUID` layout for `REFGUID`.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Guid {
-    /// First 32 bits.
-    pub a: u32,
-    /// Next 16 bits.
-    pub b: u16,
-    /// Next 16 bits.
-    pub c: u16,
-    /// Remaining 8 bytes in declared order.
-    pub d: [u8; 8],
-}
+/// `DEFINE_GUID` layout for `REFGUID`, pinned once in [`crate::winapi`].
+pub use crate::winapi::Guid;
 
 impl Guid {
     /// Build a GUID from the familiar hex groups.
@@ -244,3 +234,36 @@ pub struct Mapped {
     /// Depth length in bytes.
     pub depth_pitch: u32,
 }
+
+// ---------------------------------------------------------------------------
+// Layout pins: these records are addressed by the driver through the raw
+// pointers the COM protocol passes, so every byte position is load-bearing.
+// ---------------------------------------------------------------------------
+
+pin_layout!(SampleDesc, 8; count = 0, quality = 4);
+pin_layout!(Rational, 8; numerator = 0, denominator = 4);
+pin_layout!(ModeDesc, 28; width = 0, height = 4, refresh = 8, format = 16,
+    scanline = 20, scaling = 24);
+
+// Output: 32-char device name, then a rect, then scalars, then the
+// monitor handle whose pointer alignment forces the 88 offset.
+pin_layout!(OutputDesc, 96; device_name = 0, coordinates = 64,
+    attached = 80, rotation = 84, monitor = 88);
+
+pin_layout!(DuplDesc, 36; mode = 0, rotation = 28, system_memory = 32);
+pin_layout!(PointerPosition, 12; position = 0, visible = 8);
+pin_layout!(PointerShapeInfo, 24; kind = 0, width = 4, height = 8,
+    pitch = 12, hotspot = 16);
+
+// Frame info: two 64-bit timestamps, five scalars, the 12-byte pointer
+// record it packs at 28, then the two byte budgets.
+pin_layout!(FrameInfo, 48; last_present = 0, last_mouse = 8,
+    accumulated = 16, coalesced = 20, masked = 24, pointer = 28,
+    metadata_budget = 40, shape_budget = 44);
+
+pin_layout!(Tex2dDesc, 44; width = 0, height = 4, mips = 8, array = 12,
+    format = 16, sample = 20, usage = 28, bind = 32, cpu = 36, misc = 40);
+
+// Map call's out-record: the pointer takes the 8-byte slot first, the
+// pitches trail it without padding.
+pin_layout!(Mapped, 16; data = 0, row_pitch = 8, depth_pitch = 12);
