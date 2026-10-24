@@ -73,6 +73,9 @@ pub(super) const WS_EX_CLIENTEDGE: u32 = 0x0000_0200;
 pub(super) const SM_CXSCREEN: i32 = 0;
 /// `SM_CYSCREEN` (winuser.h): primary display height in pixels.
 pub(super) const SM_CYSCREEN: i32 = 1;
+/// `SPI_GETWORKAREA` (winuser.h): the display area left after the taskbar,
+/// which is what a dialog has to fit inside.
+pub(super) const SPI_GETWORKAREA: u32 = 0x0030;
 /// `WS_CLIPSIBLINGS` (winuser.h): children never paint over each other.
 pub(super) const WS_CLIPSIBLINGS: u32 = 0x0400_0000;
 /// `DEFAULT_GUI_FONT` is avoided; this asks for the DPI-aware system DPI.
@@ -162,6 +165,14 @@ unsafe extern "system" {
     ) -> Bool;
     /// Per-monitor DPI in effect when the dialog opens (Windows 10+).
     pub(super) fn GetDpiForSystem() -> u32;
+    /// Reads a system parameter; [`SPI_GETWORKAREA`] writes a [`Rect`]
+    /// through `data` describing the usable desktop of the primary display.
+    pub(super) fn SystemParametersInfoW(
+        action: u32,
+        parameter: u32,
+        data: *mut c_void,
+        update: u32,
+    ) -> Bool;
     pub(super) fn SetWindowPos(
         window: Hwnd,
         insert_after: Hwnd,

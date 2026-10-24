@@ -36,7 +36,7 @@ use self::ffi::{
     WS_VISIBLE,
 };
 use self::fields::{browse_folder, check_state, combo_choice, edit_text};
-use self::frame::{dpi_scale, drop_font, install_title_icon, ui_font, window_frame};
+use self::frame::{dpi_scale, drop_font, fit_scale, install_title_icon, ui_font, window_frame};
 use self::rows::{attached_count, codec_list, display_entries, populate};
 
 // ---------------------------------------------------------------------------
@@ -137,7 +137,10 @@ pub fn run(settings: &Settings) -> io::Result<Option<Answers>> {
         *dialog = Dialog::default();
     });
     let instance = module_handle();
-    let scale = dpi_scale();
+    // The display's DPI scale, reduced when the window would not fit the
+    // work area: a small screen shrinks the whole layout instead of
+    // hiding Save and Cancel below the desktop.
+    let scale = fit_scale(dpi_scale());
     DIALOG.with_borrow_mut(|dialog| dialog.scale = scale);
     register_class(instance);
     let window = create_window(instance, scale);
