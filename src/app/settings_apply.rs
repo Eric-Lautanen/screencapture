@@ -42,6 +42,15 @@ pub(super) fn open_settings(loaded: &mut Loaded, runtime: &mut Runtime) {
             &format!("cannot open the settings window: {error}"),
         ),
     }
+    // The window, its controls, and its font are gone with the dialog; a
+    // session left open for a while has also faulted in pages this tray —
+    // which runs for days — has no use for again. Hand them back now.
+    // Opening the dialog stopped any live recording, and one still
+    // finalizing is not idle memory: its worker may still be reading
+    // capture buffers, so the trim waits for the watchdog's own pass.
+    if runtime.idle() {
+        crate::trim::idle();
+    }
 }
 
 /// The same seam where no tray runs yet; the settings file stays the

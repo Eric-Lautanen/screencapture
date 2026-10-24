@@ -80,6 +80,12 @@ impl Runtime {
             escape: None,
         }
     }
+
+    /// Whether nothing is capturing, encoding, or waiting on an engine;
+    /// the only state in which trimming resident pages costs nothing.
+    fn idle(&self) -> bool {
+        self.recorder.is_none() && self.finalizing.is_empty()
+    }
 }
 
 /// Run the tray application until the user exits.
@@ -267,6 +273,14 @@ fn photograph(loaded: &mut Loaded, runtime: &mut Runtime) {
             Err(error) => log::note("error", &format!("cannot take a photo: {error}")),
         },
         Err(error) => log::note("error", &error.to_string()),
+    }
+    // The frame went with its target and the clipboard now owns a copy of
+    // the still; until the pages leave the working set, Task Manager
+    // reports the app as a few megabytes heavier than it was before the
+    // capture. A photo taken in the middle of a recording waits for its
+    // stop instead, because trimming would evict the capture's buffers.
+    if runtime.idle() {
+        crate::trim::idle();
     }
 }
 
@@ -500,8 +514,12 @@ fn drain_finalizing(runtime: &mut Runtime) {
         }
     }
     runtime.finalizing = remaining;
-    if runtime.finalizing.is_empty() && runtime.recorder.is_none() {
+    if runtime.idle() {
         tray::set_watchdog_timer(None);
+        // The finished recording's frames, staging texture, and engine all
+        // went with its worker; hand the resident pages back now instead of
+        // leaving the tray looking heavier than it is until Windows trims.
+        crate::trim::idle();
     }
 }
 

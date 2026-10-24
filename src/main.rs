@@ -45,6 +45,7 @@ mod settings_dialog;
 mod sha256;
 mod sound;
 mod tray;
+mod trim;
 #[cfg(windows)]
 mod wgc;
 #[cfg(windows)]
