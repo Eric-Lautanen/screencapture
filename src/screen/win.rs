@@ -8,8 +8,10 @@ use std::io;
 use crate::capture::Region;
 use crate::screen::Display;
 use crate::winapi::{
-    GetCursorPos, GetSystemMetrics, Point, Rect, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_VISIBLE_FRAME_BORDER_THICKNESS, DwmGetWindowAttribute,
+    EnumDisplayMonitors, GA_ROOT, GetAncestor, GetCursorPos, GetSystemMetrics, GetWindowRect, Hwnd,
+    Point, Rect, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    WindowFromPoint,
 };
 
 /// All attached displays in enumeration order.
@@ -29,40 +31,6 @@ pub fn list() -> Vec<Display> {
     }
     found
 }
-
-type Lparam = isize;
-type DisplayCallback =
-    unsafe extern "system" fn(*mut c_void, *mut c_void, *const Rect, *mut c_void) -> i32;
-
-#[link(name = "user32")]
-unsafe extern "system" {
-    fn EnumDisplayMonitors(
-        dc: *mut c_void,
-        clip: *const Rect,
-        callback: DisplayCallback,
-        data: Lparam,
-    ) -> i32;
-    fn WindowFromPoint(point: Point) -> *mut c_void;
-    fn GetAncestor(window: *mut c_void, flags: u32) -> *mut c_void;
-    fn GetWindowRect(window: *mut c_void, rect: *mut Rect) -> i32;
-}
-
-#[link(name = "dwmapi")]
-unsafe extern "system" {
-    fn DwmGetWindowAttribute(
-        window: *mut c_void,
-        attribute: u32,
-        value: *mut c_void,
-        size: u32,
-    ) -> i32;
-}
-
-/// `DWMWA_EXTENDED_FRAME_BOUNDS` (dwmapi.h): the visible window area
-/// without borders and shadows.
-const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
-
-/// `GA_ROOT` (winuser.h): the root owner of a window.
-const GA_ROOT: u32 = 2;
 
 /// Append one monitor rectangle; nonzero keeps enumeration going.
 unsafe extern "system" fn push_display(
@@ -88,9 +56,9 @@ unsafe extern "system" fn push_display(
 }
 
 /// A window's capture region: DWM extended frame bounds (no borders or
-/// shadows), clamped to the visible desktop. `preferred` names a window
-/// the caller had focused just before a tray menu opened; otherwise the
-/// window under the cursor is used.
+/// shadows), clamped to the visible desktop. `preferred` — when given —
+/// names the window the picker session chose (pointer bits); otherwise
+/// the window under the cursor answers.
 ///
 /// # Errors
 /// Returns an error when no window bounds can be resolved.
@@ -131,6 +99,19 @@ fn window_at_cursor() -> Option<*mut c_void> {
 
 /// DWM frame bounds when decoration-aware bounds work, else raw bounds.
 fn region_for_window(handle: *mut c_void) -> Option<Region> {
+    visible_region(window_bounds(handle)?)
+}
+
+/// One window's opaque frame: DWM extended bounds without borders and
+/// shadows, with the visible frame border trimmed. Windows 11 draws that
+/// 1 px border translucently over the desktop, so keeping it in the rect
+/// shows whatever sits behind the window along its edges (white text or
+/// an image slice when a bright page is behind). Both the capture region
+/// and the picker's highlight use this, so the dotted box hugs exactly
+/// the pixels a capture saves.
+///
+/// Falls back to `GetWindowRect` when decoration introspection refuses.
+pub(crate) fn window_bounds(handle: Hwnd) -> Option<Rect> {
     if handle.is_null() {
         return None;
     }
@@ -151,7 +132,50 @@ fn region_for_window(handle: *mut c_void) -> Option<Region> {
             return None;
         }
     }
-    visible_region(bounds)
+    trim_frame_border(handle, bounds)
+}
+
+/// Inset `bounds` past the visible frame border. The attribute exists on
+/// Windows 11; older builds fail and keep the bounds untouched. The
+/// thickness is tiny by contract, and the guard keeps a degenerate
+/// answer from emptying a legitimate window.
+fn trim_frame_border(handle: Hwnd, bounds: Rect) -> Option<Rect> {
+    let mut thickness = 0u32;
+    let size = u32::try_from(std::mem::size_of::<u32>()).unwrap_or(0);
+    // SAFETY: writes only the local `thickness`.
+    let found = unsafe {
+        DwmGetWindowAttribute(
+            handle,
+            DWMWA_VISIBLE_FRAME_BORDER_THICKNESS,
+            (&raw mut thickness).cast::<c_void>(),
+            size,
+        )
+    } == 0;
+    let border = i32::try_from(thickness).unwrap_or(0).clamp(0, 4);
+    if found {
+        inset(bounds, border).or_else(|| nonempty(bounds))
+    } else {
+        nonempty(bounds)
+    }
+}
+
+/// `bounds` moved in by `border` on every side; `None` when that empties
+/// it (a nonsense thickness must not erase a legitimate window).
+fn inset(bounds: Rect, border: i32) -> Option<Rect> {
+    if border <= 0 {
+        return nonempty(bounds);
+    }
+    let inset = Rect {
+        left: bounds.left.saturating_add(border),
+        top: bounds.top.saturating_add(border),
+        right: bounds.right.saturating_sub(border),
+        bottom: bounds.bottom.saturating_sub(border),
+    };
+    nonempty(inset)
+}
+
+fn nonempty(bounds: Rect) -> Option<Rect> {
+    (bounds.right > bounds.left && bounds.bottom > bounds.top).then_some(bounds)
 }
 
 /// A rect's on-screen capture region, limited to the visible desktop so
@@ -191,4 +215,38 @@ fn virtual_desktop() -> (i32, i32, i32, i32) {
         )
     };
     (left, top, left + width, top + height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{inset, nonempty};
+    use crate::winapi::Rect;
+
+    const FRAME: Rect = Rect {
+        left: 240,
+        top: 126,
+        right: 1680,
+        bottom: 1026,
+    };
+
+    #[test]
+    fn zero_border_keeps_the_frame() {
+        assert!(inset(FRAME, 0) == Some(FRAME));
+    }
+
+    #[test]
+    fn one_pixel_border_trims_every_side() {
+        let trimmed = inset(FRAME, 1).expect("a trimmed frame stays nonempty");
+        assert_eq!(
+            (trimmed.left, trimmed.top, trimmed.right, trimmed.bottom),
+            (241, 127, 1679, 1025)
+        );
+    }
+
+    #[test]
+    fn nonsense_border_never_erases_the_frame() {
+        assert!(inset(FRAME, 5_000).is_none());
+        assert!(inset(Rect::default(), 1).is_none());
+        assert!(nonempty(Rect::default()).is_none());
+    }
 }
