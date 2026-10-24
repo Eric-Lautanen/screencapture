@@ -59,6 +59,38 @@ jobs:
       - name: Run the test suite
         run: cargo test --all-targets --locked
 
+      # Unit tests never start the program. This does: a runner has no
+      # desktop session and no bundled engine, so the point is not that
+      # `--check` passes but that the release binary (the profile with LTO,
+      # stripped symbols, and no debug assertions) loads its platform
+      # libraries, prints the report, and exits with a status instead of
+      # panicking or hanging. A panic surfaces as 101 here.
+      - name: Start the release binary and read its report (non-Windows)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build --release --locked
+          set +e
+          report=$(./target/release/screencapture --check 2>&1)
+          status=$?
+          set -e
+          printf '%s\n' "$report"
+          if [ "$status" -ne 0 ] && [ "$status" -ne 1 ]; then
+              echo "--check exited $status; a refusal is 1 and a panic is 101"
+              exit 1
+          fi
+          for needle in 'settings file:' 'capture:' 'result:'; do
+              case "$report" in
+                  *"$needle"*) ;;
+                  *) echo "--check never printed [$needle]"; exit 1 ;;
+              esac
+          done
+          case "$report" in
+              *panic*) echo '--check panicked'; exit 1 ;;
+          esac
+          echo "report ok (exit $status)"
+
   installer:
     name: installer (windows)
     runs-on: windows-latest
@@ -104,6 +136,85 @@ jobs:
           $ErrorActionPreference = 'Stop'
           cargo build --release --locked
           if ($LASTEXITCODE -ne 0) { throw 'cargo build --release failed' }
+
+      # The unit tests never open a pipe to the engine, so this is the only
+      # check that the capture worker, the encoder arguments, and the file
+      # they produce still line up. The take is short and writes to the
+      # runner's temp folder; a session that refuses capture fails here
+      # rather than shipping a build nobody ever recorded with.
+      - name: Smoke the capture pipeline
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $app = Join-Path $PWD 'target\release\screencapture.exe'
+          $ffprobe = Join-Path $PWD 'vendor\ffmpeg\ffprobe.exe'
+          $engine = Join-Path $PWD 'vendor\ffmpeg\ffmpeg.exe'
+          $root = Join-Path $env:RUNNER_TEMP 'smoke'
+          $videos = Join-Path $root 'videos'
+          $images = Join-Path $root 'images'
+          $settings = Join-Path $root 'settings.cfg'
+          if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -Force }
+          New-Item -ItemType Directory -Force -Path $videos, $images | Out-Null
+          # No here-string here: YAML indents every line, and a here-string's
+          # end mark has to start at column zero.
+          $lines = @(
+              '[hotkeys]'
+              'record = ctrl+shift+x'
+              'photo = ctrl+shift+z'
+              'chimes = ctrl+shift+m'
+              ''
+              '[capture]'
+              'mode = full'
+              'chimes = false'
+              ''
+              '[recording]'
+              'profile = hd-720p30'
+              'codec = x264'
+              'cursor = false'
+              'mic = false'
+              'system_audio = false'
+              'audio_quality = speech'
+              ''
+              '[media]'
+              "videos = `"$videos`""
+              "images = `"$images`""
+              ''
+              '[engine]'
+              "path = `"$engine`""
+          )
+          $lines | Set-Content -LiteralPath $settings -Encoding ascii
+
+          & $app --check --config $settings
+          if ($LASTEXITCODE -ne 0) { throw '--check failed' }
+
+          & $app --record 2 --config $settings --rect 0,0,640,360
+          if ($LASTEXITCODE -ne 0) { throw '--record failed' }
+          $video = Get-ChildItem -LiteralPath $videos -Filter *.mp4 |
+              Sort-Object LastWriteTime | Select-Object -Last 1
+          if ($null -eq $video) { throw 'no recording was written' }
+          $probe = & $ffprobe -v error -show_entries format=duration `
+              -show_entries stream=codec_name -of default=noprint_wrappers=1 $video.FullName
+          $codecs = @($probe | Where-Object { $_ -like 'codec_name=*' } |
+              ForEach-Object { $_.Split('=')[1] })
+          $duration = [double](@($probe | Where-Object { $_ -like 'duration=*' })[0].Split('=')[1])
+          Write-Host "recording: $($video.Name), $([math]::Round($video.Length / 1kb)) KiB, $duration s, codecs $($codecs -join ',')"
+          if ($codecs -notcontains 'h264') { throw 'the recording has no H.264 video stream' }
+          if ($codecs -notcontains 'aac') { throw 'the recording has no AAC audio stream' }
+          if ($duration -lt 1.5 -or $duration -gt 4) { throw "the recording is $duration s long" }
+
+          & $app --photo --config $settings --rect 0,0,320,200
+          if ($LASTEXITCODE -ne 0) { throw '--photo failed' }
+          $still = Get-ChildItem -LiteralPath $images -Filter *.png |
+              Sort-Object LastWriteTime | Select-Object -Last 1
+          if ($null -eq $still) { throw 'no still was written' }
+          $bytes = [System.IO.File]::ReadAllBytes($still.FullName)
+          Write-Host "still: $($still.Name), $($bytes.Length) bytes"
+          if ($bytes.Length -lt 1000) { throw "the still is only $($bytes.Length) bytes" }
+          if (-not ($bytes[0] -eq 0x89 -and $bytes[1] -eq 0x50 -and $bytes[2] -eq 0x4E -and $bytes[3] -eq 0x47)) {
+              throw 'the still is not a PNG'
+          }
+          Write-Host 'capture smoke ok'
+          Remove-Item -LiteralPath $root -Recurse -Force
 
       - name: Compile the installer
         shell: pwsh
