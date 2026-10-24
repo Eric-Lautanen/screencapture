@@ -21,7 +21,7 @@ use super::ffi::{
 /// laptop at its native scale instead of shrinking the text.
 pub(super) const CLIENT_W: i32 = 728;
 /// See [`CLIENT_W`].
-pub(super) const CLIENT_H: i32 = 541;
+pub(super) const CLIENT_H: i32 = 572;
 
 /// Smallest layout percent the dialog shrinks to: below this the labels
 /// stop being readable, so a display that still cannot fit the dialog
@@ -271,11 +271,11 @@ mod tests {
     fn the_layout_shrinks_to_the_available_height() {
         use super::{CLIENT_H, CLIENT_W, percent_that_fits};
 
-        assert_eq!(percent_that_fits(CLIENT_H, 900), 166);
+        assert_eq!(percent_that_fits(CLIENT_H, 900), 157);
         // A 768-high display minus a taskbar and the frame leaves ~690.
-        assert_eq!(percent_that_fits(CLIENT_H, 690), 127);
+        assert_eq!(percent_that_fits(CLIENT_H, 690), 120);
         // A 600-high netbook cannot show the design at 100%.
-        assert_eq!(percent_that_fits(CLIENT_H, 540), 99);
+        assert_eq!(percent_that_fits(CLIENT_H, 540), 94);
         assert_eq!(percent_that_fits(CLIENT_W, 780), 107);
     }
 
@@ -298,10 +298,10 @@ mod tests {
         use super::fit_percent;
 
         // 1366x768 at 125%: 728-high work area, 39-pixel caption. The
-        // wide layout fits at the display's own scale.
-        assert_eq!(fit_percent(1366, 728, 16, 39, 125), 125);
+        // height is the limit, so the sheet loses a little of its scale.
+        assert_eq!(fit_percent(1366, 728, 16, 39, 125), 118);
         // 1024x600 at 125%: the height only fits shrunk.
-        assert_eq!(fit_percent(1024, 560, 16, 39, 125), 94);
+        assert_eq!(fit_percent(1024, 560, 16, 39, 125), 88);
         // 1920x1080 at 150%: nothing to trim either way.
         assert_eq!(fit_percent(1920, 1032, 16, 39, 150), 150);
         // 2560x1440 at 100%: nothing to do.
@@ -310,7 +310,7 @@ mod tests {
         assert_eq!(fit_percent(1280, 680, 16, 39, 100), 100);
         // A tiny display shrinks by its height; an absurdly small one
         // stops at the readable floor.
-        assert_eq!(fit_percent(800, 400, 16, 39, 100), 64);
+        assert_eq!(fit_percent(800, 400, 16, 39, 100), 61);
         assert_eq!(fit_percent(640, 320, 16, 39, 100), 55);
     }
 

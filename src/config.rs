@@ -52,6 +52,14 @@ impl Value {
             _ => None,
         }
     }
+
+    /// Integer content, if any.
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            Self::Int(number) => Some(*number),
+            _ => None,
+        }
+    }
 }
 
 /// Render a value; strings are quoted only when needed (see the file-format
@@ -192,6 +200,24 @@ impl Document {
     pub fn set(&mut self, section: &str, key: &str, value: Value) {
         let slot = section_mut(self, section);
         slot.set(key, value);
+    }
+
+    /// Remove one key; answers whether it was there. A cleared setting is
+    /// absent from the file rather than written as an empty string, which is
+    /// what the Settings window writes when a device picker goes back to the
+    /// Windows default.
+    #[cfg(windows)]
+    pub fn remove(&mut self, section: &str, key: &str) -> bool {
+        let Some(section) = self
+            .sections
+            .iter_mut()
+            .find(|candidate| candidate.name.as_str() == section)
+        else {
+            return false;
+        };
+        let before = section.entries.len();
+        section.entries.retain(|(name, _)| name.as_str() != key);
+        section.entries.len() != before
     }
 
     /// Render back to file-order text.

@@ -1,10 +1,10 @@
 //! The tray Settings window: Win32 controls over the typed settings view,
-//! so every schema-visible choice is editable in one place — capture mode
-//! and display, recording profile and codec, cursor, the recorded audio
-//! sources and their quality, photo depth, autostart, and capture chimes, the
-//! record/photo/chime hotkey combos (free modifier+key text, validated
-//! before accept), and the destination folders, where videos and images
-//! each get their own field plus a native folder browse.
+//! so every capture option lives in one place — recording profile and
+//! codec, cursor, the audio devices, sources and levels, photo depth,
+//! autostart, capture chimes, the record/photo/chime hotkeys (free
+//! modifier+key text, validated before accept), and the destination
+//! folders, where videos and images each get their own field plus a native
+//! folder browse.
 //! A modal loop runs on the calling thread; Save answers
 //! [`Answers`] (validated), Cancel or close answers `None` and leaves
 //! all state untouched. Control rows live in [`rows`], raw Win32 in
@@ -14,7 +14,7 @@ use std::cell::RefCell;
 use std::io;
 use std::path::Path;
 
-use crate::settings::{Hotkey, Settings};
+use crate::settings::{AudioDevices, Endpoint, Hotkey, Settings};
 use crate::winapi::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, Hbrush,
     Hinstance, Hwnd, Msg, Point, PostQuitMessage, RegisterClassExW, SW_SHOW, SetForegroundWindow,
@@ -32,22 +32,20 @@ mod keycapture;
 mod rows;
 
 use self::ffi::{
-    BN_CLICKED, IsDialogMessageW, MB_ICONERROR_OK, MessageBoxW, SetBkMode, SetTextColor,
-    TRANSPARENT, WS_CAPTION, WS_CLIPCHILDREN, WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_SYSMENU,
-    WS_VISIBLE,
+    BN_CLICKED, IsDialogMessageW, MB_ICONERROR_OK, MessageBoxW, SendMessageW, SetBkMode,
+    SetTextColor, SetWindowTextW, TBM_GETPOS, TRANSPARENT, WS_CAPTION, WS_CLIPCHILDREN,
+    WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_SYSMENU, WS_VISIBLE,
 };
 use self::fields::{browse_folder, check_state, combo_choice, edit_text};
 use self::frame::{
     dpi_scale, drop_font, drop_icon, fit_scale, install_title_icon, ui_font, window_frame,
 };
-use self::rows::{attached_count, codec_list, display_entries, populate};
+use self::rows::{codec_list, populate};
 
 // ---------------------------------------------------------------------------
 // Control ids routed through WM_COMMAND.
 // ---------------------------------------------------------------------------
 
-const COMBO_MODE: i32 = 101;
-const COMBO_DISPLAY: i32 = 102;
 const COMBO_PROFILE: i32 = 103;
 const COMBO_CODEC: i32 = 104;
 const COMBO_DEPTH: i32 = 105;
@@ -64,6 +62,10 @@ const CHECK_CHIMES: i32 = 114;
 const CHECK_SYSTEM_AUDIO: i32 = 116;
 const CHECK_MIC: i32 = 117;
 const COMBO_AUDIO_QUALITY: i32 = 118;
+const COMBO_MIC_DEVICE: i32 = 119;
+const COMBO_SYSTEM_DEVICE: i32 = 120;
+const SLIDER_MIC_LEVEL: i32 = 121;
+const SLIDER_SYSTEM_LEVEL: i32 = 122;
 /// Standard dialog ids: `IsDialogMessageW` sends `IDOK` for Enter and
 /// `IDCANCEL` for Escape, so the buttons must carry those identities.
 const BTN_SAVE: i32 = 1;
@@ -76,10 +78,6 @@ const TITLE: &str = "Settings — screencapture";
 
 /// The values a Save submits, keyed to the settings schema.
 pub struct Answers {
-    /// New capture mode id (`full`, `region`, `window`).
-    pub mode: String,
-    /// New Full-mode display choice (`primary` or `N`).
-    pub display: String,
     /// New recording profile id.
     pub profile: String,
     /// New codec id.
@@ -88,6 +86,10 @@ pub struct Answers {
     pub cursor: bool,
     /// Which audio sources recordings carry.
     pub audio: crate::audio::Wanted,
+    /// Which device each source records from.
+    pub devices: AudioDevices,
+    /// Each source's fader, in dB.
+    pub levels: crate::audio::Levels,
     /// Whether the app launches at login.
     pub autostart: bool,
     /// New photo depth (`8` or `16`).
@@ -117,6 +119,12 @@ struct Dialog {
     /// the *bottom* of the sibling z-order here, so the final pass in
     /// `rows` re-stacks them top-ward in this order.
     children: Vec<Hwnd>,
+    /// Every device picker's choices, by control id and combo index, so a
+    /// save answers an endpoint instead of the label it showed.
+    device_choices: Vec<(i32, Vec<Option<Endpoint>>)>,
+    /// The two level faders and the labels that report their position.
+    sliders: Vec<(i32, Hwnd)>,
+    level_labels: Vec<(i32, Hwnd)>,
     /// The one-line hotkey status label under the two combo fields.
     hotkey_status: Option<Hwnd>,
     /// Whether that label currently reports a conflict (painted red).
@@ -301,6 +309,10 @@ unsafe extern "system" fn procedure(
             }
             0
         }
+        ffi::WM_HSCROLL => {
+            refresh_levels();
+            0
+        }
         ffi::WM_CLOSE => {
             quit_without_answer();
             0
@@ -345,10 +357,6 @@ fn quit_without_answer() {
 
 /// Read the Save fields, validate, and either complain or finish.
 fn save(window: Hwnd) {
-    let modes = ["full", "region", "window"];
-    let mode = modes[combo_choice(COMBO_MODE)].to_owned();
-    let displays = display_entries(attached_count());
-    let display = displays[combo_choice(COMBO_DISPLAY)].clone();
     let profile = crate::recording::Profile::PROFILES[combo_choice(COMBO_PROFILE)]
         .id
         .to_owned();
@@ -366,29 +374,84 @@ fn save(window: Hwnd) {
         system: check_state(CHECK_SYSTEM_AUDIO),
         quality: crate::audio::Quality::CHOICES[combo_choice(COMBO_AUDIO_QUALITY)],
     };
+    let devices = AudioDevices {
+        mic: device_choice(COMBO_MIC_DEVICE),
+        system: device_choice(COMBO_SYSTEM_DEVICE),
+    };
+    let levels = crate::audio::Levels {
+        mic_db: level_of(SLIDER_MIC_LEVEL),
+        system_db: level_of(SLIDER_SYSTEM_LEVEL),
+    };
     let autostart = check_state(CHECK_AUTOSTART);
     let chimes = check_state(CHECK_CHIMES);
 
-    let Some(parsed_record) = Hotkey::parse(&record) else {
+    let Some((parsed_record, parsed_photo, parsed_chime)) =
+        accepted_hotkeys(window, &record, &photo, &chime)
+    else {
+        return;
+    };
+    for (name, value) in [("videos", videos.as_str()), ("images", images.as_str())] {
+        if value.trim().is_empty() || !Path::new(value.trim()).is_absolute() {
+            complain(
+                window,
+                &format!("The {name} folder needs an absolute path (e.g. C:\\Users\\me\\Videos)."),
+            );
+            return;
+        }
+    }
+    DIALOG.with_borrow_mut(|dialog| {
+        dialog.answer = Some(Answers {
+            profile,
+            codec,
+            cursor,
+            audio,
+            devices,
+            levels,
+            autostart,
+            depth,
+            chimes,
+            videos,
+            images,
+            record: parsed_record.to_combo(),
+            photo: parsed_photo.to_combo(),
+            chime_hotkey: parsed_chime.to_combo(),
+        });
+    });
+    // SAFETY: the pump loop below owns the quit sentinel.
+    unsafe {
+        PostQuitMessage(0);
+    }
+}
+
+/// The three hotkey fields, parsed and vetted: each a real combo, all
+/// different, and each free for this process to register. Anything else
+/// complains at the window and answers `None`.
+fn accepted_hotkeys(
+    window: Hwnd,
+    record: &str,
+    photo: &str,
+    chime: &str,
+) -> Option<(Hotkey, Hotkey, Hotkey)> {
+    let Some(parsed_record) = Hotkey::parse(record) else {
         complain(
             window,
             "The record hotkey is not a valid combo (e.g. ctrl+shift+x).",
         );
-        return;
+        return None;
     };
-    let Some(parsed_photo) = Hotkey::parse(&photo) else {
+    let Some(parsed_photo) = Hotkey::parse(photo) else {
         complain(
             window,
             "The photo hotkey is not a valid combo (e.g. ctrl+shift+z).",
         );
-        return;
+        return None;
     };
-    let Some(parsed_chime) = Hotkey::parse(&chime) else {
+    let Some(parsed_chime) = Hotkey::parse(chime) else {
         complain(
             window,
             "The chime hotkey is not a valid combo (e.g. ctrl+shift+m).",
         );
-        return;
+        return None;
     };
     if parsed_record == parsed_photo
         || parsed_record == parsed_chime
@@ -398,7 +461,7 @@ fn save(window: Hwnd) {
             window,
             "The record, photo, and chime hotkeys must all differ.",
         );
-        return;
+        return None;
     }
     // A combo this process already holds answers free without a probe,
     // and the probe never lifts the live bindings; another process holding
@@ -416,40 +479,55 @@ fn save(window: Hwnd) {
                     "The {name} hotkey is already used by another application. Windows does not report which app owns a global hotkey; close that app or pick a different combo."
                 ),
             );
-            return;
+            return None;
         }
     }
-    for (name, value) in [("videos", videos.as_str()), ("images", images.as_str())] {
-        if value.trim().is_empty() || !Path::new(value.trim()).is_absolute() {
-            complain(
-                window,
-                &format!("The {name} folder needs an absolute path (e.g. C:\\Users\\me\\Videos)."),
-            );
-            return;
-        }
-    }
-    DIALOG.with_borrow_mut(|dialog| {
-        dialog.answer = Some(Answers {
-            mode,
-            display,
-            profile,
-            codec,
-            cursor,
-            audio,
-            autostart,
-            depth,
-            chimes,
-            videos,
-            images,
-            record: parsed_record.to_combo(),
-            photo: parsed_photo.to_combo(),
-            chime_hotkey: parsed_chime.to_combo(),
-        });
+    Some((parsed_record, parsed_photo, parsed_chime))
+}
+
+/// The fader position a slider's thumb sits at, in dB.
+fn level_of(id: i32) -> i32 {
+    let position = DIALOG.with_borrow(|dialog| {
+        dialog
+            .sliders
+            .iter()
+            .find(|(slider, _)| *slider == id)
+            .map(|(_, handle)| {
+                // SAFETY: live trackbar this dialog owns; the message reads
+                // a scalar.
+                let position = unsafe { SendMessageW(*handle, TBM_GETPOS, 0, 0) };
+                i32::try_from(position).unwrap_or(0)
+            })
     });
-    // SAFETY: the pump loop below owns the quit sentinel.
-    unsafe {
-        PostQuitMessage(0);
-    }
+    crate::audio::Levels::clamp_level(position.unwrap_or(0) + crate::audio::Levels::MIN_DB)
+}
+
+/// Repaint the dB text beside both faders after one moved.
+fn refresh_levels() {
+    DIALOG.with_borrow(|dialog| {
+        for (slider, label) in &dialog.level_labels {
+            let db = level_of(*slider);
+            let text = wide(&rows::level_text(db));
+            // SAFETY: live label created by this dialog; the text outlives
+            // the call.
+            unsafe {
+                SetWindowTextW(*label, text.as_ptr());
+            }
+        }
+    });
+}
+
+/// The endpoint a device picker has selected; `None` is "System default"
+/// and follows whatever Windows uses.
+fn device_choice(id: i32) -> Option<Endpoint> {
+    let index = combo_choice(id);
+    DIALOG.with_borrow(|dialog| {
+        dialog
+            .device_choices
+            .iter()
+            .find(|(combo, _)| *combo == id)
+            .and_then(|(_, choices)| choices.get(index).cloned().flatten())
+    })
 }
 
 /// Show a validation complaint with the window as its parent.

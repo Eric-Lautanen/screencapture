@@ -10,6 +10,10 @@
 #[cfg(windows)]
 mod abi;
 #[cfg(windows)]
+pub(crate) mod devices;
+#[cfg(windows)]
+mod live;
+#[cfg(windows)]
 mod pipe;
 #[cfg(windows)]
 mod session;
@@ -17,15 +21,17 @@ mod session;
 mod wasapi;
 
 /// How much space the mixed track gets: the AAC bitrate written alongside
-/// the frames. `High` is the default, because a recording of music that
-/// sounds thin is worth its extra megabytes.
+/// the frames. `High` is the default and is meant to be transparent: at
+/// 320 kbps for 48 kHz stereo, the encoder keeps the whole audible band and
+/// a music mix comes back the way it went in, which is worth the megabytes
+/// on a recording somebody else has to listen to.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Quality {
     /// 96 kbps: voice-over clarity in a small file.
     Speech,
-    /// 128 kbps: the usual middle.
+    /// 160 kbps: the usual middle for talking over a little music.
     Standard,
-    /// 192 kbps: music and layered sound survive.
+    /// 320 kbps: music and layered sound survive.
     #[default]
     High,
 }
@@ -60,8 +66,8 @@ impl Quality {
     pub fn label(self) -> &'static str {
         match self {
             Self::Speech => "Speech (96 kbps)",
-            Self::Standard => "Standard (128 kbps)",
-            Self::High => "High (192 kbps)",
+            Self::Standard => "Standard (160 kbps)",
+            Self::High => "High (320 kbps)",
         }
     }
 
@@ -70,8 +76,8 @@ impl Quality {
     pub fn bitrate(self) -> &'static str {
         match self {
             Self::Speech => "96k",
-            Self::Standard => "128k",
-            Self::High => "192k",
+            Self::Standard => "160k",
+            Self::High => "320k",
         }
     }
 }
@@ -87,6 +93,62 @@ pub struct Wanted {
     pub quality: Quality,
 }
 
+/// Each source's fader, in decibels: what the mix multiplies that source
+/// by before the two are summed. Windows owns the device volumes; these
+/// are the app's own, so a quiet microphone and a loud game can be balanced
+/// in the track without touching either device.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Levels {
+    /// The microphone's fader.
+    pub mic_db: i32,
+    /// The system mix's fader.
+    pub system_db: i32,
+}
+
+impl Levels {
+    /// The quietest fader position: silence.
+    pub const MIN_DB: i32 = -60;
+    /// The loudest fader position.
+    pub const MAX_DB: i32 = 12;
+
+    /// `level` kept inside the mixable range.
+    #[must_use]
+    pub fn clamp_level(level: i32) -> i32 {
+        level.clamp(Self::MIN_DB, Self::MAX_DB)
+    }
+
+    /// The linear gain one fader position means: 0 dB is unity, and the
+    /// quietest position is silence rather than a rounding error. Only the
+    /// Windows mixer scales samples, so only it asks.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn gain(db: i32) -> f32 {
+        let db = Self::clamp_level(db);
+        if db == Self::MIN_DB {
+            return 0.0;
+        }
+        10.0_f32.powf(f32::from(i16::try_from(db).unwrap_or(0)) / 20.0)
+    }
+
+    /// Both sources' gains, microphone first.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn gains(self) -> (f32, f32) {
+        (Self::gain(self.mic_db), Self::gain(self.system_db))
+    }
+}
+
+/// The endpoints a take prefers, by endpoint id. `None` follows whatever
+/// Windows calls the default for that flow; an id names one device and is
+/// honoured again whenever that device comes back.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Devices {
+    /// The microphone to record.
+    pub mic: Option<String>,
+    /// The playback device to record.
+    pub system: Option<String>,
+}
+
 impl Wanted {
     /// One phrase for logs and diagnostics: the sources that were asked
     /// for, then the quality their track gets.
@@ -100,13 +162,15 @@ impl Wanted {
             sources.push("mic");
         }
         if sources.is_empty() {
-            return "no audio".to_owned();
+            // The track is written either way: its buttons can bring a
+            // source in mid-take, and only an existing pipe can carry it.
+            return "silent audio track".to_owned();
         }
         format!("{} audio at {}", sources.join("+"), self.quality.id())
     }
 
-    /// Whether any source was asked for; nothing is opened otherwise. Only
-    /// the Windows worker opens sources, so only it asks.
+    /// Whether the settings asked for any source. Only the Windows worker
+    /// opens sources, so only it asks.
     #[cfg(windows)]
     #[must_use]
     pub fn any(self) -> bool {
@@ -115,7 +179,27 @@ impl Wanted {
 }
 
 #[cfg(windows)]
+pub(crate) use live::Live;
+#[cfg(windows)]
 pub(crate) use session::{Audio, Prepared, start};
+
+/// No capture exists outside Windows, so a recording has no live switches.
+/// The type still exists so the recorder needs no platform branches, and a
+/// take with no sources simply never grows a button. It holds a unit rather
+/// than being a unit struct so a take passes it the way the Windows one is
+/// passed, by reference.
+#[cfg(not(windows))]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Live(());
+
+#[cfg(not(windows))]
+impl Live {
+    /// There is never a source to switch here.
+    #[must_use]
+    pub(crate) const fn new(_wanted: Wanted) -> Self {
+        Self(())
+    }
+}
 
 /// Everything needed to name an audio input; never built off Windows,
 /// where recordings stay silent.
@@ -124,8 +208,13 @@ pub(crate) struct Prepared;
 
 #[cfg(not(windows))]
 impl Prepared {
-    /// No platform audio capture exists here.
-    pub(crate) fn open(_wanted: Wanted) -> Option<Self> {
+    /// No platform audio capture exists here; the switches stay inert.
+    pub(crate) fn open(
+        _wanted: Wanted,
+        _devices: &Devices,
+        _levels: Levels,
+        _live: &Live,
+    ) -> Option<Self> {
         None
     }
 
@@ -203,6 +292,10 @@ mod tests {
             ..both
         };
         assert_eq!(mic_only.describe(), "mic audio at speech");
-        assert_eq!(super::Wanted::default().describe(), "no audio");
+        assert_eq!(
+            super::Wanted::default().describe(),
+            "silent audio track",
+            "a take with no source set still writes the track"
+        );
     }
 }

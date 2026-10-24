@@ -303,13 +303,13 @@ mod tests {
             Path::new("out.mp4"),
             Some(super::Sound {
                 path: r"\\.\pipe\screencapture-1-1",
-                bitrate: "192k",
+                bitrate: "320k",
             }),
         );
         let joined = args.join(" ");
         assert!(joined.contains("-i \\\\.\\pipe\\screencapture-1-1"));
         assert!(joined.contains("-map 0:v:0 -map 1:a:0"));
-        assert!(joined.contains("-c:a aac -b:a 192k"));
+        assert!(joined.contains("-c:a aac -b:a 320k"));
         assert_eq!(args.last().map(String::as_str), Some("out.mp4"));
     }
 

@@ -112,6 +112,8 @@ fn demo_recording(
         // so `Window` mode records that window's rectangle.
         window: None,
         audio: loaded.settings.audio,
+        audio_devices: loaded.settings.audio_devices.ids(),
+        audio_levels: loaded.settings.audio_levels,
     };
     let recorder = Recorder::start(&binary, &plan)?;
     crate::log::note(

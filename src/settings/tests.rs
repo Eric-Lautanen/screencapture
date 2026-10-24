@@ -367,3 +367,88 @@ fn audio_quality_parses_and_falls_back() {
         "the unreadable value is reported: {problems:?}"
     );
 }
+
+/// A chosen endpoint is remembered by id and name; an empty id means the
+/// Windows default, and a fader outside the mixable range is clamped with a
+/// note instead of failing the whole file.
+#[test]
+fn audio_devices_and_levels_round_trip() {
+    let text = "\
+[recording]
+mic = true
+mic_device = {0.0.1.00000000}.{abc}
+mic_device_name = Headset Microphone
+system_device = {0.0.0.00000000}.{def}
+system_device_name = Speakers
+mic_level = 6
+system_level = -60
+";
+    let document = Document::from_text(text).expect("valid settings");
+    let (settings, problems) = read_document(&document);
+    assert_eq!(problems.len(), 0);
+    let mic = settings
+        .audio_devices
+        .mic
+        .clone()
+        .expect("a microphone is chosen");
+    assert_eq!(mic.id, "{0.0.1.00000000}.{abc}");
+    assert_eq!(mic.name, "Headset Microphone");
+    assert_eq!(
+        settings
+            .audio_devices
+            .system
+            .clone()
+            .expect("a playback device")
+            .name,
+        "Speakers"
+    );
+    assert_eq!(settings.audio_levels.mic_db, 6);
+    assert_eq!(settings.audio_levels.system_db, -60);
+    let ids = settings.audio_devices.ids();
+    assert_eq!(ids.mic.as_deref(), Some("{0.0.1.00000000}.{abc}"));
+
+    // A device without its name is kept under its id; an empty id follows
+    // the default; a silly fader is clamped and reported.
+    let text = "\
+[recording]
+mic_device = {0.0.1.00000000}.{abc}
+mic_device_name =
+mic_level = 120
+";
+    let document = Document::from_text(text).expect("valid settings");
+    let (settings, problems) = read_document(&document);
+    assert_eq!(
+        settings
+            .audio_devices
+            .mic
+            .clone()
+            .expect("still chosen")
+            .name,
+        "{0.0.1.00000000}.{abc}"
+    );
+    assert!(settings.audio_devices.system.is_none());
+    assert_eq!(settings.audio_levels.mic_db, crate::audio::Levels::MAX_DB);
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.contains("mic_device")),
+        "the missing name is reported: {problems:?}"
+    );
+    assert!(
+        problems.iter().any(|problem| problem.contains("mic_level")),
+        "the clamped fader is reported: {problems:?}"
+    );
+}
+
+/// The mixer that scales samples is the Windows one; elsewhere a fader is
+/// only a stored number.
+#[cfg(windows)]
+#[test]
+fn the_faders_gain_is_unity_at_zero_and_silence_at_the_floor() {
+    use crate::audio::Levels;
+    assert!((Levels::gain(0) - 1.0).abs() < f32::EPSILON);
+    assert_eq!(Levels::gain(Levels::MIN_DB), 0.0);
+    let boost = Levels::gain(6);
+    assert!(boost > 1.9 && boost < 2.0, "6 dB doubles: {boost}");
+    assert_eq!(Levels::clamp_level(99), Levels::MAX_DB);
+}

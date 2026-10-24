@@ -19,22 +19,41 @@ use crate::pin_layout;
 
 interfaces! {
     (
-        "`IMMDeviceEnumerator`: `GetDefaultAudioEndpoint` at 4.",
+        "`IMMDeviceEnumerator`: `EnumAudioEndpoints` 3, \
+         `GetDefaultAudioEndpoint` 4, `GetDevice` 5.",
         EnumeratorVt: {
-            enum_endpoints: Reserved,
+            enum_endpoints: EnumEndpoints,
             get_default_endpoint: DefaultEndpoint,
-            get_device: Reserved,
+            get_device: GetDevice,
             register_endpoint_notification_callback: Reserved,
             unregister_endpoint_notification_callback: Reserved,
         },
     ),
     (
-        "`IMMDevice`: `Activate` at 3.",
+        "`IMMDevice`: `Activate` 3, `OpenPropertyStore` 4, `GetId` 5, \
+         `GetState` 6.",
         DeviceVt: {
             activate: Activate,
-            open_property_store: Reserved,
-            get_id: Reserved,
-            get_state: Reserved,
+            open_property_store: OpenStore,
+            get_id: GetId,
+            get_state: GetState,
+        },
+    ),
+    (
+        "`IMMDeviceCollection`: `GetCount` 3, `Item` 4.",
+        CollectionVt: {
+            get_count: GetCount,
+            item: Item,
+        },
+    ),
+    (
+        "`IPropertyStore`: `GetValue` at 5.",
+        PropertyStoreVt: {
+            get_count: Reserved,
+            get_at: Reserved,
+            get_value: GetValue,
+            set_value: Reserved,
+            commit: Reserved,
         },
     ),
     (
@@ -72,6 +91,22 @@ interfaces! {
 
 /// `GetDefaultAudioEndpoint(this, data_flow, role, device)`.
 type DefaultEndpoint = unsafe extern "system" fn(*mut c_void, i32, i32, *mut *mut c_void) -> i32;
+/// `EnumAudioEndpoints(this, data_flow, state_mask, collection)`.
+type EnumEndpoints = unsafe extern "system" fn(*mut c_void, i32, u32, *mut *mut c_void) -> i32;
+/// `GetDevice(this, id, device)`.
+type GetDevice = unsafe extern "system" fn(*mut c_void, *const u16, *mut *mut c_void) -> i32;
+/// `GetCount(this, count)` / `Item(this, index, device)` — the collection
+/// and property store share the shape, differing in the out type.
+type GetCount = unsafe extern "system" fn(*mut c_void, *mut u32) -> i32;
+type Item = unsafe extern "system" fn(*mut c_void, u32, *mut *mut c_void) -> i32;
+/// `OpenPropertyStore(this, access, store)`.
+type OpenStore = unsafe extern "system" fn(*mut c_void, u32, *mut *mut c_void) -> i32;
+/// `GetId(this, id)`: a `CoTaskMemAlloc`ed endpoint id.
+type GetId = unsafe extern "system" fn(*mut c_void, *mut *mut u16) -> i32;
+/// `GetState(this, state)`.
+type GetState = unsafe extern "system" fn(*mut c_void, *mut u32) -> i32;
+/// `GetValue(this, key, value)`.
+type GetValue = unsafe extern "system" fn(*mut c_void, *const PropertyKey, *mut PropVariant) -> i32;
 /// `Activate(this, iid, class_context, activation_params, out)`.
 type Activate =
     unsafe extern "system" fn(*mut c_void, *const Guid, u32, *mut c_void, *mut *mut c_void) -> i32;
@@ -129,6 +164,7 @@ pub const CAPTURE_CLIENT: Guid = Guid::new(
     0x48a0,
     [0xa4, 0xde, 0x18, 0x5c, 0x39, 0x5c, 0xd3, 0x17],
 );
+
 /// `KSDATAFORMAT_SUBTYPE_PCM`, the sub-format that marks 16-bit samples.
 pub const SUBTYPE_PCM: Guid = Guid::new(
     0x0000_0001,
@@ -149,6 +185,8 @@ pub const RENDER: i32 = 0;
 pub const CAPTURE: i32 = 1;
 /// `eConsole`: the endpoint the user's console session uses.
 pub const ROLE_CONSOLE: i32 = 0;
+/// `eMultimedia`: the endpoint ordinary playback and recording apps use.
+pub const ROLE_MULTIMEDIA: i32 = 1;
 /// `AUDCLNT_SHAREMODE_SHARED`: mix with every other application.
 pub const SHARED: i32 = 0;
 /// `AUDCLNT_STREAMFLAGS_LOOPBACK`: capture what a render device plays.
@@ -165,6 +203,84 @@ pub const SILENT: u32 = 0x2;
 pub const BUFFER_100MS: i64 = 1_000_000;
 /// `AUDCLNT_E_DEVICE_INVALIDATED`: the endpoint disappeared mid-stream.
 pub const DEVICE_INVALIDATED: i32 = -0x7776_FFFC;
+/// `DEVICE_STATE_*` (mmdeviceapi.h): which endpoints an enumeration lists.
+pub const DEVICE_STATE_ACTIVE: u32 = 0x0000_0001;
+pub const DEVICE_STATE_DISABLED: u32 = 0x0000_0002;
+pub const DEVICE_STATE_NOTPRESENT: u32 = 0x0000_0004;
+pub const DEVICE_STATE_UNPLUGGED: u32 = 0x0000_0008;
+/// Every endpoint the machine remembers, connected or not: a Bluetooth
+/// headset that is switched off still has an id, which is what lets a
+/// chosen microphone come back when it reconnects.
+pub const DEVICE_STATEMASK_ALL: u32 =
+    DEVICE_STATE_ACTIVE | DEVICE_STATE_DISABLED | DEVICE_STATE_NOTPRESENT | DEVICE_STATE_UNPLUGGED;
+/// `STGM_READ`: the property store is read, never written.
+pub const STGM_READ: u32 = 0;
+/// `VT_LPWSTR`: a wide string, the type of a device's friendly name.
+pub const VT_LPWSTR: u16 = 31;
+
+/// `PROPERTYKEY` (wtypes.h): one named property of a device.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PropertyKey {
+    /// The property set's GUID.
+    pub set: Guid,
+    /// The property's index inside that set.
+    pub property: u32,
+}
+
+/// `PKEY_Device_FriendlyName`: the name Sound settings shows.
+pub const DEVICE_NAME: PropertyKey = PropertyKey {
+    set: Guid::new(
+        0xa45c_254e,
+        0xdf1c,
+        0x4efd,
+        [0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0],
+    ),
+    property: 14,
+};
+
+/// `PROPVARIANT` (propidl.h): a tagged value.
+///
+/// Only the tag and a string pointer are ever read here, so the union is
+/// kept as a wide, eight-byte-aligned blob: it is the size of the real
+/// record on both 32- and 64-bit Windows, and over-sized never loses a
+/// byte `PropVariantClear` writes.
+#[repr(C, align(8))]
+pub struct PropVariant {
+    /// `VARTYPE` of the value that follows.
+    pub kind: u16,
+    /// Reserved; must be zero.
+    pub reserved: [u16; 3],
+    /// The union, read only through [`Self::as_string`] after a tag check.
+    data: [u8; 24],
+}
+
+impl PropVariant {
+    /// An empty value, which is what `GetValue` fills in.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            kind: 0,
+            reserved: [0; 3],
+            data: [0; 24],
+        }
+    }
+
+    /// The wide string this value holds, if it holds one.
+    #[must_use]
+    pub fn as_string(&self) -> Option<*const u16> {
+        if self.kind != VT_LPWSTR {
+            return None;
+        }
+        // SAFETY: the union starts after the eight-byte header and the
+        // value is tagged `VT_LPWSTR`, so the first pointer is the string.
+        let pointer = unsafe { self.data.as_ptr().cast::<*const u16>().read_unaligned() };
+        if pointer.is_null() {
+            return None;
+        }
+        Some(pointer)
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Wave formats

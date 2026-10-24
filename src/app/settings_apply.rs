@@ -63,8 +63,6 @@ pub(super) fn open_settings(_loaded: &mut Loaded, _runtime: &mut Runtime) {}
 #[cfg(windows)]
 fn apply_settings(loaded: &mut Loaded, runtime: &mut Runtime, answers: &Answers) {
     let document = &mut loaded.document;
-    document.set("capture", "mode", Value::Str(answers.mode.clone()));
-    document.set("capture", "display", Value::Str(answers.display.clone()));
     document.set("capture", "chimes", Value::Bool(answers.chimes));
     document.set("recording", "profile", Value::Str(answers.profile.clone()));
     document.set("recording", "codec", Value::Str(answers.codec.clone()));
@@ -80,6 +78,36 @@ fn apply_settings(loaded: &mut Loaded, runtime: &mut Runtime, answers: &Answers)
         "audio_quality",
         Value::Str(answers.audio.quality.id().to_owned()),
     );
+    document.set(
+        "recording",
+        "mic_level",
+        Value::Int(i64::from(answers.levels.mic_db)),
+    );
+    document.set(
+        "recording",
+        "system_level",
+        Value::Int(i64::from(answers.levels.system_db)),
+    );
+    for (id_key, name_key, endpoint) in [
+        (
+            "mic_device",
+            "mic_device_name",
+            answers.devices.mic.as_ref(),
+        ),
+        (
+            "system_device",
+            "system_device_name",
+            answers.devices.system.as_ref(),
+        ),
+    ] {
+        if let Some(endpoint) = endpoint {
+            document.set("recording", id_key, Value::Str(endpoint.id.clone()));
+            document.set("recording", name_key, Value::Str(endpoint.name.clone()));
+        } else {
+            document.remove("recording", id_key);
+            document.remove("recording", name_key);
+        }
+    }
     document.set("recording", "autostart", Value::Bool(answers.autostart));
     document.set("photo", "depth", Value::Str(answers.depth.clone()));
     // Choosing one folder for both outputs splits it into `video` and
