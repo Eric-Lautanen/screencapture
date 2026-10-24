@@ -10,6 +10,13 @@ use crate::coregraphics::{self as cg, Api, Rect};
 
 use super::Region;
 
+/// What to tell a user whose capture will not open: the compositor answers
+/// nothing without this permission, and the switch is not where a command
+/// line user would look.
+pub const HINT: &str = "macOS gates the whole desktop behind Screen Recording: \
+     System Settings > Privacy & Security > Screen Recording, enable the app that \
+     launched this binary (Terminal, iTerm, or screencapture itself), then restart it";
+
 /// One capture backend bound to one region.
 pub struct Backend {
     region: Region,

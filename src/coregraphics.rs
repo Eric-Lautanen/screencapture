@@ -259,7 +259,10 @@ impl Api {
         let options = IMAGE_OPAQUE | BEST_RESOLUTION;
         let image = unsafe { (self.window_list_image)(area, LIST_ON_SCREEN, WINDOW_ALL, options) };
         if image.is_null() {
-            return Err(io::Error::other("the compositor refused the capture"));
+            return Err(io::Error::other(
+                "the compositor refused the capture (Screen Recording is off for this app, \
+                 or the display is asleep)",
+            ));
         }
         // SAFETY: Quartz draws with a bottom-left origin, so mirror the
         // context vertically — translate to the bottom edge, scale y by

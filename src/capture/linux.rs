@@ -11,6 +11,12 @@ use crate::xlib::{self, Api, BITS_PER_PIXEL, FORMAT_Z, Image, ORDER_LSB, Window}
 
 use super::Region;
 
+/// What to tell a user whose capture will not open: this backend reads the
+/// root window, which only an X11 session has.
+pub const HINT: &str = "capture here reads the X11 root window: run the app in an \
+     X11 session (log in with \"Xorg\" / \"X11\" chosen), because a Wayland session \
+     shows XWayland clients but not the desktop itself";
+
 /// `AllPlanes` (`Xlib.h`): every server plane included.
 const PLANES_ALL: u64 = u64::MAX;
 

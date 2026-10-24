@@ -229,7 +229,10 @@ impl Api {
         // closed through `close_display` in the caller's `Drop`.
         let display = unsafe { (self.open_display)(std::ptr::null()) };
         if display.is_null() {
-            return Err(io::Error::other("no X server answers DISPLAY"));
+            return Err(io::Error::other(
+                "no X server answers DISPLAY (a Wayland session without XWayland, \
+                 or no DISPLAY exported to this process)",
+            ));
         }
         Ok(display)
     }

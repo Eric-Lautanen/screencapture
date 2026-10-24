@@ -101,7 +101,19 @@ fn check_settings(config: Option<&Path>) -> bool {
         settings.audio.mic,
         settings.audio.quality.label()
     );
-    println!("        photo:   {}-bit PNG", settings.photo_depth);
+    println!(
+        "        levels:  mic {} / system {}",
+        level_text(settings.audio_levels.mic_db),
+        level_text(settings.audio_levels.system_db)
+    );
+    #[cfg(windows)]
+    for line in audio_endpoints(settings) {
+        println!("        {line}");
+    }
+    println!(
+        "        photo:   {}",
+        photo_text(settings.photo_depth, settings.photo_quality)
+    );
     check_display_choice(settings.display);
     println!(
         "        engine:  {}",
@@ -114,6 +126,88 @@ fn check_settings(config: Option<&Path>) -> bool {
     println!("        chime:   {}", chime_status(settings.chimes));
     check_log_file(&loaded.settings.video_dir);
     loaded.problems.is_empty()
+}
+
+/// What a still will be written as: the lossless PNG at its depth, or the
+/// JPEG step. A lossy choice has no depth to report — every JPEG here is
+/// 8-bit — so saying "16-bit" beside it would be a lie about the file.
+fn photo_text(
+    depth: crate::settings::StillDepth,
+    quality: crate::settings::StillQuality,
+) -> String {
+    if quality == crate::settings::StillQuality::Lossless {
+        format!("{}, {depth}-bit", quality.label())
+    } else {
+        // A JPEG has no depth of its own: the encoder always writes 8-bit,
+        // whatever the PNG setting says.
+        format!("{}, 8-bit", quality.label())
+    }
+}
+
+/// A fader position as the text beside it, signed for a boost.
+fn level_text(db: i32) -> String {
+    if db > 0 {
+        format!("+{db} dB")
+    } else {
+        format!("{db} dB")
+    }
+}
+
+/// The endpoint each source will record from, and whether it is there.
+///
+/// `mic = true` alone never explains a silent track: what matters is which
+/// device the take will open, whether it is connected, and whether the
+/// machine remembers any at all. A chosen device that is away is stood in
+/// for by the Windows default, which is worth seeing before a recording
+/// rather than in the log afterwards.
+#[cfg(windows)]
+fn audio_endpoints(settings: &settings::Settings) -> Vec<String> {
+    let mut lines = Vec::new();
+    for (label, flow, chosen) in [
+        (
+            "mic:    ",
+            crate::audio::devices::RECORDING,
+            settings.audio_devices.mic.as_ref(),
+        ),
+        (
+            "system: ",
+            crate::audio::devices::PLAYBACK,
+            settings.audio_devices.system.as_ref(),
+        ),
+    ] {
+        let remembered = crate::audio::devices::list(flow)
+            .ok()
+            .map(|devices| devices.len());
+        let connected = chosen.is_some_and(|endpoint| crate::audio::devices::present(&endpoint.id));
+        lines.push(endpoint_line(
+            label,
+            chosen.map(|endpoint| endpoint.name.as_str()),
+            connected,
+            remembered,
+        ));
+    }
+    lines
+}
+
+/// One endpoint line: the Windows default, a connected choice, a choice that
+/// is away, or an enumeration that answered nothing.
+#[cfg(windows)]
+fn endpoint_line(
+    label: &str,
+    chosen: Option<&str>,
+    connected: bool,
+    remembered: Option<usize>,
+) -> String {
+    let remembered = remembered.map_or_else(
+        || "no endpoint list".to_owned(),
+        |count| format!("{count} remembered"),
+    );
+    let source = match chosen {
+        None => format!("System default ({remembered})"),
+        Some(name) if connected => format!("{name} ({remembered})"),
+        Some(name) => format!("{name} (not connected; using the default)"),
+    };
+    format!("{label}{source}")
 }
 
 /// Where the confirmation chime goes, and whether this machine can play it
@@ -339,6 +433,7 @@ fn check_capture() -> bool {
         }
         Err(reason) => {
             println!("{FAIL_TAG}capture: {reason}");
+            println!("        {}", crate::capture::hint());
             false
         }
     }
@@ -418,7 +513,58 @@ fn report_timing(label: &str, measured: Option<(u32, Duration)>) {
 
 #[cfg(test)]
 mod tests {
-    use super::digest_matches;
+    #[cfg(windows)]
+    use super::endpoint_line;
+    use super::{digest_matches, level_text, photo_text};
+    use crate::settings::{StillDepth, StillQuality};
+
+    #[test]
+    fn a_still_reports_the_form_it_will_be_written_as() {
+        assert_eq!(
+            photo_text(StillDepth::Eight, StillQuality::Lossless),
+            "Lossless — PNG, 8-bit"
+        );
+        assert_eq!(
+            photo_text(StillDepth::Sixteen, StillQuality::Lossless),
+            "Lossless — PNG, 16-bit"
+        );
+        // A JPEG is 8-bit whatever the PNG depth says, and the report says
+        // so rather than repeating a depth the file does not have.
+        assert_eq!(
+            photo_text(StillDepth::Sixteen, StillQuality::Compact),
+            "Compact — JPEG 70, 8-bit"
+        );
+    }
+
+    #[test]
+    fn a_fader_reads_signed_in_decibels() {
+        assert_eq!(level_text(0), "0 dB");
+        assert_eq!(level_text(-60), "-60 dB");
+        assert_eq!(level_text(12), "+12 dB");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn an_endpoint_line_names_what_the_take_will_open() {
+        assert_eq!(
+            endpoint_line("mic:    ", None, false, Some(4)),
+            "mic:    System default (4 remembered)"
+        );
+        assert_eq!(
+            endpoint_line("system: ", Some("Speakers"), true, Some(8)),
+            "system: Speakers (8 remembered)"
+        );
+        // A chosen device that is away still names itself, and says what the
+        // take does instead.
+        assert_eq!(
+            endpoint_line("mic:    ", Some("Headset"), false, Some(4)),
+            "mic:    Headset (not connected; using the default)"
+        );
+        assert_eq!(
+            endpoint_line("mic:    ", None, false, None),
+            "mic:    System default (no endpoint list)"
+        );
+    }
 
     #[test]
     fn digest_records_compare_bytes() {
