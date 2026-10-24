@@ -25,10 +25,17 @@ and the same capture pipeline headless on macOS and Linux.</p>
 
 <table align="center">
   <tr>
+    <td align="center" valign="top" colspan="2">
+      <img src="assets/recording-frame.png" width="900" alt="A recording in progress around the README in an editor, with the control bar on the frame's top edge" />
+      <br />
+      <sub><strong>Recording</strong> — a frame that breathes, a Stop button, and the two audio switches, none of which land in the shot.</sub>
+    </td>
+  </tr>
+  <tr>
     <td align="center" valign="top">
       <img src="assets/settings-window.png" width="440" alt="The screencapture Settings window" />
       <br />
-      <sub><strong>Settings</strong> — capture mode, profile, codec, audio sources and quality, chimes, hotkeys, and folders.</sub>
+      <sub><strong>Settings</strong> — profile, codec, still quality, audio devices and levels, chimes, hotkeys, and folders.</sub>
     </td>
     <td align="center" valign="top">
       <img src="assets/tray-menu.png" width="200" alt="The screencapture tray menu" />
@@ -40,25 +47,30 @@ and the same capture pipeline headless on macOS and Linux.</p>
 
 ## Why screencapture
 
-- **Record at real speed.** Capture and encoding run on a wall-clock-paced worker,
-  so a 60 fps profile produces a 60 fps file even when a slow frame misses its slot.
-- **Pick exactly what you mean.** One crosshair session: click a highlighted window
-  or drag a rectangle. The selection outline and recording border never appear in
-  the saved image.
-- **Keep your aspect ratio.** A profile is a size ceiling, not a new shape. A 16:10
-  window through a 720p profile becomes 1152×720, with no black bars — and a
-  screen smaller than the box keeps its own pixels instead of being upscaled.
-- **Paste without the file hunt.** Every still is saved as a PNG and placed on the
-  Windows clipboard as a bitmap plus the finished PNG — one `Ctrl+V` away.
-- **Hear it too.** A recording carries system sound and the microphone, mixed
-  into one 48 kHz AAC stereo track at speech, standard, or full quality. A
-  missing or blocked device is a logged note, never a failed take.
-- **H.264 first.** The bundled engine's x264 is the default; AMF, QSV, NVENC,
-  and Media Foundation are probed with their real encoder arguments and fall
-  back to x264 with a notice when the machine cannot run them. If x264 itself
-  is missing, another H.264 unit takes over; x265 is only the last resort.
+- **It records at real speed.** Capture and encoding run on a worker paced by
+  the wall clock, so a 60 fps profile really does give you a 60 fps file; a
+  frame that misses its slot is repeated rather than shortening the clip.
+- **You pick exactly what you mean.** One crosshair session does both jobs:
+  click the highlighted window, or press and drag a rectangle. Neither the
+  selection outline nor the recording frame ever shows up in the saved file.
+- **Your aspect ratio survives.** A profile is a ceiling, not a new shape. A
+  16:10 window recorded through the 720p profile comes out 1152×720 with no
+  black bars, and a screen smaller than the profile keeps its own pixels
+  instead of being stretched.
+- **You can paste straight away.** Every still is saved (a lossless PNG by
+  default, or a JPEG at the quality you pick) and put on the Windows
+  clipboard as a bitmap, so it is one `Ctrl+V` away.
+- **It hears the room too.** A recording carries system sound and your
+  microphone, mixed into one 48 kHz AAC stereo track at speech, standard, or
+  full quality. If a device is missing or blocked you get a line in the log,
+  never a failed recording.
+- **H.264 comes first.** The bundled engine's x264 is the default. AMF, QSV,
+  NVENC, and Media Foundation are each probed with their real encoder
+  arguments, and when the machine cannot run one it falls back to x264 with a
+  note in the log. If x264 itself is missing another H.264 encoder takes over;
+  x265 is only the last resort.
 - **No Rust dependencies.** Every Win32, DXGI, CoreGraphics, and X11 call is a
-  hand-written FFI declaration. The binary is just the app and its engine.
+  hand-written FFI declaration, so the binary is just the app and its engine.
 
 ## Install
 
@@ -117,6 +129,14 @@ cargo build --release
 Pin a specific engine with `[engine] path = /usr/local/bin/ffmpeg` if needed.
 Wayland is not supported.
 
+Each platform gates capture behind something a command line user would not
+guess. On macOS the compositor answers an empty image until the app that
+launched the binary (Terminal, iTerm, or the binary itself) is allowed under
+**System Settings → Privacy & Security → Screen Recording**, and the change
+needs a restart. On Linux the backend reads the X11 root window, so a Wayland
+session shows only its XWayland clients, never the desktop. `--check` prints the
+matching hint under a failed `capture:` line.
+
 ## Usage
 
 ### Global hotkeys
@@ -145,7 +165,7 @@ so and Settings shows the conflict.
 | **Record** | Start or stop with the configured capture mode |
 | **Photo** | Take one still with the configured capture mode |
 | **Mute capture chimes** | Toggle the confirmation sound and save the choice |
-| **Settings…** | Edit every option live |
+| **Settings…** | Edit the recording, audio, still, hotkey, and folder options live |
 | **Profile** | Pick a resolution and frame-rate ceiling |
 | **Record display** | Choose a monitor when more than one is attached |
 | **Exit** | Stop any active recording and quit |
@@ -163,9 +183,22 @@ so and Settings shows the conflict.
 - **Escape** or right-click cancels. Escape is read through a low-level keyboard
   watch, so it works even when Windows will not give the overlay focus.
 
-The dotted selection outline and the red recording frame are excluded from the
-capture. During a recording, the red frame carries a **Stop** chip on its top
-edge; Escape and the record hotkey stop it too.
+The outline you see while choosing, and the frame around a live recording,
+never end up in the picture. During a recording that frame stays quiet: a
+light hairline sits on the app's own edge, with a dark line just inside it so
+the light one has an edge to read against on pale content, and the whole frame
+breathes in its own opacity. It is one continuous line all the way round, with
+no gap or overshoot at a corner. The control bar straddles the top edge — stop
+on the left, then the microphone and system-sound buttons, which work
+mid-take. Escape and the record hotkey stop the take too. A region too narrow
+to hold the row keeps the stop button alone.
+
+Both follow the display's real size rather than Windows' scale step alone:
+every designed pixel goes through one scale, so the hairline, the bar's button
+grid, and its corners grow together. The pill is never narrower than 24 mm,
+which is what it measures on a 100 PPI panel, so a 14-inch 1920x1200 laptop
+gets a 153x57 pill where a 15.6-inch 1366x768 laptop keeps 96x36, and both
+feel the same under the pointer.
 
 ### Output
 
@@ -177,6 +210,20 @@ screenshots where Explorer opens. Videos normally stay local. If both folders
 are set to the same path, each medium gets its own `video` or `image`
 subfolder instead of mixing files.
 
+Settings creates a destination folder that is missing, and writes a probe
+file into it, when the sheet is saved: a path that is really a file, sits on
+a read-only drive, or accepts no new files is refused while the field is
+still open, rather than after the take it would have lost.
+
+A still is a lossless PNG unless you ask for something else. The **Photo
+quality** row in Settings offers four steps: `lossless` (the default, and the
+only lossless one — `photo depth` picks its 8- or 16-bit pixel form), `high`
+(JPEG 95), `standard` (JPEG 85), and `compact` (JPEG 70). The JPEG steps keep
+full 4:4:4 colour instead of subsampling it, so coloured text on a dialog
+still reads cleanly, and they cut a typical desktop still to about half the
+PNG's size or less. A JPEG still is always 8-bit and still goes to the
+clipboard as a bitmap; the PNG file flavour is offered for the lossless one.
+
 A still, or a stopped recording, answers with a soft three-note chime on
 Windows. Mute it from the tray menu, with `ctrl+shift+m`, or in Settings.
 Every still is also copied to the Windows clipboard.
@@ -184,23 +231,48 @@ Every still is also copied to the Windows clipboard.
 A capture that cannot start says so: the log beside the videos names the
 reason, and the tray shows a warning balloon with the same text, so a hotkey
 press never fails silently. `screencapture --check` prints the engine it
-resolved and whether it runs.
+resolved and whether it runs. It also reads the settings back: the two fader
+positions in dB and, on Windows, the endpoint each source will actually open
+— the Windows default, the chosen device, or one that is away and stands in
+for itself with the default — so a silent track is explained before a take.
 
 Recordings carry an AAC stereo audio track. `[recording] system_audio` records
-what the default playback device plays and is on by default; `mic` records the
-default microphone and is off by default, so a take never surprises you with
-your own voice. Both switches are in Settings and in the file. The two sources
-are mixed against the recording clock, so a late packet becomes a moment of
-silence instead of drift. A machine with no playback or capture device records
-without that source — the video is never lost to missing sound.
+what a playback device plays and is on by default; `mic` records a microphone
+and is off by default, so a take never surprises you with your own voice. Both
+switches are in Settings and in the file, and both are also on the recording's
+control bar: a source the settings left off can be brought in mid-take, from
+the moment its button is pressed, because the track exists either way.
 
-`audio_quality` sets what the track gets: `speech` (96 kbps) for a voice-over,
-`standard` (128 kbps), or the `high` default (192 kbps) that keeps music
-intact. Settings offers the same three choices, and the track is encoded once,
-after the mix, so the choice never touches the picture.
+Each source also names its device. Settings lists every endpoint the machine
+remembers — not just the ones plugged in — so a Bluetooth headset can be chosen
+while it is switched off, and the id is what is stored: it survives a rename,
+and the headset is recorded from again as soon as it reconnects. A source whose
+chosen device is away at the start of a take records the Windows default
+instead, says so in the log, and moves to the chosen device the moment it
+appears; a device unplugged mid-take is replaced the same way. Chosen a device
+that is not in the list any more? It stays in the picker as "(not connected)"
+until it comes back.
 
-The video profile is a ceiling, not a target: a 1920×1200 screen recorded with
-the 4K profile writes 1920×1200 at the capture's own 60 fps instead of an
+Windows still owns the device volumes. The two faders in Settings are the
+app's own balance, in dB from −60 to +12, applied when the sources are added
+together — so a quiet microphone and a loud game can share one track without
+touching either device, and at 0 dB a source goes in exactly as its device
+delivers it.
+
+Both sources are mixed against the recording clock, so a late packet turns into
+a moment of silence instead of drifting out of sync. If the machine has no
+playback or capture device, the recording simply goes on without that source —
+missing sound never costs you the video.
+
+`audio_quality` decides what the track gets: `speech` (96 kbps) for a
+voice-over, `standard` (160 kbps), or the `high` default (320 kbps) that keeps
+music intact — at that rate the encoder carries the whole audible band, so what
+the speakers played is what the file holds. Settings offers the same three
+choices. The track is encoded once, after the mix, so the choice never touches
+the picture.
+
+The video profile is a ceiling, not a target: record a 1920×1200 screen with
+the 4K profile and you get 1920×1200 at the capture's own 60 fps, not an
 upscaled 3840×2160 file. Upscaling added no detail and tripled the pixels a
 player had to decode, which is what made 4K takes stutter on playback.
 
@@ -214,7 +286,7 @@ screencapture --record S --mode ...  full | region | window
 screencapture --display N            Capture display N (1-based, full mode)
 screencapture --rect X,Y,W,H         Capture an exact desktop rectangle
 screencapture --photo [--mode ...]   Take one still, then exit
-screencapture --check                Diagnose settings, displays, and engine
+screencapture --check                Diagnose settings, audio, displays, and engine
 screencapture --init                 Write the default settings file
 screencapture --config P             Use a specific settings file
 screencapture --version              Print the version
@@ -244,21 +316,35 @@ chimes = ctrl+shift+m
 
 [capture]
 mode = region
+# display names the screen a full capture records: primary follows the
+# pointer, so the monitor the mouse is on is the one recorded.
 display = primary
 chimes = true
 
 [photo]
+# quality: lossless (PNG), high (JPEG 95), standard (JPEG 85), or
+# compact (JPEG 70). A JPEG is always 8-bit, so depth applies to PNG.
+quality = lossless
 depth = 8
 
 [recording]
 profile = hd-1080p60
 codec = x264
 cursor = false
-# Sound: system_audio records the default playback device, mic the
-# default microphone; both mix into one AAC stereo track.
+# Sound: system_audio records a playback device, mic a microphone; both
+# mix into one AAC stereo track. Empty device ids follow the Windows
+# default; an id is remembered even while that device is unplugged.
 mic = false
 system_audio = true
-# audio_quality: speech (96 kbps), standard (128 kbps), high (192 kbps).
+mic_device =
+mic_device_name =
+system_device =
+system_device_name =
+# Each source's fader in dB: -60 (silence) to +12 (boosted); 0 is as the
+# device delivers it.
+mic_level = 0
+system_level = 0
+# audio_quality: speech (96 kbps), standard (160 kbps), high (320 kbps).
 audio_quality = high
 autostart = true
 
@@ -282,32 +368,33 @@ the accepted values, and `screencapture --check` prints the parsed result.
 | Whole-display recording | ✅ Desktop Duplication | ✅ CoreGraphics | ✅ X11 |
 | Window recording | ✅ own content (Graphics Capture) | ✅ compositor window list | ✅ X client rect |
 | Exact rectangle (`--rect`) | ✅ | ✅ | ✅ |
-| Still photos (PNG) | ✅ | ✅ | ✅ |
+| Still photos (PNG or JPEG) | ✅ | ✅ | ✅ |
 | Recording audio (system + mic, 3 quality levels) | ✅ WASAPI loopback and capture | — | — |
 | Clipboard handoff | ✅ | — | — |
 | Capture chimes | ✅ | — | — |
 | Autostart | ✅ registry | ✅ LaunchAgent | ✅ XDG entry |
 
-Windows is the primary surface. macOS and Linux share the capture pipeline and
-CLI, and CI runs their test suites, but live capture on that hardware has not
-been verified yet. A bare `screencapture` on those platforms prints the command
-list instead of starting a tray that cannot exist there.
+Windows is the main surface. macOS and Linux share the capture pipeline and
+the CLI, and CI runs their test suites and then starts the release binary on
+both runners, but nobody has verified live capture on that hardware yet. Run a
+bare `screencapture` there and it prints the command list instead of starting
+a tray that cannot exist on that platform.
 
 ## How it works
 
 ```text
-tray / hotkey → target → paced capture worker → FFmpeg → verified MP4 / PNG
+tray / hotkey → target → paced capture worker → FFmpeg → verified MP4 / PNG / JPEG
 ```
 
-The worker owns the frame source and the encoder pipe. Each iteration grabs a
+The worker owns the frame source and the encoder pipe. On each pass it grabs a
 frame and writes as many copies as the wall clock says are due, so a missed
-deadline becomes a repeated frame rather than a short clip. The tray pump only
-starts, stops, and watches the worker, keeping menus and the Stop chip
-responsive mid-recording.
+deadline becomes a repeated frame instead of a short clip. The tray pump only
+starts, stops, and watches the worker, which is what keeps the menus and the
+recording's control bar responsive mid-recording.
 
-Audio runs beside the frames: WASAPI loopback and the microphone are mixed
-into one 48 kHz stereo PCM stream on that same wall clock, which the engine
-reads from a named pipe as a second input.
+Audio runs alongside the frames: WASAPI loopback and the microphone are mixed
+into one 48 kHz stereo PCM stream on the same clock, and the engine reads that
+from a named pipe as a second input.
 
 Windows records whole displays through Desktop Duplication, with the mouse
 pointer composited in software, and every other target through GDI. A picked
@@ -349,8 +436,13 @@ installed cross targets are kept warning-free.
 
 [GitHub Actions](.github/workflows/ci.yml) runs the native gates on
 `windows-latest`, `macos-latest`, and `ubuntu-latest` for every push and pull
-request. `main` is protected: all three jobs must pass, the branch must be up to
-date, and admins cannot bypass the rules.
+request, and starts the release binary there so the platform code loads and
+reports instead of panicking. The Windows installer job also records: it runs
+`--check`, takes a two-second region take, probes it for H.264 and AAC and a
+plausible duration, and checks that the still it saves really starts with a
+PNG signature, all with the bundled engine. `main` is protected: all three
+jobs must pass, the branch must be up to date, and admins cannot bypass the
+rules.
 
 - [ROADMAP.md](ROADMAP.md) — session history and the deferred backlog
 - [AUDIT.md](AUDIT.md) — defect audit and fixes

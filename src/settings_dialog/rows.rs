@@ -6,25 +6,23 @@
 //! Every coordinate below is a designed pixel at 96 DPI; `create_child`
 //! scales it with the display.
 
-use std::iter;
-
 use crate::encoder::Video;
 use crate::recording::Profile;
-use crate::screen;
-use crate::settings::{CaptureMode, Settings, StillDepth};
+use crate::settings::{Settings, StillDepth, StillQuality};
 use crate::winapi::{CreateWindowExW, Hwnd, Lparam, Wparam};
 
 use super::ffi::{
     BM_SETCHECK, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_GROUPBOX, BS_PUSHBUTTON, CB_ADDSTRING,
     CB_SETCURSEL, CBS_DROPDOWNLIST, ES_AUTOHSCROLL, HWND_TOP, SS_LEFT, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOSIZE, SendMessageW, SetWindowPos, WM_SETFONT, WS_CHILD, WS_CLIPSIBLINGS,
-    WS_EX_CLIENTEDGE, WS_TABSTOP, WS_VISIBLE,
+    SWP_NOSIZE, SendMessageW, SetWindowPos, TBM_SETPOS, TBM_SETRANGE, TBS_HORZ, WM_SETFONT,
+    WS_CHILD, WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, WS_TABSTOP, WS_VISIBLE,
 };
 use super::frame::scaled;
 use super::{
     CHECK_AUTOSTART, CHECK_CHIMES, CHECK_CURSOR, CHECK_MIC, CHECK_SYSTEM_AUDIO,
-    COMBO_AUDIO_QUALITY, COMBO_CODEC, COMBO_DEPTH, COMBO_DISPLAY, COMBO_MODE, COMBO_PROFILE,
-    DIALOG, EDIT_CHIMES, EDIT_IMAGES, EDIT_PHOTO, EDIT_RECORD, EDIT_VIDEOS, module_handle, wide,
+    COMBO_AUDIO_QUALITY, COMBO_CODEC, COMBO_DEPTH, COMBO_MIC_DEVICE, COMBO_PROFILE, COMBO_QUALITY,
+    COMBO_SYSTEM_DEVICE, DIALOG, EDIT_CHIMES, EDIT_IMAGES, EDIT_PHOTO, EDIT_RECORD, EDIT_VIDEOS,
+    SLIDER_MIC_LEVEL, SLIDER_SYSTEM_LEVEL, module_handle, wide,
 };
 
 // ---------------------------------------------------------------------------
@@ -42,6 +40,14 @@ const COL_R: i32 = COL_L + COL_W + COLUMN_GAP;
 const BAND_W: i32 = COL_W * 2 + COLUMN_GAP;
 /// Border inset inside a group box.
 const INNER: i32 = 16;
+/// The checkbox column of a source row in the Audio group.
+const CHECK_W: i32 = 118;
+/// Where that row's device picker starts, past its checkbox.
+const PICK_X: i32 = INNER + 128;
+/// And how wide it is: the group's inner width less that start.
+const PICK_W: i32 = COL_W - INNER - 24 - 128;
+/// The dB text beside a fader.
+const VALUE_W: i32 = 48;
 /// Caption column: a control starts this far past [`INNER`], so captions
 /// share one edge and every control shares another.
 const LABEL_W: i32 = 88;
@@ -70,7 +76,6 @@ struct Place {
 
 /// Every child control, seeded from the current settings.
 pub(super) fn populate(settings: &Settings, window: Hwnd) {
-    capture_group(settings, window);
     recording_group(settings, window);
     still_group(settings, window);
     audio_group(settings, window);
@@ -79,8 +84,8 @@ pub(super) fn populate(settings: &Settings, window: Hwnd) {
     folders_group(settings, window);
 
     // The button row, right-aligned with the bands' own right edge.
-    push_button(window, super::BTN_SAVE, "Save", 552, 497);
-    push_button(window, super::BTN_CANCEL, "Cancel", 636, 497);
+    push_button(window, super::BTN_SAVE, "Save", 552, 580);
+    push_button(window, super::BTN_CANCEL, "Cancel", 636, 580);
     settle_children();
 }
 
@@ -105,46 +110,9 @@ fn settle_children() {
     }
 }
 
-/// `Capture`: what the hotkey session targets (mode, display choice).
-fn capture_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 12, COL_W, 84, "Capture");
-    let mode_index = match settings.capture_mode {
-        CaptureMode::Full => 0,
-        CaptureMode::Region => 1,
-        CaptureMode::Window => 2,
-    };
-    combo_row(
-        window,
-        COMBO_MODE,
-        "Capture mode",
-        COL_L,
-        30,
-        &[
-            "Full screen".to_owned(),
-            "Drawn region".to_owned(),
-            "Picked window".to_owned(),
-        ],
-        mode_index,
-    );
-    let count = attached_count();
-    let display_index = settings
-        .display
-        .number()
-        .map_or(0, |number| usize::min(number as usize, count));
-    combo_row(
-        window,
-        COMBO_DISPLAY,
-        "Display",
-        COL_L,
-        60,
-        &display_entries(count),
-        display_index,
-    );
-}
-
 /// `Recording`: profile, codec, and the cursor switch.
 fn recording_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 104, COL_W, 112, "Recording");
+    group(window, COL_L, 12, COL_W, 112, "Recording");
     let profile_entries: Vec<String> = Profile::PROFILES
         .iter()
         .map(|profile| format!("{} ({}×{})", profile.label, profile.width, profile.height))
@@ -158,7 +126,7 @@ fn recording_group(settings: &Settings, window: Hwnd) {
         COMBO_PROFILE,
         "Video profile",
         COL_L,
-        120,
+        28,
         &profile_entries,
         profile_index,
     );
@@ -173,7 +141,7 @@ fn recording_group(settings: &Settings, window: Hwnd) {
         COMBO_CODEC,
         "Video codec",
         COL_L,
-        148,
+        56,
         &codec_entries,
         codec_index,
     );
@@ -182,15 +150,35 @@ fn recording_group(settings: &Settings, window: Hwnd) {
         CHECK_CURSOR,
         "Include mouse cursor in captures",
         COL_L + INNER,
-        180,
+        88,
         settings.cursor,
         WIDE_W,
     );
 }
 
-/// `Still photo`: the channel depth.
+/// `Still photo`: what a still is encoded as, then the PNG's depth.
+///
+/// Quality comes first because it is the choice most users change; depth
+/// only means something for the lossless PNG above it.
 fn still_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 224, COL_W, 52, "Still photo");
+    group(window, COL_L, 132, COL_W, 100, "Still photo");
+    let quality_index = StillQuality::CHOICES
+        .iter()
+        .position(|quality| *quality == settings.photo_quality)
+        .unwrap_or(0);
+    let quality_entries: Vec<String> = StillQuality::CHOICES
+        .iter()
+        .map(|quality| quality.label().to_owned())
+        .collect();
+    combo_row(
+        window,
+        COMBO_QUALITY,
+        "Photo quality",
+        COL_L,
+        148,
+        &quality_entries,
+        quality_index,
+    );
     let depth_index = match settings.photo_depth {
         StillDepth::Eight => 0,
         StillDepth::Sixteen => 1,
@@ -200,33 +188,55 @@ fn still_group(settings: &Settings, window: Hwnd) {
         COMBO_DEPTH,
         "Photo depth",
         COL_L,
-        240,
+        176,
         &["8-bit".to_owned(), "16-bit".to_owned()],
         depth_index,
     );
 }
 
-/// `Audio`: which sources recordings carry, what happens to them, and at
-/// what quality their track is encoded.
+/// `Audio`: which sources recordings carry, which device each one records
+/// from, and at what quality their track is encoded.
+///
+/// The device picker sits on its source's own row, so "System audio" and
+/// the playback device it means are one line to read — and a source that is
+/// off keeps its device remembered for the next take.
 fn audio_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_R, 12, COL_W, 137, "Audio");
+    group(window, COL_R, 12, COL_W, 178, "Audio");
     checkbox(
         window,
         CHECK_SYSTEM_AUDIO,
-        "Record system audio (speakers)",
+        "System audio",
         COL_R + INNER,
-        32,
+        26,
         settings.audio.system,
-        WIDE_W,
+        CHECK_W,
+    );
+    device_row(
+        window,
+        COMBO_SYSTEM_DEVICE,
+        settings.audio_devices.system.as_ref(),
+        crate::audio::devices::PLAYBACK,
+        COL_R + PICK_X,
+        22,
+        PICK_W,
     );
     checkbox(
         window,
         CHECK_MIC,
-        "Record microphone",
+        "Microphone",
         COL_R + INNER,
-        58,
+        50,
         settings.audio.mic,
-        WIDE_W,
+        CHECK_W,
+    );
+    device_row(
+        window,
+        COMBO_MIC_DEVICE,
+        settings.audio_devices.mic.as_ref(),
+        crate::audio::devices::RECORDING,
+        COL_R + PICK_X,
+        46,
+        PICK_W,
     );
     let labels: Vec<String> = crate::audio::Quality::CHOICES
         .iter()
@@ -241,42 +251,188 @@ fn audio_group(settings: &Settings, window: Hwnd) {
         COMBO_AUDIO_QUALITY,
         "Quality",
         COL_R,
-        84,
+        76,
         &labels,
         quality_index,
     );
+    level_row(
+        window,
+        SLIDER_MIC_LEVEL,
+        "Mic level",
+        COL_R,
+        104,
+        settings.audio_levels.mic_db,
+    );
+    level_row(
+        window,
+        SLIDER_SYSTEM_LEVEL,
+        "System level",
+        COL_R,
+        130,
+        settings.audio_levels.system_db,
+    );
     label(
         window,
-        "Both mix into one AAC stereo track.",
+        "A chosen device is kept even while it is unplugged.",
         COL_R + INNER,
-        114,
+        158,
         WIDE_W,
     );
 }
 
-/// `Hotkeys`: the three free combos, seeded with their canonical forms.
+/// One source's fader: its caption, a trackbar from the quietest to the
+/// loudest position, and the decibels it sits at. Windows keeps the device
+/// volume; this is the app's own balance, so a quiet microphone and a loud
+/// game can share a track without either device being touched.
+fn level_row(window: Hwnd, id: i32, caption: &str, column: i32, y: i32, db: i32) {
+    label(window, caption, column + INNER, y + 5, LABEL_W);
+    let Some(handle) = create_child(
+        window,
+        "msctls_trackbar32",
+        "",
+        TBS_HORZ | WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        Place {
+            x: column + INNER + LABEL_W,
+            y,
+            width: CONTROL_W - VALUE_W - 8,
+            height: 24,
+        },
+        id,
+        0,
+    ) else {
+        return;
+    };
+    let span = crate::audio::Levels::MAX_DB - crate::audio::Levels::MIN_DB;
+    // A trackbar's range is the high end in the upper half of one long.
+    let range = isize::try_from(span).unwrap_or(0) << 16;
+    let position = isize::try_from(db - crate::audio::Levels::MIN_DB).unwrap_or(0);
+    // SAFETY: live trackbar and scalar range/position values.
+    unsafe {
+        SendMessageW(handle, TBM_SETRANGE, 1, range);
+        SendMessageW(handle, TBM_SETPOS, 1, position);
+    }
+    let Some(value) = create_child(
+        window,
+        "STATIC",
+        &level_text(db),
+        SS_LEFT | WS_CHILD | WS_VISIBLE,
+        Place {
+            x: column + INNER + LABEL_W + CONTROL_W - VALUE_W,
+            y: y + 5,
+            width: VALUE_W,
+            height: 16,
+        },
+        0,
+        0,
+    ) else {
+        return;
+    };
+    DIALOG.with_borrow_mut(|dialog| {
+        dialog.sliders.push((id, handle));
+        dialog.level_labels.push((id, value));
+    });
+}
+
+/// A fader position as the text beside it.
+pub(super) fn level_text(db: i32) -> String {
+    if db > 0 {
+        format!("+{db} dB")
+    } else {
+        format!("{db} dB")
+    }
+}
+
+/// One source's device picker: the Windows default, every endpoint the
+/// machine remembers, and — when the chosen one is away — a first entry for
+/// it, so a selection made with the headset switched off survives.
+fn device_row(
+    window: Hwnd,
+    id: i32,
+    chosen: Option<&crate::settings::Endpoint>,
+    flow: i32,
+    x: i32,
+    y: i32,
+    width: i32,
+) {
+    let mut entries = vec!["System default".to_owned()];
+    let mut choices: Vec<Option<crate::settings::Endpoint>> = vec![None];
+    for device in crate::audio::devices::list(flow).unwrap_or_default() {
+        entries.push(device.label());
+        choices.push(Some(crate::settings::Endpoint {
+            id: device.id,
+            name: device.name,
+        }));
+    }
+    let mut index = 0;
+    if let Some(chosen) = chosen {
+        if let Some(found) = choices
+            .iter()
+            .position(|choice| choice.as_ref().is_some_and(|choice| choice.id == chosen.id))
+        {
+            index = found;
+        } else {
+            entries.insert(1, format!("{} (not connected)", chosen.name));
+            choices.insert(1, Some(chosen.clone()));
+            index = 1;
+        }
+    }
+    let Some(handle) = create_child(
+        window,
+        "COMBOBOX",
+        "",
+        CBS_DROPDOWNLIST | WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+        Place {
+            x,
+            y,
+            width,
+            height: 240,
+        },
+        id,
+        0,
+    ) else {
+        return;
+    };
+    for entry in &entries {
+        let text = wide(entry);
+        // SAFETY: the combobox owns its list; `text` lives through the call.
+        unsafe {
+            SendMessageW(handle, CB_ADDSTRING, 0, text.as_ptr() as Lparam);
+        }
+    }
+    // SAFETY: live combobox and scalar selection.
+    unsafe {
+        SendMessageW(handle, CB_SETCURSEL, index, 0);
+    }
+    DIALOG.with_borrow_mut(|dialog| {
+        dialog.combos.push((id, handle));
+        dialog.device_choices.push((id, choices));
+    });
+}
+
+/// `Hotkeys`: the three free combos, seeded with their canonical forms,
+/// under Still photo so the right column holds the audio sheet alone.
 fn hotkeys_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_R, 157, COL_W, 142, "Hotkeys");
+    group(window, COL_L, 244, COL_W, 138, "Hotkeys");
     hotkey_row(
         window,
         EDIT_RECORD,
         "Record hotkey",
         &settings.hotkey.to_combo(),
-        175,
+        262,
     );
     hotkey_row(
         window,
         EDIT_PHOTO,
         "Photo hotkey",
         &settings.photo.to_combo(),
-        207,
+        294,
     );
     hotkey_row(
         window,
         EDIT_CHIMES,
         "Chime hotkey",
         &settings.chime_hotkey.to_combo(),
-        239,
+        326,
     );
     let Some(status) = create_child(
         window,
@@ -284,8 +440,8 @@ fn hotkeys_group(settings: &Settings, window: Hwnd) {
         "Click a field, then press the keys",
         SS_LEFT | WS_CHILD | WS_VISIBLE,
         Place {
-            x: COL_R + INNER,
-            y: 271,
+            x: COL_L + INNER,
+            y: 358,
             width: WIDE_W,
             height: 16,
         },
@@ -299,13 +455,13 @@ fn hotkeys_group(settings: &Settings, window: Hwnd) {
 
 /// `Application`: startup and the capture chime, side by side.
 fn application_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 311, BAND_W, 60, "Application");
+    group(window, COL_L, 394, BAND_W, 60, "Application");
     checkbox(
         window,
         CHECK_AUTOSTART,
         "Start screencapture when Windows starts",
         BAND_LABEL,
-        333,
+        416,
         settings.autostart,
         300,
     );
@@ -314,7 +470,7 @@ fn application_group(settings: &Settings, window: Hwnd) {
         CHECK_CHIMES,
         "Play capture chimes",
         360,
-        333,
+        416,
         settings.chimes,
         250,
     );
@@ -322,14 +478,14 @@ fn application_group(settings: &Settings, window: Hwnd) {
 
 /// `Folders`: both destinations, each with a native Browse button.
 fn folders_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 379, BAND_W, 92, "Folders");
-    label(window, "Videos folder", BAND_LABEL, 403, BAND_LABEL_W);
+    group(window, COL_L, 462, BAND_W, 92, "Folders");
+    label(window, "Videos folder", BAND_LABEL, 486, BAND_LABEL_W);
     edit_box(
         window,
         EDIT_VIDEOS,
         &settings.video_dir.to_string_lossy(),
         BAND_RIGHT,
-        399,
+        482,
         BAND_EDIT_W,
     );
     push_button(
@@ -337,15 +493,15 @@ fn folders_group(settings: &Settings, window: Hwnd) {
         super::BTN_BROWSE_VIDEOS,
         "Browse…",
         BAND_BUTTON_X,
-        397,
+        480,
     );
-    label(window, "Images folder", BAND_LABEL, 435, BAND_LABEL_W);
+    label(window, "Images folder", BAND_LABEL, 518, BAND_LABEL_W);
     edit_box(
         window,
         EDIT_IMAGES,
         &settings.image_dir.to_string_lossy(),
         BAND_RIGHT,
-        431,
+        514,
         BAND_EDIT_W,
     );
     push_button(
@@ -353,20 +509,8 @@ fn folders_group(settings: &Settings, window: Hwnd) {
         super::BTN_BROWSE_IMAGES,
         "Browse…",
         BAND_BUTTON_X,
-        429,
+        512,
     );
-}
-
-/// How many displays are attached right now (at least one).
-pub(super) fn attached_count() -> usize {
-    screen::displays().len().max(1)
-}
-
-/// Display entries: `primary` then `1`..`N` attached.
-pub(super) fn display_entries(count: usize) -> Vec<String> {
-    iter::once(String::from("primary"))
-        .chain((1..=count).map(|number| number.to_string()))
-        .collect()
 }
 
 /// Every codec choice, in display order: software first, hardware after.
@@ -428,10 +572,11 @@ fn combo_row(
     DIALOG.with_borrow_mut(|dialog| dialog.combos.push((id, handle)));
 }
 
-/// One hotkey caption + key-capture field pair in the right column.
+/// One hotkey caption + key-capture field pair, in the left column under
+/// the still-photo group.
 fn hotkey_row(window: Hwnd, id: i32, caption: &str, value: &str, y: i32) {
-    label(window, caption, COL_R + INNER, y + 4, LABEL_W);
-    edit_box(window, id, value, COL_R + INNER + LABEL_W, y, CONTROL_W);
+    label(window, caption, COL_L + INNER, y + 4, LABEL_W);
+    edit_box(window, id, value, COL_L + INNER + LABEL_W, y, CONTROL_W);
 }
 
 /// One labelled checkbox aligned to the label column.
@@ -599,15 +744,8 @@ fn create_child(
 mod tests {
     use super::{
         BAND_BUTTON_X, BAND_EDIT_W, BAND_RIGHT, BAND_W, COL_L, COL_R, COL_W, CONTROL_W, LABEL_W,
-        attached_count, codec_list, display_entries,
+        codec_list,
     };
-
-    #[test]
-    fn display_entries_start_at_primary() {
-        let entries = display_entries(3);
-        assert_eq!(entries.first().map(String::as_str), Some("primary"));
-        assert_eq!(entries.len(), 4);
-    }
 
     #[test]
     fn codec_list_matches_every_variant() {
@@ -615,11 +753,6 @@ mod tests {
         assert_eq!(codecs.len(), 10);
         assert_eq!(codecs[0].id(), "x264");
         assert!(codecs.iter().any(|codec| codec.id() == "nvenc-hevc"));
-    }
-
-    #[test]
-    fn attached_count_never_zeroes() {
-        assert!(attached_count() >= 1);
     }
 
     /// The geometry invariants the design leans on: the columns sit inside

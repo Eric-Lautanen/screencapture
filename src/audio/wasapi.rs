@@ -13,9 +13,8 @@ use std::io;
 
 use super::abi::{
     AUDIO_CLIENT, AUTOCONVERT, AudioClientVt, BUFFER_100MS, CAPTURE_CLIENT, CLSCTX_ALL,
-    CaptureClientVt, DEVICE_ENUMERATOR, DEVICE_INVALIDATED, DeviceVt, ENUMERATOR, EnumeratorVt,
-    LOOPBACK, RENDER, ROLE_CONSOLE, SHARED, SILENT, SRC_DEFAULT_QUALITY, WaveFormatExtensible,
-    stereo_pcm,
+    CaptureClientVt, DEVICE_INVALIDATED, DeviceVt, EnumeratorVt, LOOPBACK, RENDER, ROLE_CONSOLE,
+    ROLE_MULTIMEDIA, SHARED, SILENT, SRC_DEFAULT_QUALITY, WaveFormatExtensible, stereo_pcm,
 };
 use crate::dxgi::abi::Complete;
 use crate::dxgi::com::Com;
@@ -44,6 +43,10 @@ pub(super) struct Client {
     stream: Com<AudioClientVt>,
     /// Where the packets come from.
     packets: Com<CaptureClientVt>,
+    /// Whether this is the Windows default because the endpoint the take
+    /// preferred was not there. A source on its fallback moves over as soon
+    /// as the chosen device comes back.
+    fallback: bool,
 }
 
 // The client is opened on the recording's setup thread and then moved to
@@ -67,20 +70,40 @@ pub(super) fn apartment() {
 }
 
 impl Client {
-    /// Open the default endpoint for `flow` ([`RENDER`] for system audio,
-    /// [`CAPTURE`] for the microphone) and start capturing from it.
+    /// Open `flow` ([`RENDER`] for system audio, [`CAPTURE`] for the
+    /// microphone) on the endpoint `preferred` names, or on the Windows
+    /// default when it names none or that device is not connected.
     ///
     /// # Errors
     /// Fails when the device cannot be opened or refuses the shared-mode
     /// format; the caller logs it and records without that source.
-    pub(super) fn open(flow: i32) -> io::Result<Self> {
+    pub(super) fn open(flow: i32, preferred: Option<&str>) -> io::Result<Self> {
         apartment();
-        let enumerator = activate::<EnumeratorVt>(&DEVICE_ENUMERATOR, &ENUMERATOR)?;
-        let device = enumerator.default_endpoint(flow)?;
+        let (device, fallback) = match preferred {
+            Some(id) if super::devices::present(id) => (super::devices::find(id)?, false),
+            Some(_) => {
+                crate::log::note(
+                    "audio",
+                    "the chosen device is not connected; using the Windows default",
+                );
+                (super::devices::default_device(flow)?, true)
+            }
+            None => (super::devices::default_device(flow)?, false),
+        };
         let stream = device.capture_client()?;
         stream.initialize(flow)?;
         let packets = stream.capture_service()?;
-        Ok(Self { stream, packets })
+        Ok(Self {
+            stream,
+            packets,
+            fallback,
+        })
+    }
+
+    /// Whether this stream is the Windows default standing in for a chosen
+    /// device that was away.
+    pub(super) const fn on_fallback(&self) -> bool {
+        self.fallback
     }
 
     /// Begin delivering packets.
@@ -196,7 +219,7 @@ pub(super) fn append_packet(out: &mut Vec<i16>, bytes: Option<&[u8]>, frames: u3
 }
 
 /// Run one class's activation factory for one interface.
-fn activate<T: Complete>(class: &Guid, iid: &Guid) -> io::Result<Com<T>> {
+pub(super) fn activate<T: Complete>(class: &Guid, iid: &Guid) -> io::Result<Com<T>> {
     let mut out: *mut c_void = std::ptr::null_mut();
     // SAFETY: both ids are live locals the call only reads, no outer object
     // is used, and the out slot is a local; the class answers with the one
@@ -211,22 +234,32 @@ fn activate<T: Complete>(class: &Guid, iid: &Guid) -> io::Result<Com<T>> {
 }
 
 impl Com<EnumeratorVt> {
-    /// `GetDefaultAudioEndpoint`: whichever device Windows currently uses
-    /// for the console role — the one the user hears.
-    fn default_endpoint(&self, flow: i32) -> io::Result<Com<DeviceVt>> {
+    /// `GetDefaultAudioEndpoint` for the role that matters here.
+    ///
+    /// Applications play and record through the *multimedia* default — the
+    /// device Windows' Sound panel sets as "Default" — so that is the role
+    /// asked for first. The console and communications roles can each name
+    /// a different endpoint, and capturing one of those gives a track of
+    /// digital silence while the machine is plainly making noise. The
+    /// console role stays as a fallback for machines that answer only it.
+    pub(super) fn default_endpoint(&self, flow: i32) -> io::Result<Com<DeviceVt>> {
         let Some(table) = self.view() else {
             return Err(io::Error::other("WASAPI: the device enumerator went away"));
         };
-        let mut out: *mut c_void = std::ptr::null_mut();
-        // SAFETY: live enumerator and a local out slot; slot 4 takes
-        // exactly these four arguments.
-        let hr =
-            unsafe { (table.get_default_endpoint)(self.raw(), flow, ROLE_CONSOLE, &raw mut out) };
-        if hr < 0 || out.is_null() {
-            return Err(native("default device", hr));
+        let mut failure = None;
+        for role in [ROLE_MULTIMEDIA, ROLE_CONSOLE] {
+            let mut out: *mut c_void = std::ptr::null_mut();
+            // SAFETY: live enumerator and a local out slot; slot 4 takes
+            // exactly these four arguments.
+            let hr = unsafe { (table.get_default_endpoint)(self.raw(), flow, role, &raw mut out) };
+            if hr >= 0 && !out.is_null() {
+                // SAFETY: a non-null device carries the reference handed
+                // to us.
+                return Ok(unsafe { Com::own(out) });
+            }
+            failure.get_or_insert(native("default device", hr));
         }
-        // SAFETY: a non-null device carries the reference handed to us.
-        Ok(unsafe { Com::own(out) })
+        Err(failure.unwrap_or_else(|| io::Error::other("WASAPI: no default device")))
     }
 }
 

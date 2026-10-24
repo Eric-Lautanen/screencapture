@@ -58,7 +58,7 @@ struct Runtime {
     finalizing: Vec<Finalizing>,
     /// Media dir for the log flushes (from settings at startup).
     media_dir: PathBuf,
-    /// The red dashed outline shown around the active recording.
+    /// The breathing frame shown around the active recording.
     #[cfg(windows)]
     border: Option<overlay::Border>,
     /// Escape-as-stop watch for the live recording; dropping it hands the
@@ -297,13 +297,16 @@ fn display_region(display: screen::Display) -> Selection {
     })
 }
 
-/// The configured display as a capture region (Full mode).
+/// The configured display as a capture region (Full mode). Without a named
+/// display the screen under the pointer is the one recorded, which is what
+/// "here" means to somebody pressing a hotkey on a second monitor.
 fn full_region(loaded: &Loaded, override_display: Option<u32>) -> io::Result<Selection> {
     let which = override_display.map_or(loaded.settings.display, DisplayChoice::Number);
-    which
-        .number()
-        .map_or_else(screen::primary, screen::display_at)
-        .map(display_region)
+    let display = match which.number() {
+        Some(number) => screen::display_at(number)?,
+        None => screen::under_cursor(),
+    };
+    Ok(display_region(display))
 }
 
 /// Begin encoding `selection`, replacing any recording already running.
@@ -322,6 +325,8 @@ fn begin(loaded: &mut Loaded, runtime: &mut Runtime, selection: Result<Selection
     let region = selection.region;
     match start_recording(loaded, selection) {
         Ok((recorder, engine)) => {
+            #[cfg(windows)]
+            let audio = recorder.audio();
             runtime.recorder = Some(recorder);
             runtime.engine = Some(engine);
             #[cfg(windows)]
@@ -329,8 +334,8 @@ fn begin(loaded: &mut Loaded, runtime: &mut Runtime, selection: Result<Selection
                 // The frame goes up once the recording is actually running:
                 // drawing it first flashed a border for a capture that never
                 // started, which is exactly the failure the log alone was
-                // hiding.
-                runtime.border = show_border(region);
+                // hiding. Its chips carry the take's live audio switches.
+                runtime.border = show_border(region, audio);
                 runtime.escape = watch_escape();
             }
         }
@@ -399,6 +404,8 @@ fn start_recording(
         media_dir: loaded.settings.video_dir.clone(),
         window: selection.window,
         audio: loaded.settings.audio,
+        audio_devices: loaded.settings.audio_devices.ids(),
+        audio_levels: loaded.settings.audio_levels,
     };
     let recorder = Recorder::start(&binary, &plan)?;
     tray::set_watchdog_timer(Some(WATCHDOG_MS));
@@ -433,8 +440,12 @@ fn size_note(region: Region, profile: Profile) -> String {
 
 /// Show the recording outline, or `None` after an honest log line.
 #[cfg(windows)]
-fn show_border(region: Region) -> Option<overlay::Border> {
-    match overlay::Border::show(region, overlay::Style::Recording(tray::stop_requested)) {
+fn show_border(region: Region, audio: crate::audio::Live) -> Option<overlay::Border> {
+    let style = overlay::Style::Recording {
+        action: tray::stop_requested,
+        audio,
+    };
+    match overlay::Border::show(region, style) {
         Ok(border) => Some(border),
         Err(error) => {
             log::note("warn", &format!("recording border unavailable: {error}"));

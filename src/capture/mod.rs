@@ -122,9 +122,32 @@ fn native_probe() -> Result<(&'static str, u32, u32), String> {
     return linux::probe();
 }
 
+/// What a user on this platform can do about a capture that will not open:
+/// printed under the `--check` failure so the fix sits next to the symptom.
+#[cfg(not(windows))]
+pub fn hint() -> &'static str {
+    #[cfg(target_os = "macos")]
+    return mac::HINT;
+    #[cfg(target_os = "linux")]
+    return linux::HINT;
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Region, Target};
+
+    /// The hint is the only text most users read after a FAIL, so it has to
+    /// name the platform's actual switch, not just say capture failed.
+    #[cfg(not(windows))]
+    #[test]
+    fn the_hint_names_this_platforms_fix() {
+        let hint = super::hint();
+        assert!(hint.len() > 40, "{hint}");
+        #[cfg(target_os = "macos")]
+        assert!(hint.contains("Screen Recording"), "{hint}");
+        #[cfg(target_os = "linux")]
+        assert!(hint.contains("X11"), "{hint}");
+    }
 
     #[test]
     fn empty_regions_are_refused() {

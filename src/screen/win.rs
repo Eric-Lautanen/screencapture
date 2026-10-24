@@ -78,13 +78,19 @@ fn window_from_value(value: usize) -> *mut c_void {
     std::ptr::with_exposed_provenance_mut::<c_void>(value)
 }
 
-/// The root owner of the window under the mouse pointer.
-fn window_at_cursor() -> Option<*mut c_void> {
+/// Where the mouse pointer is, in desktop coordinates.
+pub(crate) fn cursor_position() -> Option<Point> {
     let mut point = Point { x: 0, y: 0 };
     // SAFETY: writes only the local `point`.
     if unsafe { GetCursorPos(&raw mut point) } == 0 {
         return None;
     }
+    Some(point)
+}
+
+/// The root owner of the window under the mouse pointer.
+fn window_at_cursor() -> Option<*mut c_void> {
+    let point = cursor_position()?;
     // SAFETY: a point lookup and its root walk; the handles returned are
     // shared windows used only for inspection below.
     unsafe {

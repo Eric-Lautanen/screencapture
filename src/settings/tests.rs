@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use super::{
-    CaptureMode, DEFAULT_CAPTURE_MODE, DisplayChoice, Document, Hotkey, StillDepth,
+    CaptureMode, DEFAULT_CAPTURE_MODE, DisplayChoice, Document, Hotkey, StillDepth, StillQuality,
     default_document, read_document,
 };
 
@@ -20,6 +20,7 @@ fn builtin_template_round_trips_through_defaults() {
     assert!(settings.autostart);
     assert!(!settings.cursor);
     assert_eq!(settings.photo_depth, StillDepth::Eight);
+    assert_eq!(settings.photo_quality, StillQuality::Lossless);
     assert!(settings.chimes, "captures are audible by default");
     assert!(!settings.audio.mic, "the microphone starts muted");
     assert!(settings.audio.system, "system sound is on by default");
@@ -53,6 +54,49 @@ fn display_choice_parses_primary_and_numbers() {
     assert_eq!(DisplayChoice::parse("one"), None);
     assert_eq!(DisplayChoice::Number(3).number(), Some(3));
     assert_eq!(DisplayChoice::Primary.number(), None);
+}
+
+#[test]
+fn still_quality_parses_and_survives_the_file() {
+    for (text, quality) in [
+        ("lossless", StillQuality::Lossless),
+        ("PNG", StillQuality::Lossless),
+        ("high", StillQuality::High),
+        ("Standard", StillQuality::Standard),
+        ("compact", StillQuality::Compact),
+    ] {
+        assert_eq!(StillQuality::parse(text), Some(quality), "{text}");
+    }
+    assert_eq!(StillQuality::parse("maximum"), None);
+
+    // Each step writes its own file type, and Display/parse are the pair
+    // the settings document round-trips through.
+    for quality in StillQuality::CHOICES {
+        let text = quality.to_string();
+        assert_eq!(StillQuality::parse(&text), Some(quality), "{text}");
+        let document =
+            Document::from_text(&format!("[photo]\nquality = {text}\n")).expect("value parses");
+        let (settings, problems) = read_document(&document);
+        assert_eq!(settings.photo_quality, quality, "{text}");
+        assert_eq!(problems.len(), 0, "{text}");
+    }
+    assert_eq!(StillQuality::Lossless.extension(), "png");
+    assert_eq!(StillQuality::High.extension(), "jpg");
+    assert_eq!(StillQuality::Standard.extension(), "jpg");
+    assert_eq!(StillQuality::Compact.extension(), "jpg");
+    assert_eq!(StillQuality::High.jpeg_qscale(), Some("2"));
+    assert_eq!(StillQuality::Standard.jpeg_qscale(), Some("4"));
+    assert_eq!(StillQuality::Compact.jpeg_qscale(), Some("7"));
+    assert_eq!(StillQuality::Lossless.jpeg_qscale(), None);
+}
+
+#[test]
+fn an_unknown_still_quality_falls_back_to_lossless() {
+    let document = Document::from_text("[photo]\nquality = enormous\n").expect("sample must parse");
+    let (settings, problems) = read_document(&document);
+    assert_eq!(settings.photo_quality, StillQuality::Lossless);
+    assert_eq!(problems.len(), 1);
+    assert!(problems[0].contains("photo quality"), "{problems:?}");
 }
 
 #[test]
@@ -366,4 +410,89 @@ fn audio_quality_parses_and_falls_back() {
             .any(|problem| problem.contains("audio_quality")),
         "the unreadable value is reported: {problems:?}"
     );
+}
+
+/// A chosen endpoint is remembered by id and name; an empty id means the
+/// Windows default, and a fader outside the mixable range is clamped with a
+/// note instead of failing the whole file.
+#[test]
+fn audio_devices_and_levels_round_trip() {
+    let text = "\
+[recording]
+mic = true
+mic_device = {0.0.1.00000000}.{abc}
+mic_device_name = Headset Microphone
+system_device = {0.0.0.00000000}.{def}
+system_device_name = Speakers
+mic_level = 6
+system_level = -60
+";
+    let document = Document::from_text(text).expect("valid settings");
+    let (settings, problems) = read_document(&document);
+    assert_eq!(problems.len(), 0);
+    let mic = settings
+        .audio_devices
+        .mic
+        .clone()
+        .expect("a microphone is chosen");
+    assert_eq!(mic.id, "{0.0.1.00000000}.{abc}");
+    assert_eq!(mic.name, "Headset Microphone");
+    assert_eq!(
+        settings
+            .audio_devices
+            .system
+            .clone()
+            .expect("a playback device")
+            .name,
+        "Speakers"
+    );
+    assert_eq!(settings.audio_levels.mic_db, 6);
+    assert_eq!(settings.audio_levels.system_db, -60);
+    let ids = settings.audio_devices.ids();
+    assert_eq!(ids.mic.as_deref(), Some("{0.0.1.00000000}.{abc}"));
+
+    // A device without its name is kept under its id; an empty id follows
+    // the default; a silly fader is clamped and reported.
+    let text = "\
+[recording]
+mic_device = {0.0.1.00000000}.{abc}
+mic_device_name =
+mic_level = 120
+";
+    let document = Document::from_text(text).expect("valid settings");
+    let (settings, problems) = read_document(&document);
+    assert_eq!(
+        settings
+            .audio_devices
+            .mic
+            .clone()
+            .expect("still chosen")
+            .name,
+        "{0.0.1.00000000}.{abc}"
+    );
+    assert!(settings.audio_devices.system.is_none());
+    assert_eq!(settings.audio_levels.mic_db, crate::audio::Levels::MAX_DB);
+    assert!(
+        problems
+            .iter()
+            .any(|problem| problem.contains("mic_device")),
+        "the missing name is reported: {problems:?}"
+    );
+    assert!(
+        problems.iter().any(|problem| problem.contains("mic_level")),
+        "the clamped fader is reported: {problems:?}"
+    );
+}
+
+/// The mixer that scales samples is the Windows one; elsewhere a fader is
+/// only a stored number.
+#[cfg(windows)]
+#[test]
+fn the_faders_gain_is_unity_at_zero_and_silence_at_the_floor() {
+    use crate::audio::Levels;
+    assert!((Levels::gain(0) - 1.0).abs() < f32::EPSILON);
+    assert_eq!(Levels::gain(Levels::MIN_DB), 0.0);
+    let boost = Levels::gain(6);
+    assert!(boost > 1.9 && boost < 2.0, "6 dB doubles: {boost}");
+    assert_eq!(Levels::clamp_level(99), Levels::MAX_DB);
 }

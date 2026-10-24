@@ -38,6 +38,14 @@ pub(super) const BM_SETCHECK: u32 = 0x00F1;
 pub(super) const CB_ADDSTRING: u32 = 0x0143;
 pub(super) const CB_GETCURSEL: u32 = 0x0147;
 pub(super) const CB_SETCURSEL: u32 = 0x014E;
+/// Trackbar messages (`commctrl.h`): range, position, and read-back.
+pub(super) const TBM_SETRANGE: u32 = 0x0406;
+pub(super) const TBM_SETPOS: u32 = 0x0405;
+pub(super) const TBM_GETPOS: u32 = 0x0400;
+/// `TBS_HORZ` (`commctrl.h`): the fader runs left to right.
+pub(super) const TBS_HORZ: u32 = 0x0000;
+/// `WM_HSCROLL` (`winuser.h`): a trackbar's movement, sent to its parent.
+pub(super) const WM_HSCROLL: u32 = 0x0114;
 pub(super) const WM_CLOSE: u32 = 0x0010;
 pub(super) const WM_DESTROY: u32 = 0x0002;
 pub(super) const WM_COMMAND: u32 = 0x0111;

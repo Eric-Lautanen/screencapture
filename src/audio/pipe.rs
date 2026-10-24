@@ -172,3 +172,27 @@ impl Drop for Server {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Server;
+
+    /// Two takes must never share a pipe: the name carries this process's
+    /// id and a counter, so an instance left behind by an earlier take can
+    /// never be picked up by the next engine's reader.
+    #[test]
+    fn each_take_gets_its_own_local_pipe() {
+        let first = Server::create().expect("first pipe");
+        let second = Server::create().expect("second pipe");
+        assert_ne!(first.path(), second.path());
+        let process = std::process::id().to_string();
+        for server in [&first, &second] {
+            let name = server.path();
+            assert!(name.contains("screencapture-"), "{name}");
+            assert!(name.contains(&process), "{name}");
+            // A rooted path, so the engine opens a pipe rather than a
+            // file that happens to sit beside its working directory.
+            assert!(std::path::Path::new(name).is_absolute(), "{name}");
+        }
+    }
+}

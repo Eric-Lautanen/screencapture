@@ -50,6 +50,84 @@ impl std::fmt::Display for StillDepth {
     }
 }
 
+/// How a still is encoded: the lossless PNG that keeps every captured
+/// pixel, or a JPEG at one of three quality steps for a much smaller file.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum StillQuality {
+    /// Lossless PNG; `[photo] depth` picks its pixel depth.
+    #[default]
+    Lossless,
+    /// JPEG 95: indistinguishable from the PNG on screen, a fraction of
+    /// its size.
+    High,
+    /// JPEG 85: the usual screenshot compromise.
+    Standard,
+    /// JPEG 70: for a picture pasted into a chat window, not archived.
+    Compact,
+}
+
+impl StillQuality {
+    /// Every choice, in the order Settings lists them.
+    pub const CHOICES: [Self; 4] = [Self::Lossless, Self::High, Self::Standard, Self::Compact];
+
+    /// Parse a settings value (case-insensitive).
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "lossless" | "png" => Some(Self::Lossless),
+            "high" | "jpeg-high" | "95" => Some(Self::High),
+            "standard" | "jpeg-standard" | "85" => Some(Self::Standard),
+            "compact" | "jpeg-compact" | "70" => Some(Self::Compact),
+            _ => None,
+        }
+    }
+
+    /// The file extension a still of this quality is written with.
+    #[must_use]
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Lossless => "png",
+            Self::High | Self::Standard | Self::Compact => "jpg",
+        }
+    }
+
+    /// The `-q:v` scale ffmpeg's MJPEG encoder takes for this step (lower is
+    /// better), or `None` for the PNG. The encoder's own scale is not the
+    /// percentage users pick, so the two are mapped here rather than
+    /// guessed at the call site.
+    #[must_use]
+    pub fn jpeg_qscale(self) -> Option<&'static str> {
+        match self {
+            Self::Lossless => None,
+            Self::High => Some("2"),
+            Self::Standard => Some("4"),
+            Self::Compact => Some("7"),
+        }
+    }
+
+    /// The label Settings and `--check` show for this step.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Lossless => "Lossless — PNG",
+            Self::High => "High — JPEG 95",
+            Self::Standard => "Standard — JPEG 85",
+            Self::Compact => "Compact — JPEG 70",
+        }
+    }
+}
+
+impl std::fmt::Display for StillQuality {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Lossless => write!(formatter, "lossless"),
+            Self::High => write!(formatter, "high"),
+            Self::Standard => write!(formatter, "standard"),
+            Self::Compact => write!(formatter, "compact"),
+        }
+    }
+}
+
 /// Where a recording's frame comes from.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CaptureMode {
@@ -63,11 +141,11 @@ pub enum CaptureMode {
     Window,
 }
 
-/// Which display a Full capture records: the primary or a numbered one
-/// (1-based, matching the tray's "Display N" menu entries).
+/// Which display a Full capture records: the one the capture starts on,
+/// or a numbered one (1-based).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum DisplayChoice {
-    /// The display at the desktop origin.
+    /// Wherever the pointer is when the capture starts.
     #[default]
     Primary,
     /// A named part of the enumeration order, 1-based.
@@ -140,6 +218,38 @@ pub const DEFAULT_CAPTURE_MODE: CaptureMode = if cfg!(windows) {
     CaptureMode::Full
 };
 
+/// One remembered audio endpoint: the id the system resolves, and the name
+/// to show while the device is unplugged.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Endpoint {
+    /// Endpoint id. It survives a rename and a re-pairing, which is what
+    /// lets a Bluetooth headset be chosen while it is switched off.
+    pub id: String,
+    /// The name Sound settings showed when it was chosen.
+    pub name: String,
+}
+
+/// The endpoints recordings use. `None` follows whatever Windows calls the
+/// default for that flow.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct AudioDevices {
+    /// The microphone.
+    pub mic: Option<Endpoint>,
+    /// The playback device the system mix is recorded from.
+    pub system: Option<Endpoint>,
+}
+
+impl AudioDevices {
+    /// The ids alone, which is what the capture worker resolves.
+    #[must_use]
+    pub fn ids(&self) -> audio::Devices {
+        audio::Devices {
+            mic: self.mic.as_ref().map(|endpoint| endpoint.id.clone()),
+            system: self.system.as_ref().map(|endpoint| endpoint.id.clone()),
+        }
+    }
+}
+
 /// The parsed settings view used across the application.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -163,8 +273,14 @@ pub struct Settings {
     pub cursor: bool,
     /// Which audio sources recordings include.
     pub audio: audio::Wanted,
-    /// Still-photo channel depth.
+    /// Which device each source records from.
+    pub audio_devices: AudioDevices,
+    /// How loud each source is mixed: the level its fader sits at, in dB.
+    pub audio_levels: audio::Levels,
+    /// Still-photo channel depth (PNG only; a JPEG still is always 8-bit).
     pub photo_depth: StillDepth,
+    /// How a still is encoded: lossless PNG or a JPEG quality step.
+    pub photo_quality: StillQuality,
     /// Play a soft chime when a still is taken or a recording is stopped.
     pub chimes: bool,
     /// Where completed recordings land.
@@ -296,8 +412,13 @@ fn template(videos: &Path, images: &Path) -> String {
             "chimes = true\n",
             "\n",
             "[photo]\n",
+            "# quality: lossless (PNG, the default, and the only lossless\n",
+            "# choice), high (JPEG 95), standard (JPEG 85), or compact\n",
+            "# (JPEG 70). A JPEG still is always 8-bit.\n",
+            "quality = lossless\n",
             "# depth: 8 (default) or 16 (48-bit RGB PNG; both capture\n",
-            "# routes today are 8-bit, so 16 is future-proofing).\n",
+            "# routes today are 8-bit, so 16 is future-proofing). A JPEG\n",
+            "# still ignores it.\n",
             "depth = 8\n",
             "\n",
             "[recording]\n",
@@ -309,13 +430,25 @@ fn template(videos: &Path, images: &Path) -> String {
             "# another hardware H.264 unit, and only then CPU x265.\n",
             "codec = x264\n",
             "cursor = false\n",
-            "# Audio: mic records the default microphone, off by default so a\n",
+            "# Audio: mic records the microphone, off by default so a\n",
             "# recording never surprises you with your own voice;\n",
-            "# system_audio records what the default playback device plays.\n",
+            "# system_audio records what the playback device plays.\n",
             "mic = false\n",
             "system_audio = true\n",
+            "# Empty device ids follow the Windows default. A device id names\n",
+            "# one endpoint and is used again whenever that device is\n",
+            "# connected; the name is only what Settings shows for it.\n",
+            "mic_device = \n",
+            "mic_device_name = \n",
+            "system_device = \n",
+            "system_device_name = \n",
+            "# mic_level and system_level: each source's fader in dB, from\n",
+            "# -60 (barely there) to +12 (boosted); 0 takes the source as the\n",
+            "# device delivers it.\n",
+            "mic_level = 0\n",
+            "system_level = 0\n",
             "# audio_quality: the track's AAC bitrate — speech (96 kbps),\n",
-            "# standard (128 kbps), or high (192 kbps, the default).\n",
+            "# standard (160 kbps), or high (320 kbps, the default).\n",
             "audio_quality = high\n",
             "autostart = true\n",
             "\n",
@@ -359,13 +492,11 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
     let cursor = cursor_raw.and_then(Value::as_bool);
     let chimes_raw = document.value("capture", "chimes");
     let chimes = chimes_raw.and_then(Value::as_bool);
-    let depth_raw = document.value("photo", "depth");
-    let depth = still_depth(depth_raw);
     let mut problems = Vec::new();
+    let (depth, quality) = still_settings(document, &mut problems);
     let audio = audio_settings(document, &mut problems);
-    if depth_raw.is_some() && depth.is_none() {
-        problems.push(format!("invalid photo depth; using {}", StillDepth::Eight));
-    }
+    let audio_devices = audio_devices(document, &mut problems);
+    let audio_levels = audio_levels(document, &mut problems);
     if hotkey_raw.is_some() && hotkey.is_none() {
         problems.push(format!("invalid record hotkey; using {}", Hotkey::RECORD));
     }
@@ -428,7 +559,10 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
         autostart: autostart.unwrap_or(true),
         cursor: cursor.unwrap_or(false),
         audio,
-        photo_depth: depth.unwrap_or(StillDepth::Eight),
+        audio_devices,
+        audio_levels,
+        photo_depth: depth,
+        photo_quality: quality,
         chimes: chimes.unwrap_or(true),
         video_dir,
         image_dir,
@@ -447,6 +581,36 @@ fn usable_mode(mode: CaptureMode, problems: &mut Vec<String>) -> CaptureMode {
     } else {
         mode
     }
+}
+
+/// The `[photo]` section: how a still is encoded, and the PNG's pixel
+/// depth. Each falls back on its own, so a typo in one key never changes
+/// the other.
+fn still_settings(document: &Document, problems: &mut Vec<String>) -> (StillDepth, StillQuality) {
+    let depth_raw = document.value("photo", "depth");
+    let depth = still_depth(depth_raw);
+    let quality_raw = document.value("photo", "quality");
+    let quality = quality_raw
+        .and_then(Value::as_str)
+        .and_then(StillQuality::parse);
+    if depth_raw.is_some() && depth.is_none() {
+        problems.push(format!("invalid photo depth; using {}", StillDepth::Eight));
+    }
+    if quality_raw.is_some() && quality.is_none() {
+        let choices = StillQuality::CHOICES
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        problems.push(format!(
+            "invalid photo quality; using {} (choices: {choices})",
+            StillQuality::Lossless
+        ));
+    }
+    (
+        depth.unwrap_or(StillDepth::Eight),
+        quality.unwrap_or(StillQuality::Lossless),
+    )
 }
 
 /// A photo-depth value: bare text (`"8"`, quoted or not) and bare
@@ -551,6 +715,78 @@ fn audio_settings(document: &Document, problems: &mut Vec<String>) -> audio::Wan
         system: system.unwrap_or(true),
         quality: quality.unwrap_or_default(),
     }
+}
+
+/// The two faders, in dB.
+fn audio_levels(document: &Document, problems: &mut Vec<String>) -> audio::Levels {
+    audio::Levels {
+        mic_db: level_key(document, "mic_level", problems),
+        system_db: level_key(document, "system_level", problems),
+    }
+}
+
+/// One source's fader, in dB. A missing key is unity; a value outside the
+/// mixable range is clamped rather than rejected, because a recording that
+/// is merely quiet beats one that refuses to start.
+fn level_key(document: &Document, key: &str, problems: &mut Vec<String>) -> i32 {
+    let Some(value) = document.value("recording", key) else {
+        return 0;
+    };
+    let Some(level) = value.as_int() else {
+        problems.push(format!("invalid {key}; using 0 dB"));
+        return 0;
+    };
+    let level = i32::try_from(level).unwrap_or(0);
+    if level != audio::Levels::clamp_level(level) {
+        problems.push(format!(
+            "{key} outside {}..{} dB; clamped",
+            audio::Levels::MIN_DB,
+            audio::Levels::MAX_DB
+        ));
+    }
+    audio::Levels::clamp_level(level)
+}
+
+/// The chosen microphone and playback endpoints. An id without a name is
+/// still usable, so it is kept with the id as its label rather than
+/// dropped; an empty id follows the Windows default.
+fn audio_devices(document: &Document, problems: &mut Vec<String>) -> AudioDevices {
+    AudioDevices {
+        mic: endpoint(document, "mic_device", "mic_device_name", problems),
+        system: endpoint(document, "system_device", "system_device_name", problems),
+    }
+}
+
+/// One remembered endpoint from its two keys.
+fn endpoint(
+    document: &Document,
+    id_key: &str,
+    name_key: &str,
+    problems: &mut Vec<String>,
+) -> Option<Endpoint> {
+    let id = document
+        .value("recording", id_key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())?;
+    let name = document
+        .value("recording", name_key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if name.is_empty() {
+        problems.push(format!(
+            "{id_key} has no {name_key}; showing the id instead"
+        ));
+        return Some(Endpoint {
+            id: id.to_owned(),
+            name: id.to_owned(),
+        });
+    }
+    Some(Endpoint {
+        id: id.to_owned(),
+        name: name.to_owned(),
+    })
 }
 
 fn image_directory(document: &Document) -> PathBuf {

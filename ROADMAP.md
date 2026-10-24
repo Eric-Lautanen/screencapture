@@ -1256,6 +1256,227 @@ Plan of record, in build order. Every session ends with
   line now names the audio shape (`system+mic audio at high`) and
   `--check` prints `audio: system=… mic=… quality=…`.
 
+## Session 35 - A control bar worth clicking, and sound that can join (done)
+
+- [x] The recording chrome is one control bar instead of three floating
+  chips: a 96x36 pill straddling the frame's top edge with stop, microphone
+  and system-sound buttons, a hairline rim, a hover wash, and no red block.
+  Icons are line art — a capsule in a cradle, a cone with two waves, one soft
+  red square — drawn four times oversized and box-filtered down, so the
+  rounded ends and the strokes are antialiased without a drawing dependency.
+  The bar is one window, so there are no gaps between buttons for a click to
+  fall through.
+- [x] Buttons act on mouse-down, and the press captures the pointer: a switch
+  changes under the pointer rather than after it lifts, and a hand that
+  drifts a pixel still gets its button. The press and the new state are
+  painted in the same frame; the log line is written after the paint, off
+  the click's path.
+- [x] Both audio buttons are always on the bar, and either can bring its
+  source into a take that is already running: `Live` grew a `wanted` flag,
+  the worker opens whatever is awaiting on each 5 ms pass, and the mixer
+  picks it up within one 10 ms chunk. A source that refuses mid-take stops
+  being asked for (no retry loop) and its button reads as off again.
+- [x] The track now always exists, because a button can only bring sound
+  into a pipe the engine already reads. A take whose settings asked for
+  nothing writes a silent AAC track; verified live on a take with `mic =
+  false` and `system_audio = false` — both buttons pressed mid-take produced
+  an AAC 48 kHz stereo stream in the finished file (`microphone unmuted`,
+  `system audio unmuted` in the log, no device errors).
+- [x] The red dashed frame is gone. In its place: a two-tone hairline (dark
+  outside, light inside, so it reads on pale and dark content) and a coral
+  viewfinder bracket at each corner. The bracket stands 4 px clear of the
+  hairline so it frames the picture instead of thickening the border, is
+  sized from the frame's shorter side (`/12`, held between 20 and 64 px, so
+  a 4K take and a small window both read), and carries a one-pixel shade
+  edge on its inner side so the accent keeps its contrast on white.
+- [x] The frame breathes over 3 s between 178 and 216 of 255 on an eased
+  (smoothstep) ramp, so it dwells at each end and never fades into a stripe
+  or disappears. The breath is a layered-window attribute rather than a
+  repaint, so announcing a live take costs the capture no frames at all.
+- [x] Verified live on a 1920x1200 full-screen take from a build that let the
+  desktop see the frame: the hairline sits at the edge, the coral leg runs 64
+  px along the top and sides with its shade edge inside, and the accent's
+  measured alpha moved 0.72 -> 0.83 -> 0.79 across one cycle.
+- [x] `assets/recording-frame.png` is a real take, not a mock-up: the README
+  rendering in an editor window, recorded through the picker, photographed
+  mid-take with the microphone switched on. Captured from a build with the
+  display affinity off, because the frame and the bar are excluded from
+  capture by design and a normal screenshot cannot show them.
+- [x] Tests: bar layout (row fits, narrow regions keep stop alone, hit
+  testing finds each button and not the gaps), live-switch semantics (a
+  button pulls a source in, a refusal stops the retry), frame geometry
+  (inside the client, every edge, an inset bracket at every corner, brackets
+  scaling and clamped), and the breath's band plus its eased turns.
+
+## Session 36 - Chosen devices, faders, and a quieter mix (done)
+
+- [x] Settings can name the device each source records from. Every
+  enumeration lists every endpoint the machine remembers
+  (`DEVICE_STATEMASK_ALL`), not just the connected ones, so a Bluetooth
+  headset can be picked while it is switched off; the endpoint *id* is what
+  is stored (`mic_device`/`system_device` plus the `_name` to show), because
+  an id survives a rename and a re-pairing. A device that is not attached any
+  more stays in the picker as "(not connected)".
+- [x] The worker opens the chosen id, and when that device is away it records
+  the Windows default for that flow, says so in the log, and asks again every
+  two seconds whether the chosen endpoint has come back — then replaces the
+  stream and logs the move. A device unplugged mid-take is reopened the same
+  way instead of ending that source for the rest of the recording.
+- [x] The default endpoint is now asked for the *multimedia* role first, with
+  the console role as a fallback: applications play through multimedia, and
+  capturing the console endpoint gave a track of digital silence on machines
+  that name a different device for it.
+- [x] Two faders, `mic_level` and `system_level`, in dB from -60 (silence) to
+  +12. Each source is scaled before the sum, so a quiet microphone and a loud
+  game can share one track without touching either device volume; a level
+  outside the range is clamped with a note rather than failing the file, and
+  unity passes samples through bit for bit. A sum past 95% of full scale now
+  bends hyperbolically into the last half decibel instead of clipping into a
+  square wave, and a take with one source live is never touched at all.
+- [x] Muted sources still give up their samples to the mixer, so unmuting
+  resumes at the right moment instead of replaying the muted stretch.
+- [x] `standard` is 160 kbps and `high` 320 kbps (from 128 and 192): at 320
+  the encoder carries the whole audible band at 48 kHz, so a music mix comes
+  back the way it went in.
+- [x] The Settings sheet grew a device picker on each source's own row and a
+  fader with its dB readout (`WM_HSCROLL` repaints the number), and Save
+  persists the ids, names, and levels - clearing a device writes no key at
+  all, which is what "follow the Windows default" means in the file.
+- [x] Tests: endpoint labels for connected, disabled, and missing devices; a
+  chosen id and fader round-trip through the file with clamping and notes; the
+  limiter is monotonic, symmetric, and bounded below the rail; a muted channel
+  goes quiet without slipping the clock.
+
+## Session 37 - The Settings sheet says less and knows where you are (done)
+
+- [x] The Capture group is gone: capture mode and display are chosen by the
+  picker and the tray, so the two comboboxes (and the `Answers` fields and
+  `document.set` calls behind them) were removed. Save no longer rewrites
+  `capture.mode` or `capture.display`, which stay file-only keys.
+- [x] A full capture with `display = primary` now records the display under
+  the pointer instead of the one at the desktop origin (`screen::under_cursor`
+  over per-monitor rectangles). A hotkey pressed on a second monitor records
+  that monitor; the tray's Record display submenu and `--display N` still pin
+  a specific one.
+- [x] Hotkeys moved under Still photo, so the left column is recording, still,
+  and hotkeys while the right column holds the audio sheet alone; the client
+  height grew 541 to 572 to pay for the faders. The rows themselves had to
+  move with the group - they were still drawing at the right column's x, which
+  left the box empty.
+- [x] `assets/settings-window.png` recaptured from the running sheet (frame
+  bounds only, no desktop edge), and the tray table row now says what Settings
+  actually covers.
+
+## Session 38 - Chrome that scales, an audio readout, and checks that run (done)
+
+- [x] The recording frame and its control bar follow the monitor instead of
+  being stretched by Windows. The process is per-monitor DPI aware, which
+  means the chrome has to scale itself: one `scaled(value, percent)` rounds
+  every designed pixel, so the hairline, the bracket inset/leg/thickness, and
+  the bar's button grid all grow together. The frame's shade edge is one
+  hairline wide, and a narrow region still drops the audio buttons at any
+  scale.
+- [x] Scale is not the DPI setting alone. Windows' steps are coarse enough
+  that the same pill is 24 mm wide on a 15.6-inch 1366x768 panel at 100% and
+  15 mm on a 14-inch 1920x1200 panel at 100% — and the bar is aimed at. So
+  `overlay::chrome_percent` takes the larger of `GetDpiForWindow` (clamped
+  100–400%) and a physical floor: `CreateDCW` on the monitor's own device
+  name, then `HORZSIZE`/`HORZRES` give real millimetres, and
+  `percent_for(mm, px)` asks for the percent that makes the 96-pixel pill
+  24 mm across. Integer arithmetic throughout; a driver whose millimetre
+  answer implies under 36 or over 320 DPI (desktop-sized, or made up) is
+  ignored and the DPI scale stands alone.
+- [x] `assets/recording-frame.png` recaptured around the README in the Editor
+  app with the new chrome: a 153x57 pill straddling the frame's top edge, the
+  3 px brackets with 100 px legs, and the 2 px two-tone hairline, all at the
+  panel's real size. Taken from a build that let the desktop see the frame
+  (the capture exclusion off), through the picking session, as the previous
+  shot was, and cropped to the same 1440x900 canvas.
+- [x] `assets/settings-window.png` recaptured the same way: the sheet run from
+  the real settings on a desktop with everything else minimised, cropped to
+  the window plus 24 px for its shadow (782x649), so the pair no longer looks
+  like shots of two different desktops.
+- [x] Verified live on this box, with the probe made per-monitor aware first
+  (a DPI-unaware caller is answered virtualized coordinates — at 150% that
+  reported a 144x54 bar as 96x36, which is a probe trap, not a bug): the
+  14-inch 1920x1200 panel reports 302 mm, so the pill is 153x57 centred at
+  x=883 at both 100% and 150% Windows scale — 24.1 by 9.0 mm, the size the bar
+  was drawn for — with the frame window still 1920x1200 device pixels and the
+  recording 1920x1200 either way. A screenshot from a build with the capture
+  exclusion off measured the frame on that panel: 2 px shade + 2 px light
+  hairline, a 3 px bracket with 100 px legs, inset 6 px.
+- [x] `--check` now reads the audio settings back: the fader positions as
+  signed dB, and on Windows the endpoint each source will actually open —
+  "System default (8 remembered)", a chosen device, or "(not connected; using
+  the default)" for one that is away. A silent track is rarely a mute switch;
+  it is usually the wrong endpoint, and this says which one before a take.
+- [x] CI records instead of hoping: the Windows installer job now runs `--check`,
+  takes a 2 s region recording, probes it for H.264 + AAC and a 1.5–4 s
+  duration, and takes a still whose PNG signature is checked, all with the
+  bundled engine in the runner's temp folder.
+- [x] CI starts the program on macOS and Linux too. Both runners build the
+  release profile (LTO and stripped symbols, which clippy never links) and run
+  `--check`, requiring a normal exit status and the expected report sections
+  rather than a panic. A runner has no desktop and no engine, so the point is
+  that the platform code loads and reports, not that it passes.
+- [x] Capture failures now name the switch a user has to find. macOS answers
+  "Screen Recording is off for this app, or the display is asleep" instead of
+  "the compositor refused the capture", `XOpenDisplay` failure names a Wayland
+  session without XWayland, and `--check` prints a platform hint under a failed
+  `capture:` line (the README carries the same two paragraphs).
+- [x] Module split: `overlay/bar.rs` 1434 lines -> 1264 plus `bar/tests.rs`
+  (169), `window_picker.rs` 1365 -> 516 plus `window_picker/tests.rs` (848).
+  Tests still run on every platform; only their home moved.
+- [x] Live round trip of this build: 5 s hotkey recording on the frame's own
+  bar (151 frames, 151 encoded, 30.0 fps out of 29.8 captured, H.264 + AAC),
+  a 279 KB still on disk with a 1920x1200 clipboard image, the log carrying
+  start and save lines, and Settings opening and closing with exit 0. The
+  default record combo was claimed by another app on this box, so the fallback
+  moved it to `ctrl+shift+9`, logged the swap, and the smoke followed the file
+  instead of the default — the conflict path works too.
+- [x] Gates: fmt, pedantic clippy `-D warnings` on native plus
+  `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`, 223 tests green
+  (the cross-target run caught one real break: a Windows-only formatter was
+  dead code elsewhere, now gated with its test).
+- Carried forward: the physical floor is measured through the window's own
+  `MonitorFromWindow`, so mixed-scale desktops are handled per window, but a
+  second panel at a different scale still wants a live check; and mac/Linux
+  have no live capture verification yet — the new CI steps prove they load
+  and report, not that a frame arrives.
+
+## Session 39 - Stills at a chosen quality, one-line frame, and a 0.2.0 gate (done)
+
+- [x] Still quality is a setting of its own: `[photo] quality` is
+  `lossless` (PNG, the default), `high` (JPEG 95), `standard` (85), or
+  `compact` (70), and Settings carries a **Photo quality** row above the PNG
+  depth. The MJPEG path asks for `yuvj444p` on purpose: 4:2:0 fringes
+  coloured UI text, which is exactly what a screenshot is judged on. The
+  file extension follows the choice, the clipboard still receives the
+  captured bitmap, and `--check` names the form a take will write
+  (`JPEG 95, 8-bit` / `lossless PNG, 8-bit`).
+- [x] Measured on this desktop, a 1280x720 take at JPEG 95 wrote 131 KB where
+  the PNG wrote 225 KB, and the bundled `ffprobe` read both back
+  (`mjpeg`/`yuvj444p` and `png`/`rgba`).
+- [x] The recording frame is one continuous line: a light hairline flush with
+  the app's own edge, a dark line inset behind it so it reads on pale
+  content, and no corner brackets. Both tones come from `frame_rects`, so the
+  corners line up by construction; `assets/recording-frame.png` shows it.
+- [x] Settings refuses a destination it cannot write: Save creates a missing
+  folder and writes (then removes) a probe file in it, so a path that is a
+  file, a read-only drive, or an ACL that only grants reading is reported
+  while the field is open instead of after a lost take. The sheet grew one
+  row (624 design pixels) and still fits a 1366x768 laptop at 100%.
+- [x] Tests closed the seams that let a change pass silently: the dialog's
+  answers through `store_answers` -> `persist` -> `settings::load` (every
+  field, the new quality, and the shared-folder split), the drag's release
+  point (the 260x220 drag saved as 65x55), every control id (a duplicate
+  makes `GetDlgItem` answer a neighbour), `IDOK`/`IDCANCEL`, engine
+  precedence (Windows never falls through to a bare name), the per-take
+  audio pipe name, the single-instance mutex, and BGRA stride across widths.
+- [x] Gates: fmt, pedantic clippy `-D warnings` on native plus
+  `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`, 246 tests green.
+- [x] Version 0.2.0: a new setting and a changed frame are a minor release.
+
 ## Deferred backlog
 
 - numbered display names via `EnumDisplayDevices`; mac multi-display
@@ -1273,6 +1494,5 @@ Plan of record, in build order. Every session ends with
 - a real 16-bit (or HDR) capture route for the session-13 depth hook;
   per-vendor HEVC quality mapping (needs an eyeball session);
   installer run/uninstall cycle (needs elevation + GUI, or CI);
-- audio device pickers (both streams currently take the default playback and
-  recording devices), a live level meter in Settings, and non-Windows audio
-  capture (macOS `AVCaptureScreenInput` audio, Linux PulseAudio/PipeWire).
+- a live level meter in Settings, and non-Windows audio capture (macOS
+  `AVCaptureScreenInput` audio, Linux PulseAudio/PipeWire).

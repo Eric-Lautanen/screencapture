@@ -1,6 +1,7 @@
-//! Still-photo capture: grab one frame from the target region, encode it to a
-//! lossless PNG in the images directory, and hand it to the system clipboard
-//! when the platform provides a bridge.
+//! Still-photo capture: grab one frame from the target region, encode it in
+//! the images directory at the configured quality (a lossless PNG by
+//! default, or a JPEG step), and hand it to the system clipboard when the
+//! platform provides a bridge.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -9,18 +10,19 @@ use std::thread::JoinHandle;
 use crate::capture::{Region, Target};
 use crate::clock;
 use crate::pipe::{self, Stream};
-use crate::settings::Loaded;
+use crate::settings::{Loaded, StillQuality};
 
 use super::engine;
 
-/// Capture `selection` as a lossless PNG in `loaded.settings.image_dir` and
-/// offer it to the clipboard.
+/// Capture `selection` into `loaded.settings.image_dir` at the configured
+/// still quality, and offer it to the clipboard.
 ///
 /// # Errors
 /// Fails when the directory cannot be created, the target refuses the frame,
-/// or the `FFmpeg` pipe cannot finish the PNG.
+/// or the `FFmpeg` pipe cannot finish the still.
 pub(super) fn take_photo(loaded: &Loaded, selection: super::Selection) -> io::Result<Photo> {
     let region = selection.region;
+    let quality = loaded.settings.photo_quality;
     // The chime is the audible "got it", so it starts the instant the
     // selection is committed — before the frame grab and the encoder spawn
     // can add their latency. Its own thread keeps the capture path walking.
@@ -36,7 +38,7 @@ pub(super) fn take_photo(loaded: &Loaded, selection: super::Selection) -> io::Re
     let frame = target
         .frame()
         .map_err(|error| io::Error::other(format!("cannot grab the screen: {error}")))?;
-    let path = clock::stamped_path(folder, "png").map_err(|error| {
+    let path = clock::stamped_path(folder, quality.extension()).map_err(|error| {
         io::Error::other(format!(
             "cannot create a file in {}: {error}",
             folder.display()
@@ -47,7 +49,7 @@ pub(super) fn take_photo(loaded: &Loaded, selection: super::Selection) -> io::Re
         height: region.height,
         fps: 1,
     };
-    let args = pipe::still_args(stream, loaded.settings.photo_depth, &path);
+    let args = pipe::still_args(stream, loaded.settings.photo_depth, quality, &path);
     let encoded = pipe::Feed::spawn(&binary, &args, &path)
         .map_err(|error| io::Error::other(format!("cannot start the encoder: {error}")))
         .and_then(|mut feed| {
@@ -60,7 +62,7 @@ pub(super) fn take_photo(loaded: &Loaded, selection: super::Selection) -> io::Re
         let _ = std::fs::remove_file(&path);
         return Err(error);
     }
-    let clipboard = attach_clipboard(&path, region, frame);
+    let clipboard = attach_clipboard(&path, region, frame, quality);
     Ok(Photo {
         path,
         clipboard,
@@ -93,9 +95,9 @@ fn open_target(selection: super::Selection, cursor: bool) -> io::Result<Target> 
     Target::new(selection.region, cursor)
 }
 
-/// A finished photo: where the PNG landed and how the clipboard took it.
+/// A finished photo: where the still landed and how the clipboard took it.
 pub(super) struct Photo {
-    /// The written PNG file.
+    /// The written still (PNG or JPEG, per the quality setting).
     pub(super) path: PathBuf,
     /// The clipboard answer, or `None` on a platform without a clipboard
     /// bridge (where the file is the whole result).
@@ -129,15 +131,25 @@ impl Photo {
 
 /// Offer the finished photo to the system clipboard: the captured frame
 /// as a bitmap plus the PNG already on disk, so both office suites and
-/// browsers paste it. A refusal is reported, never fatal — the file is
-/// the durable answer.
+/// browsers paste it. Only a PNG file is added as the richer flavour; a
+/// JPEG still pastes as the bitmap, which every application reads. A
+/// refusal is reported, never fatal — the file is the durable answer.
 #[cfg(windows)]
 #[expect(
     clippy::unnecessary_wraps,
     reason = "the platform without a clipboard bridge answers None; the photo type is shared"
 )]
-fn attach_clipboard(path: &Path, region: Region, frame: &[u8]) -> Option<io::Result<()>> {
-    let png = std::fs::read(path).ok();
+fn attach_clipboard(
+    path: &Path,
+    region: Region,
+    frame: &[u8],
+    quality: StillQuality,
+) -> Option<io::Result<()>> {
+    let png = if quality == StillQuality::Lossless {
+        std::fs::read(path).ok()
+    } else {
+        None
+    };
     Some(crate::clipboard::copy_image(
         region.width,
         region.height,
@@ -147,6 +159,11 @@ fn attach_clipboard(path: &Path, region: Region, frame: &[u8]) -> Option<io::Res
 }
 
 #[cfg(not(windows))]
-fn attach_clipboard(_path: &Path, _region: Region, _frame: &[u8]) -> Option<io::Result<()>> {
+fn attach_clipboard(
+    _path: &Path,
+    _region: Region,
+    _frame: &[u8],
+    _quality: StillQuality,
+) -> Option<io::Result<()>> {
     None
 }

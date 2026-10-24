@@ -106,6 +106,10 @@ pub struct Plan {
     pub window: Option<usize>,
     /// Which audio sources to record alongside the frames.
     pub audio: audio::Wanted,
+    /// Which device each source records from.
+    pub audio_devices: audio::Devices,
+    /// Each source's fader, in dB.
+    pub audio_levels: audio::Levels,
 }
 
 /// What one recording's capture loop owns: the frame source, the engine
@@ -146,6 +150,10 @@ pub struct Recorder {
     /// The worker's fatal error, kept for the watchdog to report without
     /// waiting for a stop.
     failure: Arc<Mutex<Option<String>>>,
+    /// Live audio switches for the frame's mute buttons; only Windows has
+    /// those buttons, and the rest of the mixer is platform-neutral.
+    #[cfg(windows)]
+    live: audio::Live,
     /// `None` once the worker was joined.
     worker: Option<JoinHandle<io::Result<()>>>,
 }
@@ -202,64 +210,19 @@ impl Recorder {
         let stop = Arc::new(AtomicBool::new(false));
         let counters = Arc::new(Counters::default());
         let failure = Arc::new(Mutex::new(None));
+        // One set of audio switches for the take: the worker marks what it
+        // opened, the mixer reads them, and the frame's buttons flip them.
+        let live = audio::Live::new(plan.audio);
         let (ready, started) = mpsc::channel();
         let setup = (binary.clone(), plan.clone(), region, output.clone());
         let worker = {
             let stop = Arc::clone(&stop);
             let counters = Arc::clone(&counters);
             let failure = Arc::clone(&failure);
+            let live = live.clone();
             thread::Builder::new()
                 .name("capture".into())
-                .spawn(move || {
-                    let (binary, plan, region, output) = setup;
-                    // Everything thread-touching is built here, so no
-                    // capture handle ever crosses a thread boundary, and the
-                    // audio sources are opened on the thread that will poll
-                    // them.
-                    let prepared = audio::Prepared::open(plan.audio);
-                    let args = engine_args(&plan, &output, prepared.as_ref());
-                    let opened = pick_source(&region, &plan).and_then(|source| {
-                        Feed::spawn(&binary, &args, &output).map(|feed| (source, feed))
-                    });
-                    let (source, feed) = match opened {
-                        Ok(parts) => parts,
-                        Err(error) => {
-                            let _ = ready.send(Err(io::Error::other(error.to_string())));
-                            return Err(error);
-                        }
-                    };
-                    // One clock for the whole file: the audio worker counts
-                    // from the instant the first frame is due, so the time
-                    // it spends connecting becomes silence at the head of
-                    // the track instead of a shift against the picture.
-                    let started = Instant::now();
-                    let sound =
-                        prepared.and_then(|prepared| match audio::start(prepared, started) {
-                            Ok(sound) => Some(sound),
-                            Err(error) => {
-                                crate::log::note(
-                                    "audio",
-                                    &format!("audio capture could not start ({error})"),
-                                );
-                                None
-                            }
-                        });
-                    if ready.send(Ok(())).is_err() {
-                        return Ok(());
-                    }
-                    capture_loop(
-                        Session {
-                            source,
-                            feed,
-                            fps: plan.profile.fps,
-                            started,
-                            sound,
-                        },
-                        &stop,
-                        &counters,
-                        &failure,
-                    )
-                })
+                .spawn(move || capture(setup, &live, &stop, &counters, &failure, &ready))
         };
         let worker = match worker {
             Ok(worker) => worker,
@@ -277,6 +240,8 @@ impl Recorder {
                 stop,
                 counters,
                 failure,
+                #[cfg(windows)]
+                live,
                 worker: Some(worker),
             }),
             Ok(Err(error)) => {
@@ -311,6 +276,15 @@ impl Recorder {
         self.counters.grabbed.load(Ordering::Relaxed)
     }
 
+    /// The take's live audio switches: which sources are capturing and
+    /// which are muted. The recording frame's buttons drive them, and the
+    /// mixer obeys them mid-take.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn audio(&self) -> audio::Live {
+        self.live.clone()
+    }
+
     /// The worker's fatal error, if it stopped on its own; the recording
     /// keeps running until the caller finalizes it.
     ///
@@ -339,6 +313,8 @@ impl Recorder {
             stop: Arc::new(AtomicBool::new(false)),
             counters: Arc::new(Counters::default()),
             failure: Arc::new(Mutex::new(None)),
+            #[cfg(windows)]
+            live: crate::audio::Live::default(),
             worker: Some(worker),
         }
     }
@@ -403,6 +379,62 @@ impl Drop for Recorder {
         self.request_stop();
         let _ = self.join_within(stop_budget(&self.output));
     }
+}
+
+/// The capture worker's body: open the audio sources, spawn the engine,
+/// pick a capture source, then run the frame loop until the stop flag
+/// flips. A failure before the first frame is reported to `ready` so the
+/// caller learns about it instead of waiting forever.
+fn capture(
+    setup: (Binary, Plan, Region, PathBuf),
+    live: &audio::Live,
+    stop: &AtomicBool,
+    counters: &Counters,
+    failure: &Mutex<Option<String>>,
+    ready: &mpsc::Sender<Result<(), io::Error>>,
+) -> io::Result<()> {
+    let (binary, plan, region, output) = setup;
+    // Everything thread-touching is built here: no capture handle ever
+    // crosses a thread boundary, and the audio sources open on the thread
+    // that will poll them.
+    let prepared = audio::Prepared::open(plan.audio, &plan.audio_devices, plan.audio_levels, live);
+    let args = engine_args(&plan, &output, prepared.as_ref());
+    let opened = pick_source(&region, &plan)
+        .and_then(|source| Feed::spawn(&binary, &args, &output).map(|feed| (source, feed)));
+    let (source, feed) = match opened {
+        Ok(parts) => parts,
+        Err(error) => {
+            let _ = ready.send(Err(io::Error::other(error.to_string())));
+            return Err(error);
+        }
+    };
+    // One clock for the whole file: the audio worker counts
+    // from the instant the first frame is due, so the time
+    // it spends connecting becomes silence at the head of
+    // the track instead of a shift against the picture.
+    let started = Instant::now();
+    let sound = prepared.and_then(|prepared| match audio::start(prepared, started) {
+        Ok(sound) => Some(sound),
+        Err(error) => {
+            crate::log::note("audio", &format!("audio capture could not start ({error})"));
+            None
+        }
+    });
+    if ready.send(Ok(())).is_err() {
+        return Ok(());
+    }
+    capture_loop(
+        Session {
+            source,
+            feed,
+            fps: plan.profile.fps,
+            started,
+            sound,
+        },
+        stop,
+        counters,
+        failure,
+    )
 }
 
 /// The worker loop: grab a frame, write it, then sleep until the next
@@ -620,6 +652,8 @@ mod tests {
             media_dir: PathBuf::new(),
             window: None,
             audio: crate::audio::Wanted::default(),
+            audio_devices: crate::audio::Devices::default(),
+            audio_levels: crate::audio::Levels::default(),
         };
         assert_eq!(scale_for(&equal), None);
         // A capture inside the profile keeps its own pixels: the profile
@@ -647,6 +681,8 @@ mod tests {
             media_dir: PathBuf::new(),
             window: None,
             audio: crate::audio::Wanted::default(),
+            audio_devices: crate::audio::Devices::default(),
+            audio_levels: crate::audio::Levels::default(),
         };
         // 16:10 through a 16:9 profile: full height, no letterbox bars.
         assert_eq!(scale_for(&plan), Some((1152, 720)));
@@ -681,6 +717,8 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             counters: Arc::new(Counters::default()),
             failure: Arc::new(Mutex::new(None)),
+            #[cfg(windows)]
+            live: crate::audio::Live::default(),
             worker: Some(worker),
         };
         assert_eq!(
@@ -704,6 +742,8 @@ mod tests {
             stop: Arc::new(AtomicBool::new(false)),
             counters: Arc::new(Counters::default()),
             failure: Arc::new(Mutex::new(None)),
+            #[cfg(windows)]
+            live: crate::audio::Live::default(),
             worker: Some(worker),
         };
         assert!(recorder.join_within(Duration::from_millis(50)).is_none());
@@ -728,6 +768,8 @@ mod tests {
             media_dir: PathBuf::new(),
             window: Some(0x1234),
             audio: crate::audio::Wanted::default(),
+            audio_devices: crate::audio::Devices::default(),
+            audio_levels: crate::audio::Levels::default(),
         };
         let display = crate::capture::Region {
             x: 0,
@@ -762,6 +804,8 @@ mod tests {
             media_dir: PathBuf::new(),
             window: None,
             audio: crate::audio::Wanted::default(),
+            audio_devices: crate::audio::Devices::default(),
+            audio_levels: crate::audio::Levels::default(),
         };
         let region = crate::capture::Region {
             x: 10,
