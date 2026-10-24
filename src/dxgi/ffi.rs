@@ -45,6 +45,9 @@ static D3D11_MODULE: OnceLock<usize> = OnceLock::new();
 const DRIVER_UNKNOWN: u32 = 0;
 /// `D3D11_SDK_VERSION` (d3d11.h).
 const SDK_VERSION: u32 = 7;
+/// `D3D11_CREATE_DEVICE_BGRA_SUPPORT` (d3d11.h): the window-capture frame
+/// pool refuses a device without it, because its frames are BGRA.
+const BGRA_SUPPORT: u32 = 0x0000_0020;
 
 type FactoryProc = unsafe extern "system" fn(*const Guid, *mut *mut c_void) -> i32;
 type DeviceProc = unsafe extern "system" fn(
@@ -112,6 +115,24 @@ pub fn spawn_factory() -> Result<Com<FactoryVt>, ProcError> {
 pub fn spawn_device(
     adapter: &Com<AdapterVt>,
 ) -> Result<(Com<DeviceVt>, Com<ContextVt>), ProcError> {
+    create_device(adapter, 0)
+}
+
+/// A device able to hand BGRA textures to the Windows Graphics Capture
+/// frame pool; the desktop duplication path uses plain [`spawn_device`].
+///
+/// # Errors
+/// Fails when the library or the driver refuses the device.
+pub fn spawn_capture_device(
+    adapter: &Com<AdapterVt>,
+) -> Result<(Com<DeviceVt>, Com<ContextVt>), ProcError> {
+    create_device(adapter, BGRA_SUPPORT)
+}
+
+fn create_device(
+    adapter: &Com<AdapterVt>,
+    flags: u32,
+) -> Result<(Com<DeviceVt>, Com<ContextVt>), ProcError> {
     let module = load(&D3D11_MODULE, D3D11_DLL, DEVICE_LABEL)?;
     // SAFETY: the arguments below name an export this module always has.
     let raw = unsafe { proc(module, DEVICE_PROC) };
@@ -127,7 +148,7 @@ pub fn spawn_device(
             adapter.raw(),
             DRIVER_UNKNOWN,
             std::ptr::null_mut(),
-            0,
+            flags,
             std::ptr::null(),
             0,
             SDK_VERSION,
@@ -144,7 +165,28 @@ pub fn spawn_device(
     Ok((unsafe { Com::own(device) }, unsafe { Com::own(context) }))
 }
 
-fn load(
+/// The `d3d11.dll` handle, for entry points beyond device creation (the
+/// window-capture device bridge).
+///
+/// # Errors
+/// Fails when the library is missing.
+pub(crate) fn d3d11_module() -> Result<*mut c_void, ProcError> {
+    load(&D3D11_MODULE, D3D11_DLL, DEVICE_LABEL)
+}
+
+/// One export of an already-open module, or `None` when this Windows build
+/// does not have it.
+///
+/// # Safety
+/// `module` must be a live library handle and `name` a NUL-terminated
+/// export name whose signature the caller matches exactly.
+pub(crate) unsafe fn export(module: *mut c_void, name: &[u8]) -> Option<*mut c_void> {
+    // SAFETY: upheld by the caller contract above.
+    let entry = unsafe { GetProcAddress(module, name.as_ptr()) };
+    (!entry.is_null()).then_some(entry)
+}
+
+pub(crate) fn load(
     cache: &'static OnceLock<usize>,
     library: &[u16],
     name: &'static str,

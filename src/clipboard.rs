@@ -99,10 +99,13 @@ pub(crate) fn copy_image(
     bgra: &[u8],
     png: Option<&[u8]>,
 ) -> io::Result<()> {
-    let bitmap = dib(width, height, bgra)?;
+    // The block is sized (and the frame checked) before the clipboard is
+    // taken: a photo that does not fit fails without holding the system
+    // clipboard open while it reports that.
+    let bytes = dib_len(width, height, bgra)?;
     let _clipboard = Open::take()
         .ok_or_else(|| io::Error::other("another application is holding the clipboard open"))?;
-    set_data(CF_DIB, &bitmap)?;
+    set_dib(bytes, width, height, bgra)?;
     if let Some(png) = png {
         // SAFETY: a static, nul-terminated UTF-16 name; the answer is a
         // format id (0 when the registration failed, where the PNG copy
@@ -157,23 +160,50 @@ impl Drop for Open {
 /// Hand a copy of `bytes` to the clipboard under `format`; the system
 /// owns the block once `SetClipboardData` accepts it.
 fn set_data(format: u32, bytes: &[u8]) -> io::Result<()> {
-    // SAFETY: a plain global allocation of the requested size.
-    let block = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len()) };
-    if block.is_null() {
-        return Err(io::Error::other("the clipboard block was refused"));
-    }
-    // SAFETY: `block` is ours until the handover below.
-    let locked = unsafe { GlobalLock(block) };
-    if locked.is_null() {
+    let block = alloc_block(bytes.len())?;
+    write_block(block, bytes)?;
+    hand_over(format, block)
+}
+
+/// Build the frame's bitmap directly inside the block the system will own.
+///
+/// The older shape built the same bytes in a `Vec` and then copied them
+/// into the moveable block, which held two full copies of a still at once:
+/// 33 MB each for a 4K capture, on top of the frame and the finished PNG.
+fn set_dib(bytes: usize, width: u32, height: u32, bgra: &[u8]) -> io::Result<()> {
+    let block = alloc_block(bytes)?;
+    // SAFETY: the block is ours and holds exactly `bytes` writable bytes.
+    let mapped = unsafe { GlobalLock(block) };
+    if mapped.is_null() {
         // SAFETY: releasing the allocation this call made.
         unsafe { GlobalFree(block) };
         return Err(io::Error::other("the clipboard block could not be locked"));
     }
-    // SAFETY: the block holds exactly `bytes.len()` writable bytes, and
-    // the source slice is that long.
-    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), locked.cast::<u8>(), bytes.len()) };
-    // SAFETY: unlocks the lock taken above.
+    // SAFETY: the lock above maps exactly `bytes` bytes.
+    let target = unsafe { std::slice::from_raw_parts_mut(mapped.cast::<u8>(), bytes) };
+    let filled = fill_dib(target, width, height, bgra);
+    // SAFETY: unlocks the lock taken above, after the bytes are written.
     unsafe { GlobalUnlock(block) };
+    if let Err(error) = filled {
+        // SAFETY: the block is still ours; nothing was handed over.
+        unsafe { GlobalFree(block) };
+        return Err(error);
+    }
+    hand_over(CF_DIB, block)
+}
+
+/// A moveable global block of `bytes` bytes, or a named refusal.
+fn alloc_block(bytes: usize) -> io::Result<*mut c_void> {
+    // SAFETY: a plain global allocation of the requested size.
+    let block = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes) };
+    (!block.is_null())
+        .then_some(block)
+        .ok_or_else(|| io::Error::other("the clipboard block was refused"))
+}
+
+/// Give `block` to the clipboard under `format`, releasing it when the
+/// system refuses; success transfers ownership.
+fn hand_over(format: u32, block: *mut c_void) -> io::Result<()> {
     // SAFETY: the block is fully written and handed over here; on refusal
     // it is still ours and released, on success the system owns it.
     if unsafe { SetClipboardData(format, block) }.is_null() {
@@ -184,24 +214,71 @@ fn set_data(format: u32, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-/// A `BITMAPINFOHEADER` plus the frame's rows in DIB order (bottom-up,
-/// 32 bits per pixel), with every alpha byte forced opaque.
+/// Copy `bytes` into `block`, which holds exactly that many bytes.
+fn write_block(block: *mut c_void, bytes: &[u8]) -> io::Result<()> {
+    // SAFETY: `block` is ours until the handover that follows.
+    let locked = unsafe { GlobalLock(block) };
+    if locked.is_null() {
+        // SAFETY: releasing the allocation the caller made.
+        unsafe { GlobalFree(block) };
+        return Err(io::Error::other("the clipboard block could not be locked"));
+    }
+    // SAFETY: the block holds exactly `bytes.len()` writable bytes, and
+    // the source slice is that long.
+    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), locked.cast::<u8>(), bytes.len()) };
+    // SAFETY: unlocks the lock taken above.
+    unsafe { GlobalUnlock(block) };
+    Ok(())
+}
+
+/// Byte length of the `CF_DIB` block for one frame: header plus pixels.
+/// Checking the geometry here keeps a frame that cannot be described from
+/// taking the clipboard first.
 ///
-/// Both capture routes leave the alpha byte at zero, and a fully
-/// transparent DIB pastes as a blank image in applications that honor
-/// it, so the copy writes `0xFF` over that column.
-fn dib(width: u32, height: u32, bgra: &[u8]) -> io::Result<Vec<u8>> {
+/// # Errors
+/// Fails when the geometry is empty or unrepresentable, or the frame is
+/// shorter than it claims to be.
+fn dib_len(width: u32, height: u32, bgra: &[u8]) -> io::Result<usize> {
+    let (stride, rows) = geometry(width, height)?;
+    let pixels = stride
+        .checked_mul(rows)
+        .ok_or_else(|| io::Error::other("the photo is too large for a bitmap"))?;
+    if bgra.len() < pixels {
+        return Err(io::Error::other("the photo frame does not fill its bitmap"));
+    }
+    BITMAPINFOHEADER_BYTES
+        .checked_add(pixels)
+        .ok_or_else(|| io::Error::other("the photo is too large for a bitmap"))
+}
+
+/// `(row bytes, rows)` for a frame, refusing empty or unrepresentable
+/// geometry.
+fn geometry(width: u32, height: u32) -> io::Result<(usize, usize)> {
     let stride = usize::try_from(width)
         .ok()
         .and_then(|width| width.checked_mul(PIXEL_BYTES))
         .ok_or_else(|| io::Error::other("the photo is too wide for a bitmap"))?;
     let rows = usize::try_from(height).map_err(|_| io::Error::other("the photo is too tall"))?;
-    let pixels = stride
-        .checked_mul(rows)
-        .ok_or_else(|| io::Error::other("the photo is too large for a bitmap"))?;
-    if stride == 0 || rows == 0 || bgra.len() < pixels {
-        return Err(io::Error::other("the photo frame does not fill its bitmap"));
+    if stride == 0 || rows == 0 {
+        return Err(io::Error::other("the photo has no pixels"));
     }
+    Ok((stride, rows))
+}
+
+/// Write a `BITMAPINFOHEADER` plus the frame's rows into `out`, in DIB
+/// order (bottom-up, 32 bits per pixel), with every alpha byte forced
+/// opaque.
+///
+/// Both capture routes leave the alpha byte at zero, and a fully
+/// transparent DIB pastes as a blank image in applications that honor it,
+/// so this writes `0xFF` over that column.
+fn fill_dib(out: &mut [u8], width: u32, height: u32, bgra: &[u8]) -> io::Result<()> {
+    let bytes = dib_len(width, height, bgra)?;
+    if out.len() < bytes {
+        return Err(io::Error::other("the bitmap block is too small"));
+    }
+    let (stride, rows) = geometry(width, height)?;
+    let pixels = bytes - BITMAPINFOHEADER_BYTES;
     let header = BitmapInfoHeader {
         size: u32::try_from(BITMAPINFOHEADER_BYTES).expect("header size fits u32"),
         width: i32::try_from(width).map_err(|_| io::Error::other("the photo is too wide"))?,
@@ -216,8 +293,7 @@ fn dib(width: u32, height: u32, bgra: &[u8]) -> io::Result<Vec<u8>> {
         clr_used: 0,
         clr_important: 0,
     };
-    let mut out = header_bytes(&header).to_vec();
-    out.resize(BITMAPINFOHEADER_BYTES + pixels, 0);
+    out[..BITMAPINFOHEADER_BYTES].copy_from_slice(header_bytes(&header));
     for row in 0..rows {
         let source = &bgra[row * stride..(row + 1) * stride];
         let target = rows - 1 - row;
@@ -228,7 +304,7 @@ fn dib(width: u32, height: u32, bgra: &[u8]) -> io::Result<Vec<u8>> {
             *alpha = 0xFF;
         }
     }
-    Ok(out)
+    Ok(())
 }
 
 /// The header's bytes as the OS will read them.
@@ -246,7 +322,7 @@ fn header_bytes(header: &BitmapInfoHeader) -> &[u8] {
 
 #[cfg(test)]
 mod tests {
-    use super::{BITMAPINFOHEADER_BYTES, dib};
+    use super::{BITMAPINFOHEADER_BYTES, dib_len, fill_dib};
 
     /// One 2x2 frame, top row red then green, bottom row blue then white;
     /// every alpha byte left at zero, exactly as the capture backends
@@ -260,13 +336,21 @@ mod tests {
         ]
     }
 
+    /// The frame rendered into a block of exactly its own size, the way
+    /// the clipboard path fills the block it hands over.
+    fn bitmap(width: u32, height: u32, bgra: &[u8]) -> std::io::Result<Vec<u8>> {
+        let mut out = vec![0_u8; dib_len(width, height, bgra)?];
+        fill_dib(&mut out, width, height, bgra)?;
+        Ok(out)
+    }
+
     fn u32_at(bytes: &[u8], offset: usize) -> u32 {
         u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("four bytes"))
     }
 
     #[test]
     fn header_pins_the_bitmap_shape() {
-        let bitmap = dib(2, 2, &frame()).expect("bitmap");
+        let bitmap = bitmap(2, 2, &frame()).expect("bitmap");
         assert_eq!(bitmap.len(), BITMAPINFOHEADER_BYTES + 16);
         assert_eq!(u32_at(&bitmap, 0), 40); // biSize
         assert_eq!(u32_at(&bitmap, 4), 2); // biWidth
@@ -279,7 +363,7 @@ mod tests {
 
     #[test]
     fn rows_flip_to_bottom_up_and_alpha_turns_opaque() {
-        let bitmap = dib(2, 2, &frame()).expect("bitmap");
+        let bitmap = bitmap(2, 2, &frame()).expect("bitmap");
         let pixels = &bitmap[BITMAPINFOHEADER_BYTES..];
         // The last frame row (blue, white) leads a bottom-up DIB.
         assert_eq!(&pixels[0..4], &[255, 0, 0, 0xFF]);
@@ -291,8 +375,18 @@ mod tests {
 
     #[test]
     fn short_frames_and_empty_regions_are_refused() {
-        assert!(dib(2, 2, &frame()[..15]).is_err());
-        assert!(dib(0, 2, &[]).is_err());
-        assert!(dib(2, 0, &[]).is_err());
+        assert!(bitmap(2, 2, &frame()[..15]).is_err());
+        assert!(bitmap(0, 2, &[]).is_err());
+        assert!(bitmap(2, 0, &[]).is_err());
+    }
+
+    /// The block is written in place, so a block smaller than the frame
+    /// must be refused instead of leaving the tail of the image unwritten.
+    #[test]
+    fn a_block_that_cannot_hold_the_frame_is_refused() {
+        let mut short = vec![0_u8; BITMAPINFOHEADER_BYTES + 8];
+        assert!(fill_dib(&mut short, 2, 2, &frame()).is_err());
+        let mut exact = vec![0_u8; dib_len(2, 2, &frame()).expect("sized")];
+        assert!(fill_dib(&mut exact, 2, 2, &frame()).is_ok());
     }
 }

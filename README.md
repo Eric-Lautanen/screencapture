@@ -154,6 +154,8 @@ so and Settings shows the conflict.
 - **Drawn region** and **Picked window** share one interactive pass. A plain
   click captures the highlighted window; press and drag to draw a region
   instead. A release within about 8 pixels of the press counts as a click.
+  A picked window saves that window's own content, not the pixels it sits
+  behind: another application covering it is not in the photo or recording.
 - **Escape** or right-click cancels. Escape is read through a low-level keyboard
   watch, so it works even when Windows will not give the overlay focus.
 
@@ -164,8 +166,12 @@ edge; Escape and the record hotkey stop it too.
 ### Output
 
 Recordings land in `Videos\Screencapture`; stills land in
-`Pictures\Screencapture`. If both folders are set to the same path, each medium
-gets its own `video` or `image` subfolder instead of mixing files.
+`Pictures\Screencapture`. Both are the folders Windows actually gives you: the
+shell's own answer, so an account whose `Pictures` folder OneDrive redirected
+(a second, empty `Pictures` often stays behind in the profile) still finds its
+screenshots where Explorer opens. Videos normally stay local. If both folders
+are set to the same path, each medium gets its own `video` or `image`
+subfolder instead of mixing files.
 
 A still, or a stopped recording, answers with a soft three-note chime on
 Windows. Mute it from the tray menu, with `ctrl+shift+m`, or in Settings.
@@ -239,7 +245,7 @@ preserved, and invalid values fall back to safe defaults with a logged note.
 | Settings window | ✅ | — (edit the file) | — (edit the file) |
 | Click-to-pick window / drag region | ✅ | — | — |
 | Whole-display recording | ✅ Desktop Duplication | ✅ CoreGraphics | ✅ X11 |
-| Window recording | ✅ DWM bounds | ✅ compositor window list | ✅ X client rect |
+| Window recording | ✅ own content (Graphics Capture) | ✅ compositor window list | ✅ X client rect |
 | Exact rectangle (`--rect`) | ✅ | ✅ | ✅ |
 | Still photos (PNG) | ✅ | ✅ | ✅ |
 | Clipboard handoff | ✅ | — | — |
@@ -264,9 +270,11 @@ starts, stops, and watches the worker, keeping menus and the Stop chip
 responsive mid-recording.
 
 Windows records whole displays through Desktop Duplication, with the mouse
-pointer composited in software, and everything else through GDI. macOS draws
-the compositor's window list into a BGRA context; Linux reads X11 root images.
-A lost duplication session is rebuilt mid-recording while the recording holds
+pointer composited in software, and every other target through GDI. A picked
+window is the exception: Windows Graphics Capture hands over that window's own
+frames, so an application behind another one records itself. macOS draws the
+compositor's window list into a BGRA context; Linux reads X11 root images. A
+lost duplication session is rebuilt mid-recording while the recording holds
 its last frame.
 
 ## Releases

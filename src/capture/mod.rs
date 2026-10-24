@@ -63,13 +63,33 @@ impl Target {
         })
     }
 
+    /// Capture only `window`'s own content, laid out for `region`.
+    ///
+    /// A window that another application covers keeps drawing itself, so
+    /// this saves the selected application rather than the rectangle of
+    /// desktop it happens to sit behind. Windows only: every other platform
+    /// captures the screen, and callers there never pick a window.
+    ///
+    /// # Errors
+    /// Fails when the platform backend cannot capture that window (or does
+    /// not exist on this platform at all).
+    #[cfg(windows)]
+    pub fn window(handle: usize, region: Region, include_cursor: bool) -> io::Result<Self> {
+        if !region.is_sane() {
+            return Err(io::Error::other("capture region is empty"));
+        }
+        Ok(Self {
+            backend: Platform::window(handle, region, include_cursor)?,
+        })
+    }
+
     /// Lend the latest frame: top-down rows of `width * 4` BGRA bytes.
     /// The data lives inside the backend and is valid until the next
     /// capture, so callers must write it out before capturing again.
     ///
     /// # Errors
     /// Fails when the native backend refuses the frame.
-    pub fn frame(&self) -> io::Result<&[u8]> {
+    pub fn frame(&mut self) -> io::Result<&[u8]> {
         self.backend.frame()
     }
 }

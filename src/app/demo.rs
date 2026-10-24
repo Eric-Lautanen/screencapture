@@ -85,18 +85,19 @@ fn demo_recording(
     display: Option<u32>,
     rect: Option<Region>,
 ) -> io::Result<Option<std::path::PathBuf>> {
-    let region = if let Some(rect) = rect {
-        Ok(rect)
+    let selection = if let Some(rect) = rect {
+        Ok(super::Selection::region(rect))
     } else {
         match mode {
             CaptureMode::Full => super::full_region(loaded, display),
             CaptureMode::Region => match draw_region()? {
-                Some(region) => Ok(region),
+                Some(region) => Ok(super::Selection::region(region)),
                 None => return Ok(None),
             },
-            CaptureMode::Window => screen::window_region(None),
+            CaptureMode::Window => screen::window_region(None).map(super::Selection::region),
         }
     }?;
+    let region = selection.region;
     let binary = super::engine(loaded)?;
     let codec = super::effective_codec(&binary, loaded)?;
     let plan = Plan {
@@ -106,6 +107,10 @@ fn demo_recording(
         codec,
         cursor: loaded.settings.cursor,
         media_dir: loaded.settings.video_dir.clone(),
+        // A rectangle, a display, or the window under the cursor: the
+        // command line never hands the recorder a window handle of its own,
+        // so `Window` mode records that window's rectangle.
+        window: None,
     };
     let recorder = Recorder::start(&binary, &plan)?;
     crate::log::note(
@@ -166,30 +171,30 @@ pub fn photo_demo(
     // The still honors the same `[capture] mode` as a recording: Full uses
     // the display pick, Region opens the selector, Window asks the platform
     // for the window under the cursor. A rect always wins over the mode.
-    let region = if let Some(rect) = rect {
-        Ok(rect)
+    let selection = if let Some(rect) = rect {
+        Ok(super::Selection::region(rect))
     } else {
         match mode {
             CaptureMode::Full => super::full_region(&loaded, display),
             CaptureMode::Region => match draw_region() {
-                Ok(Some(region)) => Ok(region),
+                Ok(Some(region)) => Ok(super::Selection::region(region)),
                 Ok(None) => {
                     eprintln!("photo: selection cancelled");
                     return ExitCode::SUCCESS;
                 }
                 Err(error) => Err(error),
             },
-            CaptureMode::Window => screen::window_region(None),
+            CaptureMode::Window => screen::window_region(None).map(super::Selection::region),
         }
     };
-    let region = match region {
-        Ok(region) => region,
+    let selection = match selection {
+        Ok(selection) => selection,
         Err(error) => {
             eprintln!("error: {error}");
             return ExitCode::FAILURE;
         }
     };
-    match super::take_photo(&loaded, region) {
+    match super::take_photo(&loaded, selection) {
         Ok(mut photo) => {
             println!("photo: {}", photo.describe());
             // This process exits right after the message, so let the

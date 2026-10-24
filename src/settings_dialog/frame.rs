@@ -5,13 +5,14 @@
 
 use std::ffi::c_void;
 
-use crate::winapi::{GetSystemMetrics, Hinstance, Hwnd};
+use crate::winapi::{GetSystemMetrics, Hicon, Hinstance, Hwnd};
 
 use super::ffi::{
     AdjustWindowRectEx, CLEARTYPE_QUALITY, CreateFontIndirectW, DEFAULT_CHARSET, DEFAULT_DPI,
-    DeleteObject, FW_NORMAL, GetDpiForSystem, ICON_RESOURCE_ID, IMAGE_ICON, LR_DEFAULTSIZE,
-    LoadImageW, LogFontW, Rect, SM_CXSCREEN, SM_CYSCREEN, SPI_GETWORKAREA, SendMessageW,
-    SystemParametersInfoW, UI_FONT_HEIGHT, WM_SETICON, WS_CAPTION, WS_EX_DLGMODALFRAME, WS_SYSMENU,
+    DeleteObject, DestroyIcon, FW_NORMAL, GetDpiForSystem, ICON_RESOURCE_ID, IMAGE_ICON,
+    LR_DEFAULTSIZE, LoadImageW, LogFontW, Rect, SM_CXSCREEN, SM_CYSCREEN, SPI_GETWORKAREA,
+    SendMessageW, SystemParametersInfoW, UI_FONT_HEIGHT, WM_SETICON, WS_CAPTION,
+    WS_EX_DLGMODALFRAME, WS_SYSMENU,
 };
 
 /// The designed client area: fits the grouped layout in `rows` with a
@@ -207,7 +208,11 @@ pub(super) fn drop_font(font: *mut c_void) {
 
 /// Put the exe's baked-in icon (`assets/icon.rc` resource 1) in the
 /// title bar; best-effort - a refusal simply leaves the default icon.
-pub(super) fn install_title_icon(window: Hwnd, instance: Hinstance) {
+///
+/// Answers the handle it loaded, which the caller still owns: `WM_SETICON`
+/// borrows the icon for as long as the window shows it and never takes
+/// ownership, so every open of the dialog would otherwise leak one.
+pub(super) fn install_title_icon(window: Hwnd, instance: Hinstance) -> Option<Hicon> {
     // SAFETY: the resource id is a plain ordinal cast to the wide-name
     // pointer Win32's `MAKEINTRESOURCEW` produces.
     let icon = unsafe {
@@ -221,11 +226,21 @@ pub(super) fn install_title_icon(window: Hwnd, instance: Hinstance) {
         )
     };
     if icon.is_null() {
-        return;
+        return None;
     }
     // SAFETY: a live dialog window and an owned icon handle.
     unsafe {
         SendMessageW(window, WM_SETICON, 0, icon as isize);
+    }
+    Some(icon)
+}
+
+/// Release the title-bar icon [`install_title_icon`] loaded.
+pub(super) fn drop_icon(icon: Hicon) {
+    // SAFETY: the handle came from `LoadImageW` above and was only lent to
+    // the window; nothing still needs it once that window is gone.
+    unsafe {
+        DestroyIcon(icon);
     }
 }
 

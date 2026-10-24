@@ -37,7 +37,9 @@ use self::ffi::{
     WS_VISIBLE,
 };
 use self::fields::{browse_folder, check_state, combo_choice, edit_text};
-use self::frame::{dpi_scale, drop_font, fit_scale, install_title_icon, ui_font, window_frame};
+use self::frame::{
+    dpi_scale, drop_font, drop_icon, fit_scale, install_title_icon, ui_font, window_frame,
+};
 use self::rows::{attached_count, codec_list, display_entries, populate};
 
 // ---------------------------------------------------------------------------
@@ -117,6 +119,10 @@ struct Dialog {
     /// The dialog-wide `Segoe UI` font, created in `run` and deleted with
     /// it (children get it via `WM_SETFONT` in `rows`).
     font: Option<*mut c_void>,
+    /// The title-bar icon, loaded for this open and released with it: a
+    /// window borrows a `WM_SETICON` handle rather than owning it, so a
+    /// dialog reopened often would leak one icon per open otherwise.
+    icon: Option<crate::winapi::Hicon>,
     /// Display scale percentage used by every designed coordinate
     /// (`100` at 96 DPI).
     scale: i32,
@@ -150,7 +156,7 @@ pub fn run(settings: &Settings) -> io::Result<Option<Answers>> {
     }
     DIALOG.with_borrow_mut(|dialog| dialog.file = Some(window));
     DIALOG.with_borrow_mut(|dialog| dialog.font = ui_font(scale));
-    install_title_icon(window, instance);
+    DIALOG.with_borrow_mut(|dialog| dialog.icon = install_title_icon(window, instance));
     populate(settings, window);
     // SAFETY: `window` is the dialog created above.
     unsafe {
@@ -164,6 +170,9 @@ pub fn run(settings: &Settings) -> io::Result<Option<Answers>> {
             unsafe {
                 DestroyWindow(window);
             }
+        }
+        if let Some(icon) = dialog.icon.take() {
+            drop_icon(icon);
         }
         if let Some(font) = dialog.font.take() {
             drop_font(font);

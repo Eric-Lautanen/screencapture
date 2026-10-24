@@ -52,7 +52,7 @@ pub use crate::winapi::Guid;
 
 impl Guid {
     /// Build a GUID from the familiar hex groups.
-    const fn new(a: u32, b: u16, c: u16, d: [u8; 8]) -> Self {
+    pub(crate) const fn new(a: u32, b: u16, c: u16, d: [u8; 8]) -> Self {
         Self { a, b, c, d }
     }
 }
