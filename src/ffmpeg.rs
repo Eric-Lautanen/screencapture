@@ -31,13 +31,14 @@ impl Binary {
     /// Returns an error when the engine cannot be spawned or its output
     /// cannot be collected.
     pub fn version(&self) -> io::Result<String> {
-        let output = Command::new(&self.path)
+        let mut command = Command::new(&self.path);
+        command
             .arg("-version")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?
-            .wait_with_output()?;
+            .stderr(Stdio::null());
+        crate::child::quiet(&mut command);
+        let output = command.spawn()?.wait_with_output()?;
         let text = String::from_utf8_lossy(&output.stdout);
         Ok(text.lines().next().unwrap_or("").trim().to_owned())
     }
@@ -85,6 +86,7 @@ impl Binary {
             ])
             .args(video.args(profile))
             .args(["-f", "null", "-"]);
+        crate::child::quiet(&mut command);
         let status = command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -150,7 +152,8 @@ impl Probe {
     /// # Errors
     /// Fails when the probe cannot run or refuses the file.
     pub fn frames(&self, target: &Path) -> io::Result<u64> {
-        let output = Command::new(&self.path)
+        let mut command = Command::new(&self.path);
+        command
             .arg("-v")
             .arg("error")
             .arg("-show_entries")
@@ -160,9 +163,9 @@ impl Probe {
             .arg(target)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()?
-            .wait_with_output()?;
+            .stderr(Stdio::null());
+        crate::child::quiet(&mut command);
+        let output = command.spawn()?.wait_with_output()?;
         if !output.status.success() {
             return Err(io::Error::other("ffprobe refused the file"));
         }
