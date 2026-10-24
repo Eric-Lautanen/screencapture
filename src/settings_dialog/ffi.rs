@@ -5,7 +5,7 @@
 use crate::pin_layout;
 use std::ffi::c_void;
 
-use crate::winapi::{Hinstance, Hwnd, Lparam, Lresult, Msg, Wparam};
+use crate::winapi::{Hicon, Hinstance, Hwnd, Lparam, Lresult, Msg, Wparam};
 
 // Window and control styles (winuser.h).
 pub(super) const WS_CAPTION: u32 = 0x00C0_0000;
@@ -154,6 +154,9 @@ unsafe extern "system" {
         height: i32,
         flags: u32,
     ) -> *mut c_void;
+    /// Releases an icon handle; `WM_SETICON` borrows the handle and never
+    /// takes ownership, so the loader still owes this call.
+    pub(super) fn DestroyIcon(icon: Hicon) -> Bool;
     /// Grows a wanted client rect into the to-be window rect (adds the
     /// caption/borders for `style`/`style_ex`); `menu` nonzero adds a
     /// menu bar this dialog does not have.
