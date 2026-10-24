@@ -53,6 +53,9 @@ thread_local! {
     static HANDLER: RefCell<Handler> = const { RefCell::new(None) };
     static WINDOW: RefCell<Option<Hwnd>> = const { RefCell::new(None) };
     static BINDINGS: RefCell<Vec<Binding>> = const { RefCell::new(Vec::new()) };
+    /// The bindings Windows actually accepted. A combo listed here belongs
+    /// to this process, which is the one answer a probe cannot give.
+    static LIVE: RefCell<Vec<Binding>> = const { RefCell::new(Vec::new()) };
     /// Events that arrived while a handler dispatch still owned the
     /// borrow; replayed in order when the outer dispatch returns.
     static PENDING: RefCell<VecDeque<Event>> = const { RefCell::new(VecDeque::new()) };
@@ -155,27 +158,41 @@ pub(super) fn set_watchdog_timer(interval_ms: Option<u32>) {
     }
 }
 
-/// Whether Windows would accept `combo` right now, after lifting this
-/// process's own registrations so it cannot report a conflict with
-/// itself. The settings window asks this while a hotkey field records
-/// the user's keys.
+/// Whether Windows would accept `combo` right now. The settings window
+/// asks this while a hotkey field records the user's keys.
+///
+/// A combo this process already holds answers yes without asking Windows:
+/// `RegisterHotKey` refuses a second registration of the same combo even for
+/// the process that owns it, so a probe would call our own binding someone
+/// else's. Everything else is a real probe on a spare id, and the live
+/// bindings are never lifted for it — a question about a new combo must not
+/// be able to cost the user a hotkey that works.
 pub(super) fn hotkey_available(combo: Hotkey) -> bool {
-    let modifiers = combo_modifiers(combo) | MOD_NOREPEAT;
-    let window = WINDOW.with_borrow(|slot| *slot);
-    match window {
-        Some(window) => {
-            unregister_hotkeys(window);
-            let free = probe(window, modifiers, combo.key);
-            register_hotkeys(window);
-            free
-        }
-        None => probe(std::ptr::null_mut(), modifiers, combo.key),
-    }
+    let window = WINDOW
+        .with_borrow(|slot| *slot)
+        .unwrap_or(std::ptr::null_mut());
+    LIVE.with_borrow(|live| {
+        availability(live, combo, |modifiers, key| probe(window, modifiers, key))
+    })
 }
 
-/// One `RegisterHotKey` probe, removed immediately when it succeeds.
+/// The rule behind [`hotkey_available`], with the probe injected so the
+/// owned-combo case can be tested without registering anything.
+fn availability(live: &[Binding], combo: Hotkey, probe: impl FnOnce(u32, u32) -> bool) -> bool {
+    let modifiers = combo_modifiers(combo) | MOD_NOREPEAT;
+    let owned = live
+        .iter()
+        .any(|binding| binding.modifiers == modifiers && binding.key == combo.key);
+    if owned {
+        return true;
+    }
+    probe(modifiers, combo.key)
+}
+
+/// One `RegisterHotKey` probe on an id outside the three tray bindings,
+/// removed immediately when it succeeds.
 fn probe(window: Hwnd, modifiers: u32, key: u32) -> bool {
-    /// Outside the ids the tray uses for its two bindings.
+    /// `0x7FFE` sits above every binding id the tray hands out.
     const PROBE_ID: i32 = 0x7FFE;
     // SAFETY: a registration on our own window (or thread); removed at once.
     let registered = unsafe { RegisterHotKey(window, PROBE_ID, modifiers, key) } != 0;
@@ -187,6 +204,7 @@ fn probe(window: Hwnd, modifiers: u32, key: u32) -> bool {
 }
 
 fn register_hotkeys(window: Hwnd) {
+    let mut live: Vec<Binding> = Vec::new();
     for binding in BINDINGS.with_borrow(Vec::clone) {
         // SAFETY: registrations live on our own window and are removed on
         // `WM_DESTROY`.
@@ -203,8 +221,11 @@ fn register_hotkeys(window: Hwnd) {
                 ),
             );
             notify_hotkey_taken(binding.role);
+        } else {
+            live.push(binding);
         }
     }
+    LIVE.with_borrow_mut(|slot| *slot = live);
 }
 
 /// Say in the tray that a saved hotkey could not be registered. The log
@@ -234,6 +255,7 @@ fn unregister_hotkeys(window: Hwnd) {
         // SAFETY: symmetric teardown of the registration made at startup.
         unsafe { UnregisterHotKey(window, binding.id) };
     }
+    LIVE.with_borrow_mut(Vec::clear);
 }
 
 fn create_hidden_window(
@@ -474,9 +496,63 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
-    use super::{BINDINGS, HANDLER, PENDING, dispatch_hotkey, emit};
+    use super::{BINDINGS, HANDLER, PENDING, availability, dispatch_hotkey, emit};
+    use crate::hotkeys::{MOD_ALT, MOD_NOREPEAT, bindings};
     use crate::settings::Hotkey;
     use crate::tray::Event;
+
+    /// A live set covering the three shipped combos.
+    fn live() -> Vec<crate::hotkeys::Binding> {
+        bindings(Hotkey::RECORD, Hotkey::PHOTO, Hotkey::CHIMES)
+    }
+
+    /// A combo this process already holds answers yes without a probe:
+    /// registering it again is what Windows refuses, not a conflict.
+    #[test]
+    fn an_owned_combo_answers_free_without_probing() {
+        let mut probed = false;
+        let free = availability(&live(), Hotkey::RECORD, |_, _| {
+            probed = true;
+            false
+        });
+        assert!(free, "our own record combo stays usable");
+        assert!(!probed, "the probe must not run for a combo we own");
+    }
+
+    /// The same key under different modifiers is a separate registration,
+    /// so Windows has to decide.
+    #[test]
+    fn a_shared_key_under_other_modifiers_asks_windows() {
+        let combo = Hotkey::parse("alt+shift+x").expect("parses");
+        let mut probed = false;
+        let free = availability(&live(), combo, |_, _| {
+            probed = true;
+            true
+        });
+        assert!(free);
+        assert!(probed, "alt+shift+x is not ctrl+shift+x");
+    }
+
+    /// A foreign combo is answered by the probe, with the no-repeat flag
+    /// the tray always registers with.
+    #[test]
+    fn a_foreign_combo_is_answered_by_windows() {
+        let combo = Hotkey::parse("ctrl+alt+f9").expect("parses");
+        let mut asked = None;
+        let free = availability(&live(), combo, |modifiers, key| {
+            asked = Some((modifiers, key));
+            false
+        });
+        assert!(!free, "a refused probe means another app owns the combo");
+        assert_eq!(
+            asked,
+            Some((
+                crate::hotkeys::combo_modifiers(combo) | MOD_NOREPEAT,
+                combo.key
+            ))
+        );
+        assert_ne!(asked.map(|(modifiers, _)| modifiers & MOD_ALT), Some(0));
+    }
 
     /// The regression behind the abort users could hit: dispatching an
     /// event *from inside a handler* (a modal picker pumping messages
