@@ -4,6 +4,7 @@
 //! whole binary at link time.
 
 use std::ffi::c_void;
+use std::sync::OnceLock;
 
 use crate::dxgi::abi::{AdapterVt, ContextVt, DeviceVt, FactoryVt};
 use crate::dxgi::com::Com;
@@ -15,9 +16,13 @@ use crate::dxgi::structs::{Guid, IDXGI_FACTORY1, S_OK};
 
 #[link(name = "kernel32")]
 unsafe extern "system" {
-    fn LoadLibraryW(file_name: *const u16) -> *mut c_void;
+    fn LoadLibraryExW(file_name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
     fn GetProcAddress(module: *mut c_void, proc_name: *const u8) -> *mut c_void;
 }
+
+/// `LOAD_LIBRARY_SEARCH_SYSTEM32` (libloaderapi.h): resolve only from
+/// the system directory, never from the working directory or `PATH`.
+const LOAD_LIBRARY_SEARCH_SYSTEM32: u32 = 0x0000_0800;
 
 const DXGI_DLL: &[u16] = &[
     0x64, 0x78, 0x67, 0x69, 0x2E, 0x64, 0x6C, 0x6C, 0x0, // dxgi.dll
@@ -29,6 +34,12 @@ const FACTORY1_PROC: &[u8] = b"CreateDXGIFactory1\0";
 const DEVICE_PROC: &[u8] = b"D3D11CreateDevice\0";
 const FACTORY_LABEL: &str = "dxgi";
 const DEVICE_LABEL: &str = "d3d11";
+
+/// Loaded modules, cached so a recording's session rebuilds do not leak
+/// another library reference on every attempt. Stored as integers because
+/// a raw pointer is not `Sync`; each handle lives until process exit.
+static DXGI_MODULE: OnceLock<usize> = OnceLock::new();
+static D3D11_MODULE: OnceLock<usize> = OnceLock::new();
 
 /// `D3D_DRIVER_TYPE_UNKNOWN`: mandatory when an adapter is passed.
 const DRIVER_UNKNOWN: u32 = 0;
@@ -77,7 +88,7 @@ impl ProcError {
 /// # Errors
 /// Fails when the library cannot load or the call returns a failure code.
 pub fn spawn_factory() -> Result<Com<FactoryVt>, ProcError> {
-    let module = load(DXGI_DLL, FACTORY_LABEL)?;
+    let module = load(&DXGI_MODULE, DXGI_DLL, FACTORY_LABEL)?;
     // SAFETY: the arguments below name an export this module always has.
     let raw = unsafe { proc(module, FACTORY1_PROC) };
     // SAFETY: `raw` is a live code address; the signature is dxgi.h's
@@ -99,7 +110,7 @@ pub fn spawn_factory() -> Result<Com<FactoryVt>, ProcError> {
 pub fn spawn_device(
     adapter: &Com<AdapterVt>,
 ) -> Result<(Com<DeviceVt>, Com<ContextVt>), ProcError> {
-    let module = load(D3D11_DLL, DEVICE_LABEL)?;
+    let module = load(&D3D11_MODULE, D3D11_DLL, DEVICE_LABEL)?;
     // SAFETY: the arguments below name an export this module always has.
     let raw = unsafe { proc(module, DEVICE_PROC) };
     // SAFETY: `raw` is a live code address; the signature is d3d11.h's
@@ -129,13 +140,28 @@ pub fn spawn_device(
     Ok((Com::own(device), Com::own(context)))
 }
 
-fn load(library: &[u16], name: &'static str) -> Result<*mut c_void, ProcError> {
-    // SAFETY: `library` is a NUL-terminated wide string literal.
-    let module = unsafe { LoadLibraryW(library.as_ptr()) };
-    if module.is_null() {
+fn load(
+    cache: &'static OnceLock<usize>,
+    library: &[u16],
+    name: &'static str,
+) -> Result<*mut c_void, ProcError> {
+    let module = *cache.get_or_init(|| {
+        // SAFETY: `library` is a NUL-terminated wide string literal; null
+        // selects the caller's process token and the flags pin the lookup
+        // to the system directory.
+        let raw = unsafe {
+            LoadLibraryExW(
+                library.as_ptr(),
+                std::ptr::null_mut(),
+                LOAD_LIBRARY_SEARCH_SYSTEM32,
+            )
+        };
+        raw as usize
+    });
+    if module == 0 {
         return Err(ProcError::Missing(name));
     }
-    Ok(module)
+    Ok(module as *mut c_void)
 }
 
 /// Fetch one export from an already-open module.
@@ -154,4 +180,19 @@ unsafe fn proc(module: *mut c_void, name: &[u8]) -> *mut c_void {
         std::process::abort();
     }
     entry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DXGI_DLL, DXGI_MODULE, FACTORY_LABEL, load};
+
+    /// The system loader is cached: the second call must answer the same
+    /// module instead of opening another reference.
+    #[test]
+    fn the_graphics_module_is_loaded_once() {
+        let first =
+            load(&DXGI_MODULE, DXGI_DLL, FACTORY_LABEL).expect("dxgi.dll exists on Windows");
+        let second = load(&DXGI_MODULE, DXGI_DLL, FACTORY_LABEL).expect("the cached dxgi.dll");
+        assert_eq!(first, second);
+    }
 }

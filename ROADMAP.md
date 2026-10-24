@@ -1110,6 +1110,30 @@ Plan of record, in build order. Every session ends with
 - [x] Tag `v0.1.0` and publish the unsigned `screencapture-setup.exe` plus its
   SHA-256 checksum.
 
+## Session 30 - Icon coverage, safety audit, and v0.1.1
+
+- [x] Icon coverage completed and guarded: the Windows ICO carries
+  16/24/32/48/64/128/256, the macOS ICNS carries every `icp4`-`ic14` slot
+  (1x and @2x), and Linux hicolor PNGs cover 16-512 including the new 24px
+  entry. `tests/icons.rs` parses every shipped asset and fails a release that
+  drops a scale.
+- [x] The Windows setup and uninstaller now use `assets/icon.ico`; the
+  uninstall registry values are quoted so paths with spaces stay intact.
+- [x] Safety/security audit fixes:
+  - CoreGraphics, CoreFoundation, and libX11 surfaces are cached in
+    `OnceLock`, so repeated window-list/capture setup no longer leaks a
+    `dlopen` reference per call.
+  - DXGI and D3D11 load only from System32 through `LoadLibraryExW` and cache
+    the module handle, closing a working-directory/PATH DLL-preload path.
+  - Windows FFmpeg discovery no longer falls back to a bare `ffmpeg.exe`
+    resolved through `PATH`; the shipped and explicit paths remain.
+  - Capture names are reserved atomically with `create_new`, removing the
+    same-second overwrite race between processes; failed starts remove the
+    placeholder instead of leaving an empty file.
+- [x] Gates: fmt, pedantic clippy native and six cross targets, 135 unit tests
+  plus 3 icon integration tests. Release build, installer, and CLI smoke.
+- [x] Tag `v0.1.1` and publish the rebuilt setup plus its SHA-256 checksum.
+
 ## Deferred backlog
 
 - numbered display names via `EnumDisplayDevices`; mac multi-display

@@ -28,19 +28,23 @@ pub(super) fn take_photo(loaded: &Loaded, region: Region) -> io::Result<Photo> {
     std::fs::create_dir_all(&loaded.settings.image_dir)?;
     let target = Target::new(region, loaded.settings.cursor)?;
     let frame = target.frame()?;
-    let path = clock::stamped_path(&loaded.settings.image_dir, "png");
+    let path = clock::stamped_path(&loaded.settings.image_dir, "png")?;
     let stream = Stream {
         width: region.width,
         height: region.height,
         fps: 1,
     };
-    let mut feed = pipe::Feed::spawn(
-        &binary,
-        &pipe::still_args(stream, loaded.settings.photo_depth, &path),
-        &path,
-    )?;
-    feed.frame(frame)?;
-    feed.finish()?;
+    let args = pipe::still_args(stream, loaded.settings.photo_depth, &path);
+    let encoded = pipe::Feed::spawn(&binary, &args, &path).and_then(|mut feed| {
+        feed.frame(frame)?;
+        feed.finish()
+    });
+    if let Err(error) = encoded {
+        // The name was reserved with an empty file; a failed encode must
+        // not leave that placeholder behind.
+        let _ = std::fs::remove_file(&path);
+        return Err(error);
+    }
     let clipboard = attach_clipboard(&path, region, frame);
     Ok(Photo {
         path,

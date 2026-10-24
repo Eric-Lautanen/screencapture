@@ -7,7 +7,8 @@ use std::ffi::c_void;
 
 use super::ffi::{Hicon, IDI_APPLICATION, LoadIconW};
 
-/// The packed multi-size icon produced by `tools/gen_icon.rs`.
+/// The packed multi-size icon shipped in `assets/icon.ico`; its SVG
+/// master is `assets/icon.svg`.
 static ICON: &[u8] = include_bytes!("../../../assets/icon.ico");
 
 #[link(name = "user32")]
@@ -98,7 +99,8 @@ fn entry(data: &[u8], index: usize) -> Option<Entry> {
     })
 }
 
-/// The 32px entry, else the nearest one, else the first plausible image.
+/// The entry closest to the preferred tray size; `None` when the file
+/// has no usable entry or its directory points outside the data.
 fn select_entry(data: &[u8]) -> Option<&[u8]> {
     let total = count(data)?;
     let chosen = (0..total)

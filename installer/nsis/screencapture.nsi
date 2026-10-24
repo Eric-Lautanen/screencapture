@@ -20,8 +20,8 @@ ManifestDPIAware true
 !define APPNAME "Screencapture"
 !define COMPANY "Eric"
 !define EXENAME "screencapture.exe"
-!define VERSION "0.1.0"
-!define VERSIONNUM "0.1.0.0"
+!define VERSION "0.1.1"
+!define VERSIONNUM "0.1.1.0"
 !define DESC "Professional 4K screen recorder and still-image capture."
 
 !include "MUI2.nsh"
@@ -33,6 +33,9 @@ InstallDir "$PROGRAMFILES64\${APPNAME}"
 InstallDirRegKey HKCU "Software\${APPNAME}" "InstallDir"
 RequestExecutionLevel admin
 
+Icon "${ROOT}\assets\icon.ico"
+UninstallIcon "${ROOT}\assets\icon.ico"
+
 VIProductVersion "${VERSIONNUM}"
 VIAddVersionKey /LANG=1033 "ProductName" "${APPNAME}"
 VIAddVersionKey /LANG=1033 "ProductVersion" "${VERSION}"
@@ -42,6 +45,8 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright 2026 the screencapture au
 
 ; ── Pages ────────────────────────────────────────────────────────────────
 !define MUI_ABORTWARNING
+!define MUI_ICON "${ROOT}\assets\icon.ico"
+!define MUI_UNICON "${ROOT}\assets\icon.ico"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\${EXENAME}"
 !define MUI_FINISHPAGE_RUN_TEXT "Launch ${APPNAME} now"
 !insertmacro MUI_PAGE_WELCOME
@@ -85,9 +90,9 @@ Section "Install"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
         "Publisher" "${COMPANY}"
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
-        "DisplayIcon" "$INSTDIR\${EXENAME}"
+        "DisplayIcon" "$\"$INSTDIR\${EXENAME}$\""
     WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
-        "UninstallString" "$INSTDIR\uninstall.exe"
+        "UninstallString" "$\"$INSTDIR\uninstall.exe$\""
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
         "NoModify" 1
     WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \

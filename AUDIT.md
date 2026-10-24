@@ -442,3 +442,52 @@ reported the GDI blit path. The record/photo smokes wrote their outputs
 and the record log carried both the captured-frame/measured-fps line and
 the ffprobe encoded count. These are real runs, not inferred from the
 build.
+
+## 8. Post-v0.1.0 safety and security pass (Session 30)
+
+Scope: FFI module lifetime, native library and engine loading, output-file
+naming, installer registry strings, and the shipped icon assets. No
+high-severity memory-corruption issue was found in the reviewed paths.
+
+Fixed in this pass:
+
+- **Module reference leaks.** `CoreGraphics::Api::load`,
+  `CoreFoundation::Api::load`, and `xlib::Api::load` resolved and then
+  `mem::forget`-ed a new `dlopen` handle on every construction. Each surface
+  is now cached in a `OnceLock` and copied, so window-list enumeration and
+  repeated frame setup share one loaded module instead of leaking a reference
+  per call.
+- **DLL preload path.** DXGI and D3D11 were loaded by bare name, which lets
+  the Windows loader search the current directory before System32. Both now
+  use `LoadLibraryExW(..., LOAD_LIBRARY_SEARCH_SYSTEM32)`, and the handle is
+  cached once for the process.
+- **Engine search path.** Windows `ffmpeg` discovery ended with a bare
+  `ffmpeg.exe` candidate, so `Command::new` could launch a stray binary from
+  the working directory or `PATH`. That fallback is now Unix-only; Windows
+  uses the explicit configured path, the install directory, or the developer
+  `vendor/ffmpeg` layout.
+- **Output-name race.** `clock::stamped_path` checked `Path::exists` and then
+  returned the name, leaving a same-second window where two processes could
+  choose the same file. The name is now reserved with `create_new` in a
+  bounded retry loop. A failed recorder or photo start removes the empty
+  placeholder.
+- **Installer strings.** `DisplayIcon` and `UninstallString` are now quoted
+  registry values, and setup/uninstall use `assets/icon.ico` instead of the
+  generic NSIS icon.
+
+Reviewed and left as-is:
+
+- `pipe::Feed` closes stdin, then kills and waits an unfinished child on drop;
+  `finish` has a size-scaled deadline and kills a wedged engine.
+- Clipboard DIB construction checks row/stride multiplication and frame
+  length before copying, and every `GlobalAlloc` refusal or handover failure
+  frees the block.
+- DXGI frame transactions release on every `?` path after `AcquireNextFrame`,
+  and `Recorder` bounds the stop wait instead of joining a wedged worker.
+- Settings persistence writes a temporary file and renames it, with tests for
+  the no-temporary-left case.
+
+Residual limitations: macOS and Linux capture paths remain header-verified
+and cross-compiled, not live-run on that hardware; GitHub's read-only
+`refs/pull/*` objects from the earlier history rewrite cannot be purged
+without repository recreation or GitHub Support.

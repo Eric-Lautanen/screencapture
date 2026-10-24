@@ -7,6 +7,7 @@ use crate::pin_layout;
 use std::ffi::{c_char, c_int, c_ulong, c_void};
 use std::io;
 use std::mem;
+use std::sync::OnceLock;
 
 use crate::dylib;
 
@@ -149,6 +150,8 @@ pub struct ImageRequest {
 /// `libX11` exports usable by both the capture backend and the screen
 /// module. Loading resolves every symbol up front, so a running X server
 /// with a crippled libX11 fails at construction instead of mid-frame.
+/// The process-wide copy is loaded once and shared.
+#[derive(Clone, Copy)]
 pub struct Api {
     /// `XOpenDisplay`.
     pub open_display: OpenDisplayProc,
@@ -172,15 +175,23 @@ pub struct Api {
     pub translate_coordinates: TranslateProc,
 }
 
+/// The one loaded X11 surface; repeated lookups share it.
+static API: OnceLock<Api> = OnceLock::new();
+
 impl Api {
-    /// Load `libX11` and resolve every export. The library handle is
-    /// parked loaded for the process lifetime (same policy as the
-    /// Windows dxgi loader), so the resolved pointers stay valid.
+    /// Load `libX11` and resolve every export, once per process. The
+    /// library handle is parked loaded for the process lifetime (same
+    /// policy as the Windows dxgi loader), so the resolved pointers stay
+    /// valid. Later calls return the cached copy instead of leaking a new
+    /// `dlopen` reference on every frame.
     ///
     /// # Errors
     /// The library is absent (no X environment installed) or dropped an
     /// expected export.
     pub fn load() -> io::Result<Self> {
+        if let Some(api) = API.get() {
+            return Ok(*api);
+        }
         let library = dylib::Library::open(LIBRARY)?;
         let api = Self {
             // SAFETY: each export exists in libX11 with exactly the
@@ -201,6 +212,11 @@ impl Api {
         // the Windows dxgi loader; closing it would invalidate the
         // function pointers above.
         std::mem::forget(library);
+        // A concurrent loader may have won the cache race; its copy is
+        // just as valid, and the extra library reference stays parked.
+        if API.set(api).is_ok() {
+            return Ok(API.get().copied().unwrap_or(api));
+        }
         Ok(api)
     }
 
