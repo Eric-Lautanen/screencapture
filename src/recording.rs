@@ -18,10 +18,13 @@ pub struct Profile {
     pub quality: u8,
 }
 
-/// The built-in default profile (4K @ 60 fps); indexes [`Profile::PROFILES`].
-/// The test below pins that index to the `uhd-4k60` id, so adding profiles
-/// cannot silently move the default.
-pub const DEFAULT: Profile = Profile::PROFILES[7];
+/// The built-in default profile (1080p @ 60 fps); indexes
+/// [`Profile::PROFILES`]. The test below pins that index to the
+/// `hd-1080p60` id, so adding profiles cannot silently move the default.
+/// 1080p60 is the default because it is the largest tier that plays back
+/// smoothly on ordinary hardware and still holds a full desktop's detail;
+/// 4K stays one menu choice away for displays that need it.
+pub const DEFAULT: Profile = Profile::PROFILES[4];
 
 impl Profile {
     /// All built-in profiles, smallest first. The ladder trades pixel size
@@ -123,6 +126,14 @@ impl Profile {
             return (self.width, self.height);
         }
         let (max_width, max_height) = (u64::from(self.width), u64::from(self.height));
+        // A profile is a ceiling, never a target: a capture smaller than the
+        // box keeps its own pixels. Blowing a 1920x1200 screen up to
+        // 3456x2160 adds no detail and multiplies both the encoding and the
+        // decoding cost, which is how a perfectly good recording turns into
+        // one that stutters on a 4K60 playback pipeline.
+        if width <= max_width && height <= max_height {
+            return (even(width), even(height));
+        }
         // Decide which edge caps first by cross multiplication, so the
         // choice is exact instead of depending on rounded ratios.
         let (output_width, output_height) = if max_width * height <= max_height * width {
@@ -161,7 +172,7 @@ mod tests {
 
     #[test]
     fn default_matches_an_indexed_profile() {
-        assert_eq!(DEFAULT.id, "uhd-4k60");
+        assert_eq!(DEFAULT.id, "hd-1080p60");
         assert!(Profile::by_id(DEFAULT.id).is_some());
     }
 
@@ -193,14 +204,31 @@ mod tests {
         assert_eq!(hd.fit((2560, 1440)), (1280, 720));
         // Wider than 16:9: the width caps first and the height follows.
         assert_eq!(hd.fit((1920, 800)), (1280, 532));
-        // Smaller captures are still raised to the profile box.
-        assert_eq!(hd.fit((586, 493)), (856, 720));
+        // Smaller captures keep their own pixels: the profile caps, it
+        // does not upscale.
+        assert_eq!(hd.fit((586, 493)), (586, 492));
+        assert_eq!(hd.fit((1280, 720)), (1280, 720));
         // Odd captures cannot produce odd frames.
         let (width, height) = hd.fit((1439, 899));
         assert_eq!((width % 2, height % 2), (0, 0));
         assert_eq!(height, 720);
         // A nonsense size falls back to the nominal frame.
         assert_eq!(hd.fit((0, 0)), (1280, 720));
+    }
+
+    /// The 4K profile on this machine's 16:10 screen used to produce a
+    /// 3456x2160 file from a 1920x1200 capture — four times the pixels to
+    /// encode and decode, with no detail to show for it.
+    #[test]
+    fn a_4k_profile_does_not_upscale_a_smaller_screen() {
+        let uhd = Profile::by_id("uhd-4k60").expect("profile exists");
+        assert_eq!(uhd.fit((1920, 1200)), (1920, 1200));
+        assert_eq!(uhd.fit((1918, 1150)), (1918, 1150));
+        // A window smaller than the box stays its own size too.
+        assert_eq!(uhd.fit((800, 600)), (800, 600));
+        // A capture that really is larger is still capped at the profile.
+        assert_eq!(uhd.fit((3840, 2160)), (3840, 2160));
+        assert_eq!(uhd.fit((5120, 2880)), (3840, 2160));
     }
 
     #[test]

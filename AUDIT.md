@@ -260,7 +260,7 @@ pipeline redesign, not a patch.
 | Scenario | Behavior today | Verdict |
 |---|---|---|
 | 0 monitors | `screen::primary` → `io::Error("no display is attached")` (`screen/mod.rs:41-50`); `--check` reports no duplication; tray menus still open | Clean error; settings dialog shows one fake display entry (`attached_count().max(1)`, `rows.rs:243`) |
-| 1×1 screen/region | `Region::is_sane` accepts it; GDI allocates a 1×1 DIB; profile `scale` upscales to 4K | Works; quality is whatever `scale` does |
+| 1×1 screen/region | `Region::is_sane` accepts it; GDI allocates a 1×1 DIB; `Profile::fit` keeps the 1×1 frame rather than upscaling it | Works; the output is a 1×1 clip |
 | Full-screen UWP app | picker uses `WindowFromPoint` + `GetAncestor(GA_ROOT)` + DWM extended bounds (`window_picker.rs:319-374`); clamping to the virtual desktop (`screen/win.rs:129-143`) | Common case works; UWP/CoreWindow virtualized bounds unverified (no hardware) |
 | Maximized window spanning the virtual desktop | `visible_region` clamps each edge to `SM_*VIRTUALSCREEN`; width/height from i64 subtraction | Correct; tray `sane_region` then caps each edge at 7680 without moving the origin (silent crop on >7680-wide walls) |
 | Folded-out (auto-hide) taskbar | picker highlights the live DWM bounds under the cursor; hidden taskbar answers whatever is beneath | Reasonable; not live-verified |
@@ -689,15 +689,15 @@ pins the defaults the README documents: `Hotkey::RECORD`/`PHOTO`/`CHIMES`,
   manifest, pinned engine with an integrity record, and a version test that
   guards the four hand-written version spots.
 
-### Observation, not a defect
+### Observation, resolved
 
-`Profile::fit` deliberately raises small captures to the profile box (tested
-at `src/recording.rs:196`), so the shipped 4K60 default turns a 1920x1200
-desktop into a 3456x2160 encode. On the reference machine that measured
-29.5 fps captured against 60 fps written: correct output, half the frames
-fresh. Clamping the upscale, or defaulting to `hd-1080p60` or `uhd-4k30`, is
-a product decision rather than a code fault, but it is the single biggest
-performance lever a default install has.
+`Profile::fit` used to raise small captures to the profile box, so the 4K60
+default turned a 1920x1200 desktop into a 3456x2160 encode: correct output,
+half the frames fresh, and a file that stuttered on playback. Both levers
+have since been pulled — `fit` now caps at the capture's own size instead of
+upscaling, and `hd-1080p60` is the shipped default — so a default install
+records 1920x1200 at 60 fps and writes a fraction of the bits. `uhd-4k60`
+stays one menu choice away for a display that can use it.
 
 Suggested order: D1, D2, D3 (all small, all user-visible); then R2 + C4 + C5
 (one pass over the settings surface); then C1 (mechanical, wide) and C6.

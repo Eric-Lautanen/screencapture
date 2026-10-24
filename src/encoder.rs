@@ -255,7 +255,8 @@ mod tests {
     fn cpu_args_interpolate_profile_quality() {
         for codec in [Video::X264, Video::X265] {
             let args = codec.args(&DEFAULT_PROFILE);
-            assert!(args.contains(&"17".to_owned()), "{codec:?} {args:?}");
+            let quality = DEFAULT_PROFILE.quality.to_string();
+            assert!(args.contains(&quality), "{codec:?} {args:?}");
             assert_eq!(args.contains(&"nv12".to_owned()), codec == Video::QsvH264);
         }
         assert_eq!(Video::DEFAULT.name(), "libx264");

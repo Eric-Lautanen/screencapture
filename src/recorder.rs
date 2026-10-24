@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use crate::audio;
 use crate::capture::{Region, Target};
 use crate::clock;
 #[cfg(windows)]
@@ -103,6 +104,23 @@ pub struct Plan {
     /// The clicked window whose own content is recorded, instead of the
     /// desktop rectangle that frame sits in. `None` records the screen.
     pub window: Option<usize>,
+    /// Which audio sources to record alongside the frames.
+    pub audio: audio::Wanted,
+}
+
+/// What one recording's capture loop owns: the frame source, the engine
+/// pipe, the pace, the clock the audio track shares, and the audio worker.
+struct Session {
+    /// Frames to grab from.
+    source: Source,
+    /// The engine reading them.
+    feed: Feed,
+    /// Frame-rate ceiling from the profile.
+    fps: u32,
+    /// The clock the frames — and the mixed audio — are paced by.
+    started: Instant,
+    /// The audio worker, `None` for a silent recording.
+    sound: Option<audio::Audio>,
 }
 
 /// Frame counts the worker publishes for the reporting path.
@@ -180,22 +198,12 @@ impl Recorder {
         // that path needs; the CLI and tray paths must behave alike.
         std::fs::create_dir_all(&plan.media_dir)?;
         let output = clock::stamped_path(&plan.media_dir, plan.codec.extension())?;
-        let args = pipe::record_args(
-            Stream {
-                width: plan.size.0,
-                height: plan.size.1,
-                fps: plan.profile.fps,
-            },
-            &plan.codec.args(&plan.profile),
-            scale_for(plan),
-            &output,
-        );
 
         let stop = Arc::new(AtomicBool::new(false));
         let counters = Arc::new(Counters::default());
         let failure = Arc::new(Mutex::new(None));
         let (ready, started) = mpsc::channel();
-        let setup = (binary.clone(), plan.clone(), region, args, output.clone());
+        let setup = (binary.clone(), plan.clone(), region, output.clone());
         let worker = {
             let stop = Arc::clone(&stop);
             let counters = Arc::clone(&counters);
@@ -203,9 +211,13 @@ impl Recorder {
             thread::Builder::new()
                 .name("capture".into())
                 .spawn(move || {
-                    let (binary, plan, region, args, output) = setup;
+                    let (binary, plan, region, output) = setup;
                     // Everything thread-touching is built here, so no
-                    // capture handle ever crosses a thread boundary.
+                    // capture handle ever crosses a thread boundary, and the
+                    // audio sources are opened on the thread that will poll
+                    // them.
+                    let prepared = audio::Prepared::open(plan.audio);
+                    let args = engine_args(&plan, &output, prepared.as_ref());
                     let opened = pick_source(&region, &plan).and_then(|source| {
                         Feed::spawn(&binary, &args, &output).map(|feed| (source, feed))
                     });
@@ -216,10 +228,37 @@ impl Recorder {
                             return Err(error);
                         }
                     };
+                    // One clock for the whole file: the audio worker counts
+                    // from the instant the first frame is due, so the time
+                    // it spends connecting becomes silence at the head of
+                    // the track instead of a shift against the picture.
+                    let started = Instant::now();
+                    let sound =
+                        prepared.and_then(|prepared| match audio::start(prepared, started) {
+                            Ok(sound) => Some(sound),
+                            Err(error) => {
+                                crate::log::note(
+                                    "audio",
+                                    &format!("audio capture could not start ({error})"),
+                                );
+                                None
+                            }
+                        });
                     if ready.send(Ok(())).is_err() {
                         return Ok(());
                     }
-                    capture_loop(source, feed, plan.profile.fps, &stop, &counters, &failure)
+                    capture_loop(
+                        Session {
+                            source,
+                            feed,
+                            fps: plan.profile.fps,
+                            started,
+                            sound,
+                        },
+                        &stop,
+                        &counters,
+                        &failure,
+                    )
                 })
         };
         let worker = match worker {
@@ -377,16 +416,20 @@ impl Drop for Recorder {
 /// recorded at 60 fps still plays back in real time (it just repeats
 /// frames instead of running fast).
 fn capture_loop(
-    mut source: Source,
-    mut feed: Feed,
-    fps: u32,
+    session: Session,
     stop: &AtomicBool,
     counters: &Counters,
     failure: &Mutex<Option<String>>,
 ) -> io::Result<()> {
+    let Session {
+        mut source,
+        mut feed,
+        fps,
+        started,
+        sound,
+    } = session;
     let _timer = FastTimer::begin();
     let fps = fps.max(1);
-    let started = Instant::now();
     let mut written: u64 = 0;
     let mut grabbed: u64 = 0;
     let result = loop {
@@ -427,6 +470,11 @@ fn capture_loop(
         && let Ok(mut slot) = failure.lock()
     {
         *slot = Some(error.to_string());
+    }
+    // Audio first: stopping the worker closes its pipe, which is how the
+    // engine learns the sound ended while it still has video stdin open.
+    if let Some(sound) = sound {
+        sound.stop();
     }
     // Closing stdin lets a healthy engine flush the container; the
     // finished file is what the caller reports on either way.
@@ -521,6 +569,25 @@ fn pick_source(region: &Region, plan: &Plan) -> io::Result<Source> {
     }
 }
 
+/// The engine's argument vector for one plan: raw frames on stdin, plus the
+/// mixed audio pipe as a second input when the recording has sound.
+fn engine_args(plan: &Plan, output: &Path, sound: Option<&audio::Prepared>) -> Vec<String> {
+    pipe::record_args(
+        Stream {
+            width: plan.size.0,
+            height: plan.size.1,
+            fps: plan.profile.fps,
+        },
+        &plan.codec.args(&plan.profile),
+        scale_for(plan),
+        output,
+        sound.map(|prepared| pipe::Sound {
+            path: prepared.path(),
+            bitrate: plan.audio.quality.bitrate(),
+        }),
+    )
+}
+
 /// The output frame whenever it differs from the capture.
 ///
 /// The engine input stream stays at capture resolution for fidelity; ffmpeg
@@ -543,7 +610,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    fn scales_only_when_sizes_differ() {
+    fn scales_only_to_fit_the_profile() {
         let equal = Plan {
             origin: (0, 0),
             size: (3840, 2160),
@@ -552,13 +619,21 @@ mod tests {
             cursor: false,
             media_dir: PathBuf::new(),
             window: None,
+            audio: crate::audio::Wanted::default(),
         };
         assert_eq!(scale_for(&equal), None);
+        // A capture inside the profile keeps its own pixels: the profile
+        // caps the output, it never invents detail by upscaling.
         let smaller = Plan {
             size: (1920, 1080),
             ..equal
         };
-        assert_eq!(scale_for(&smaller), Some((3840, 2160)));
+        assert_eq!(scale_for(&smaller), None);
+        let larger = Plan {
+            size: (5120, 2880),
+            ..smaller
+        };
+        assert_eq!(scale_for(&larger), Some((3840, 2160)));
     }
 
     #[test]
@@ -571,6 +646,7 @@ mod tests {
             cursor: false,
             media_dir: PathBuf::new(),
             window: None,
+            audio: crate::audio::Wanted::default(),
         };
         // 16:10 through a 16:9 profile: full height, no letterbox bars.
         assert_eq!(scale_for(&plan), Some((1152, 720)));
@@ -651,6 +727,7 @@ mod tests {
             cursor: false,
             media_dir: PathBuf::new(),
             window: Some(0x1234),
+            audio: crate::audio::Wanted::default(),
         };
         let display = crate::capture::Region {
             x: 0,
@@ -684,6 +761,7 @@ mod tests {
             cursor: false,
             media_dir: PathBuf::new(),
             window: None,
+            audio: crate::audio::Wanted::default(),
         };
         let region = crate::capture::Region {
             x: 10,

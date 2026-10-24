@@ -34,7 +34,7 @@ pub fn check(config: Option<&Path>) -> ExitCode {
     }
 }
 
-/// `--init`: write the default settings document when nothing exists.
+/// `--init`: write the commented settings template when nothing exists.
 pub fn init_config(config: Option<&Path>) -> ExitCode {
     let loaded = settings::load(config);
     let Some(path) = loaded.path.as_deref() else {
@@ -55,7 +55,7 @@ pub fn init_config(config: Option<&Path>) -> ExitCode {
     for problem in &loaded.problems {
         eprintln!("warn  settings: {problem}");
     }
-    match loaded.document.persist(path) {
+    match settings::write_template(path) {
         Ok(()) => {
             println!("{OK_TAG}settings: wrote {}", path.display());
             ExitCode::SUCCESS
@@ -95,6 +95,12 @@ fn check_settings(config: Option<&Path>) -> bool {
     println!("        videos:  {}", settings.video_dir.display());
     println!("        images:  {}", settings.image_dir.display());
     println!("        codec:   {}", settings.codec.name());
+    println!(
+        "        audio:   system={} mic={} quality={}",
+        settings.audio.system,
+        settings.audio.mic,
+        settings.audio.quality.label()
+    );
     println!("        photo:   {}-bit PNG", settings.photo_depth);
     check_display_choice(settings.display);
     println!(

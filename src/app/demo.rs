@@ -111,15 +111,17 @@ fn demo_recording(
         // command line never hands the recorder a window handle of its own,
         // so `Window` mode records that window's rectangle.
         window: None,
+        audio: loaded.settings.audio,
     };
     let recorder = Recorder::start(&binary, &plan)?;
     crate::log::note(
         "record",
         &format!(
-            "{} ({} @ {} fps)",
+            "{} ({} @ {} fps, {})",
             recorder.output.display(),
             super::size_note(region, loaded.settings.profile),
             loaded.settings.profile.fps,
+            loaded.settings.audio.describe(),
         ),
     );
     // The recorder paces its own frames on its worker thread; the command

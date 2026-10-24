@@ -320,6 +320,7 @@ fn a_recording_of_a_covered_window_holds_its_own_content() {
         cursor: false,
         media_dir: folder.clone(),
         window: Some(target.handle),
+        audio: crate::audio::Wanted::default(),
     };
     let recorder = match Recorder::start(&binary, &plan) {
         Ok(recorder) => recorder,

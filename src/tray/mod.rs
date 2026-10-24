@@ -101,6 +101,18 @@ pub fn stop_requested() {
     win::post_stop();
 }
 
+/// Show a warning balloon in the tray. A capture that fails before it
+/// starts is otherwise silent: the log lives next to the videos, and a
+/// border that never appears tells the user nothing.
+pub fn warn(title: &str, message: &str) {
+    #[cfg(windows)]
+    win::warn(title, message);
+    #[cfg(not(windows))]
+    {
+        let _ = (title, message);
+    }
+}
+
 /// Keep the tray's quick mute entry in step with the settings: called at
 /// startup, after a Settings save, and by the toggle itself.
 pub fn set_chimes(enabled: bool) {

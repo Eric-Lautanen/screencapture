@@ -15,11 +15,13 @@ use super::ffi::{
     WS_EX_DLGMODALFRAME, WS_SYSMENU,
 };
 
-/// The designed client area: fits the grouped layout in `rows` with a
-/// consistent margin and the button row at the bottom.
-pub(super) const CLIENT_W: i32 = 490;
+/// The designed client area: the two grouped columns in `rows` side by
+/// side, the full-width bands beneath them, and the button row at the
+/// bottom. Wide and short on purpose: a settings sheet that fits a 1366x768
+/// laptop at its native scale instead of shrinking the text.
+pub(super) const CLIENT_W: i32 = 728;
 /// See [`CLIENT_W`].
-pub(super) const CLIENT_H: i32 = 676;
+pub(super) const CLIENT_H: i32 = 541;
 
 /// Smallest layout percent the dialog shrinks to: below this the labels
 /// stop being readable, so a display that still cannot fit the dialog
@@ -269,12 +271,12 @@ mod tests {
     fn the_layout_shrinks_to_the_available_height() {
         use super::{CLIENT_H, CLIENT_W, percent_that_fits};
 
-        assert_eq!(percent_that_fits(CLIENT_H, 900), 133);
+        assert_eq!(percent_that_fits(CLIENT_H, 900), 166);
         // A 768-high display minus a taskbar and the frame leaves ~690.
-        assert_eq!(percent_that_fits(CLIENT_H, 690), 102);
+        assert_eq!(percent_that_fits(CLIENT_H, 690), 127);
         // A 600-high netbook cannot show the design at 100%.
-        assert_eq!(percent_that_fits(CLIENT_H, 540), 79);
-        assert_eq!(percent_that_fits(CLIENT_W, 480), 97);
+        assert_eq!(percent_that_fits(CLIENT_H, 540), 99);
+        assert_eq!(percent_that_fits(CLIENT_W, 780), 107);
     }
 
     /// Whatever the display reports, the dialog's own scale answer stays
@@ -289,23 +291,27 @@ mod tests {
         }
     }
 
-    /// Real displays: a 768-high laptop at 125% has to shrink to 100% to
-    /// keep Save on screen; a 600-high netbook shrinks further; a large
-    /// desktop keeps its DPI scale untouched.
+    /// Real displays: the short design keeps its DPI scale on an ordinary
+    /// laptop and a high-DPI desktop; only a small netbook is shrunk.
     #[test]
     fn small_displays_shrink_the_layout_to_fit() {
         use super::fit_percent;
 
-        // 1366x768 at 125%: 728-high work area, 39-pixel caption.
-        assert_eq!(fit_percent(1366, 728, 16, 39, 125), 100);
-        // 1024x600 at 125%: the design only fits shrunk.
-        assert_eq!(fit_percent(1024, 560, 16, 39, 125), 75);
-        // 1920x1080 at 150%: trim a little rather than overflow.
-        assert_eq!(fit_percent(1920, 1032, 16, 39, 150), 145);
+        // 1366x768 at 125%: 728-high work area, 39-pixel caption. The
+        // wide layout fits at the display's own scale.
+        assert_eq!(fit_percent(1366, 728, 16, 39, 125), 125);
+        // 1024x600 at 125%: the height only fits shrunk.
+        assert_eq!(fit_percent(1024, 560, 16, 39, 125), 94);
+        // 1920x1080 at 150%: nothing to trim either way.
+        assert_eq!(fit_percent(1920, 1032, 16, 39, 150), 150);
         // 2560x1440 at 100%: nothing to do.
         assert_eq!(fit_percent(2560, 1400, 16, 39, 100), 100);
-        // An absurdly small display stops at the readable floor.
-        assert_eq!(fit_percent(800, 400, 16, 39, 100), 55);
+        // A 720p television: still full scale.
+        assert_eq!(fit_percent(1280, 680, 16, 39, 100), 100);
+        // A tiny display shrinks by its height; an absurdly small one
+        // stops at the readable floor.
+        assert_eq!(fit_percent(800, 400, 16, 39, 100), 64);
+        assert_eq!(fit_percent(640, 320, 16, 39, 100), 55);
     }
 
     #[test]
