@@ -8,9 +8,11 @@ use std::io;
 
 use crate::capture::Region;
 use crate::winapi::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetModuleHandleW, Hcursor, Hdc, Hinstance,
-    Hwnd, Lparam, Lresult, Rect, RegisterClassExW, WndClassExW, Wparam,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, Hcursor, Hdc, Hinstance, Hwnd, Lparam, Lresult,
+    Rect, RegisterClassExW, WndClassExW, Wparam,
 };
+
+pub(super) use crate::winapi::{kept_wide, module_handle, wide};
 
 mod crosshair;
 mod stop;
@@ -245,12 +247,17 @@ impl Drop for Border {
 }
 
 /// Register a border window class; repeats answer "already registered".
+///
+/// The name buffer is kept for the process lifetime: `RegisterClassExW`
+/// stores the pointer rather than a copy, so a stack buffer would dangle as
+/// soon as this returns and the OS would read freed memory whenever the
+/// class is looked up or unregistered.
 fn register_border_class(
     instance: Hinstance,
-    name: &str,
+    name: &'static str,
     wnd_proc: unsafe extern "system" fn(Hwnd, u32, Wparam, Lparam) -> Lresult,
 ) {
-    let name = wide(name);
+    let name = kept_wide(name);
     let class = WndClassExW {
         size: u32::try_from(std::mem::size_of::<WndClassExW>()).expect("class size fits u32"),
         style: 0,
@@ -262,10 +269,11 @@ fn register_border_class(
         cursor: std::ptr::null_mut(),
         background: std::ptr::null_mut(),
         menu_name: std::ptr::null(),
-        class_name: name.as_ptr(),
+        class_name: name,
         icon_small: std::ptr::null_mut(),
     };
-    // SAFETY: the class struct and its wide string live through the call.
+    // SAFETY: the class struct is a fully initialized local and the name
+    // buffer outlives the registration.
     unsafe {
         RegisterClassExW(&raw const class);
     }
@@ -478,15 +486,4 @@ pub(super) fn selection_dots(width: i32, height: i32) -> Vec<(Rect, bool)> {
         y += SELECTION_PITCH;
     }
     dots
-}
-
-/// UTF-16 string with a trailing nul for Win32 calls.
-pub(super) fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-/// This module's instance handle for window plumbing.
-pub(super) fn module_handle() -> Hinstance {
-    // SAFETY: null resolves this executable.
-    unsafe { GetModuleHandleW(std::ptr::null()) }
 }

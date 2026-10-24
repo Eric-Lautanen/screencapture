@@ -13,7 +13,8 @@ use super::{
     HWND_TOPMOST, InvalidateRect, LWA_COLORKEY, SWP_NOACTIVATE, SWP_SHOWWINDOW,
     SetLayeredWindowAttributes, SetWindowDisplayAffinity, SetWindowPos, UpdateWindow,
     WDA_EXCLUDEFROMCAPTURE, WM_ERASEBKGND, WM_PAINT, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE, module_handle, wide,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP, WS_VISIBLE, kept_wide,
+    module_handle, wide,
 };
 
 const CROSSHAIR_CLASS: &str = "screencapture.picker.crosshair";
@@ -210,8 +211,11 @@ pub(super) fn crosshair_segments(size: i32, gap: i32, thickness: i32) -> Vec<Rec
 }
 
 /// Register the crosshair class; repeats answer "already registered".
+///
+/// The name buffer stays alive for the process lifetime: the class table
+/// keeps the pointer, not a copy, so a local buffer would dangle.
 fn register_crosshair_class(instance: Hinstance) {
-    let name = wide(CROSSHAIR_CLASS);
+    let name = kept_wide(CROSSHAIR_CLASS);
     let class = WndClassExW {
         size: u32::try_from(std::mem::size_of::<WndClassExW>()).expect("class size fits u32"),
         style: 0,
@@ -223,10 +227,11 @@ fn register_crosshair_class(instance: Hinstance) {
         cursor: std::ptr::null_mut(),
         background: std::ptr::null_mut(),
         menu_name: std::ptr::null(),
-        class_name: name.as_ptr(),
+        class_name: name,
         icon_small: std::ptr::null_mut(),
     };
-    // SAFETY: the class struct and its wide string live through the call.
+    // SAFETY: the class struct is a fully initialized local and the name
+    // buffer outlives the registration.
     unsafe {
         RegisterClassExW(&raw const class);
     }

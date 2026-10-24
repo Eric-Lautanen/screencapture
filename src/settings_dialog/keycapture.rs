@@ -14,7 +14,7 @@ use std::cell::RefCell;
 
 use crate::guard::Hook;
 use crate::settings::Hotkey;
-use crate::winapi::{DefWindowProcW, GetModuleHandleW, Hinstance, Hwnd, Lparam, Lresult, Wparam};
+use crate::winapi::{DefWindowProcW, Hwnd, Lparam, Lresult, Wparam};
 
 use super::ffi::{
     CallWindowProcW, GWLP_WNDPROC, GetFocus, GetKeyState, GetWindowTextLengthW, GetWindowTextW,
@@ -22,7 +22,7 @@ use super::ffi::{
     WM_LBUTTONDOWN, WM_PASTE, WM_SETFOCUS, WM_SYSCHAR, WM_SYSKEYDOWN, WM_SYSKEYUP,
 };
 use super::fields::edit_text;
-use super::{DIALOG, wide, wide_to_string};
+use super::{DIALOG, module_handle, wide, wide_to_string};
 
 /// `WH_KEYBOARD_LL` (winuser.h): the low-level keyboard hook.
 const KEYBOARD_HOOK: i32 = 13;
@@ -468,11 +468,6 @@ fn seed_for(handle: Hwnd) -> String {
             .map(|field| field.seed.clone())
             .unwrap_or_default()
     })
-}
-
-fn module_handle() -> Hinstance {
-    // SAFETY: null resolves this executable.
-    unsafe { GetModuleHandleW(std::ptr::null()) }
 }
 
 #[cfg(test)]

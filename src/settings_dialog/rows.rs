@@ -9,7 +9,7 @@ use crate::encoder::Video;
 use crate::recording::Profile;
 use crate::screen;
 use crate::settings::{CaptureMode, Settings, StillDepth};
-use crate::winapi::{CreateWindowExW, GetModuleHandleW, Hinstance, Hwnd, Lparam, Wparam};
+use crate::winapi::{CreateWindowExW, Hwnd, Lparam, Wparam};
 
 use super::ffi::{
     BM_SETCHECK, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_GROUPBOX, BS_PUSHBUTTON, CB_ADDSTRING,
@@ -21,7 +21,7 @@ use super::frame::scaled;
 use super::{
     CHECK_AUTOSTART, CHECK_CHIMES, CHECK_CURSOR, COMBO_CODEC, COMBO_DEPTH, COMBO_DISPLAY,
     COMBO_MODE, COMBO_PROFILE, DIALOG, EDIT_CHIMES, EDIT_IMAGES, EDIT_PHOTO, EDIT_RECORD,
-    EDIT_VIDEOS, wide,
+    EDIT_VIDEOS, module_handle, wide,
 };
 
 /// Row margin inside a group box, and the two aligned columns.
@@ -466,9 +466,12 @@ fn create_child(
         )
     };
     if handle.is_null() {
-        eprintln!(
-            "settings: cannot create {class_name} control {id}: {}",
-            std::io::Error::last_os_error()
+        crate::log::note(
+            "settings",
+            &format!(
+                "cannot create {class_name} control {id}: {}",
+                std::io::Error::last_os_error()
+            ),
         );
         return None;
     }
@@ -480,12 +483,6 @@ fn create_child(
     }
     DIALOG.with_borrow_mut(|dialog| dialog.children.push(handle));
     Some(handle)
-}
-
-/// This module's instance handle for window plumbing.
-fn module_handle() -> Hinstance {
-    // SAFETY: null resolves this executable.
-    unsafe { GetModuleHandleW(std::ptr::null()) }
 }
 
 #[cfg(test)]

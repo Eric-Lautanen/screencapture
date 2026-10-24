@@ -21,12 +21,13 @@ use super::{Error, Event};
 use crate::hotkeys::{Binding, MOD_NOREPEAT, combo_modifiers};
 use crate::recording::Profile;
 use crate::settings::Hotkey;
+use crate::winapi::{kept_wide, module_handle, wide};
 
 /// Tray notification callback message id (custom to this window).
 const TRAY_CALLBACK: u32 = WM_USER + 1;
 /// Tray icon identifier within this process.
 const TRAY_ID: u32 = 1;
-/// Class name for the hidden message window (leaked to the OS).
+/// Class name for the hidden message window (kept for the OS).
 const CLASS_NAME: &str = "ScreencaptureTray";
 /// Title for the hidden message window.
 const WINDOW_NAME: &str = "Screencapture";
@@ -61,16 +62,6 @@ thread_local! {
 
 type Handler = Option<Box<dyn FnMut(Event)>>;
 
-/// UTF-16 string with a trailing nul for Win32 calls.
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-/// Leak a UTF-16 string so Win32 can hold it indefinitely (class name).
-fn static_wide(text: &str) -> *const u16 {
-    Box::leak(wide(text).into_boxed_slice()).as_ptr()
-}
-
 /// Enter the tray loop; returns when the icon is removed.
 ///
 /// # Errors
@@ -82,7 +73,7 @@ where
     HANDLER.with(|slot| *slot.borrow_mut() = Some(Box::new(handler)));
     BINDINGS.with(|slot| *slot.borrow_mut() = bindings.to_vec());
 
-    let class_name = static_wide(CLASS_NAME);
+    let class_name = kept_wide(CLASS_NAME);
     let instance = module_handle();
     let class = WndClassExW {
         size: u32::try_from(std::mem::size_of::<WndClassExW>()).expect("class struct fits u32"),
@@ -243,11 +234,6 @@ fn unregister_hotkeys(window: Hwnd) {
         // SAFETY: symmetric teardown of the registration made at startup.
         unsafe { UnregisterHotKey(window, binding.id) };
     }
-}
-
-fn module_handle() -> *mut std::ffi::c_void {
-    // SAFETY: passing a null module name resolves the executable module.
-    unsafe { self::ffi::GetModuleHandleW(std::ptr::null()) }
 }
 
 fn create_hidden_window(
