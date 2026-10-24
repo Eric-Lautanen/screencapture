@@ -105,8 +105,24 @@ fn check_settings(config: Option<&Path>) -> bool {
             .map_or_else(|| "bundled".to_owned(), |path| path.display().to_string())
     );
     println!("        autostart os-level: {}", autostart::registered());
+    println!("        chime:   {}", chime_status(settings.chimes));
     check_log_file(&loaded.settings.video_dir);
     loaded.problems.is_empty()
+}
+
+/// Where the confirmation chime goes, and whether this machine can play it
+/// at all. A silent capture on a fresh machine is usually zero output
+/// devices (a VM, a remote session, or a disabled audio service), which the
+/// settings themselves can never show.
+fn chime_status(enabled: bool) -> String {
+    if !enabled {
+        return "muted in settings".to_owned();
+    }
+    match crate::sound::output_devices() {
+        Some(0) => "no audio output device; captures will be silent".to_owned(),
+        Some(count) => format!("{count} output device(s)"),
+        None => "not available on this platform".to_owned(),
+    }
 }
 
 /// Report attached displays and whether the configured Full-mode display
