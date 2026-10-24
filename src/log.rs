@@ -43,8 +43,9 @@ impl Ring {
 
 static RING: Mutex<Ring> = Mutex::new(Ring::new());
 
-/// A timed diagnostic line: printed when a console exists, always kept
-/// in the ring. `message` stays plain prose; the tag leads every line.
+/// A timed diagnostic line: written to stderr and always kept in the
+/// ring so `flush_to` can persist it to disk. `message` stays plain prose;
+/// the tag leads every line.
 pub fn note(tag: &str, message: &str) {
     let line = format!("{} {}: {}", crate::clock::stamp(), tag, message);
     eprintln!("{tag}: {message}");
