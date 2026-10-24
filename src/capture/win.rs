@@ -3,6 +3,9 @@
 //! bitmap. This is the slow-but-always-available Windows path behind
 //! desktop duplication.
 
+use crate::guard::ScreenDc;
+use crate::pin_layout;
+use crate::winapi::{Bool, Hdc};
 use std::ffi::c_void;
 use std::io;
 
@@ -14,9 +17,7 @@ const BI_RGB: u32 = 0;
 const DIB_RGB_COLORS: u32 = 0;
 const CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
 
-type Hdc = *mut c_void;
 type Hbitmap = *mut c_void;
-type Bool = i32;
 
 #[link(name = "user32")]
 unsafe extern "system" {
@@ -65,11 +66,20 @@ struct BitmapInfoHeader {
     colors_important: u32,
 }
 
+// `BITMAPINFOHEADER` pins at its wingdi.h size of 40 tail-to-toe.
+pin_layout!(BitmapInfoHeader, 40; size = 0, width = 4, height = 8,
+    planes = 12, bit_count = 14, compression = 16, size_image = 20,
+    pixels_per_meter_x = 24, pixels_per_meter_y = 28, colors_used = 32,
+    colors_important = 36);
+
 #[repr(C)]
 struct BitmapInfo {
     header: BitmapInfoHeader,
     colors: [u32; 1],
 }
+
+// `BITMAPINFO` = header + the one-entry palette the struct type promises.
+pin_layout!(BitmapInfo, 44; header = 0, colors = 40);
 
 /// Opt into per-monitor DPI awareness so screen coordinates are physical
 /// pixels; call once at startup, before any geometry work.
@@ -82,7 +92,9 @@ pub fn prepare_dpi() {
 /// One GDI capture backend bound to one region.
 pub struct Backend {
     region: Region,
-    screen_dc: Hdc,
+    /// Desktop DC borrowed for the backend's lifetime and released by its
+    /// own guard, so no manual `ReleaseDC` can be skipped.
+    screen_dc: ScreenDc,
     memory_dc: Hdc,
     bitmap: Hbitmap,
     previous_bitmap: Hbitmap,
@@ -98,14 +110,10 @@ impl Backend {
     /// # Errors
     /// Fails when any GDI handle for the setup is refused.
     pub fn open(region: Region, include_cursor: bool) -> io::Result<Self> {
-        // SAFETY: null window DC is the screen DC; released in `Drop`.
-        let screen_dc = unsafe { GetDC(std::ptr::null_mut()) };
-        if screen_dc.is_null() {
+        let Some(screen_dc) = ScreenDc::desktop() else {
             return Err(io::Error::other("GetDC for the screen failed"));
-        }
-        let Some(setup) = build_bitmap(screen_dc, region) else {
-            // SAFETY: the screen DC is ours exclusively.
-            let _ = unsafe { ReleaseDC(std::ptr::null_mut(), screen_dc) };
+        };
+        let Some(setup) = build_bitmap(screen_dc.dc(), region) else {
             return Err(io::Error::other("GDI bitmap setup failed"));
         };
         Ok(Self {
@@ -138,7 +146,7 @@ impl Backend {
                 0,
                 width,
                 height,
-                self.screen_dc,
+                self.screen_dc.dc(),
                 self.region.x,
                 self.region.y,
                 self.raster,
@@ -153,12 +161,6 @@ impl Backend {
         }
         Ok(unsafe { std::slice::from_raw_parts(self.bits.cast::<u8>(), len) })
     }
-}
-
-#[link(name = "user32")]
-unsafe extern "system" {
-    fn GetDC(window: *mut c_void) -> Hdc;
-    fn ReleaseDC(window: *mut c_void, dc: Hdc) -> i32;
 }
 
 fn invalid_region(_error: std::num::TryFromIntError) -> io::Error {
@@ -251,8 +253,7 @@ impl Drop for Backend {
             let _ = DeleteObject(self.bitmap);
             let _ = DeleteDC(self.memory_dc);
         }
-        // SAFETY: the screen DC came from our own `GetDC`.
-        unsafe { ReleaseDC(std::ptr::null_mut(), self.screen_dc) };
+        // The screen DC guard releases itself after this `Drop` body.
     }
 }
 

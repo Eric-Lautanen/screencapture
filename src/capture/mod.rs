@@ -78,7 +78,13 @@ impl Target {
 /// are physical pixels; other systems already give physical quanta too.
 pub fn prepare() {
     #[cfg(windows)]
-    win::prepare_dpi();
+    {
+        win::prepare_dpi();
+        // Any earlier process killed mid-pick left the system-wide arrow
+        // slot as a crosshair; reload the user's scheme before doing
+        // anything else with the screen.
+        crate::guard::restore_system_cursors();
+    }
 }
 
 /// Describe the native fast capture path for `--check`: backend label and

@@ -3,6 +3,7 @@
 //! `X.h` out of libX11's tree, which is why the constants come from
 //! `xorgproto/include/X11/X.h`).
 
+use crate::pin_layout;
 use std::ffi::{c_char, c_int, c_ulong, c_void};
 use std::io;
 use std::mem;
@@ -69,6 +70,15 @@ pub struct XImage {
     /// `destroy_image`.
     pub funcs: [*mut c_void; 6],
 }
+
+// Xlib's image record, quad-by-quad through the LP64 layout: four ints,
+// the data pointer, nine more ints, three c_ulong masks forced to their
+// 8-byte alignment, then obdata and the 48-byte function table.
+pin_layout!(XImage, 136; width = 0, height = 4, xoffset = 8, format = 12,
+    data = 16, byte_order = 24, bitmap_unit = 28,
+    bitmap_bit_order = 32, bitmap_pad = 36, depth = 40,
+    bytes_per_line = 44, bits_per_pixel = 48, red_mask = 56,
+    green_mask = 64, blue_mask = 72, obdata = 80, funcs = 88);
 
 type OpenDisplayProc = unsafe extern "C" fn(*const c_char) -> Display;
 type CloseDisplayProc = unsafe extern "C" fn(Display) -> c_int;
