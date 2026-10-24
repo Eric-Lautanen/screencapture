@@ -9,6 +9,7 @@ Click the window you want, drag a rectangle, or take the whole display —<br />
 real-time video in, a finished MP4 or PNG out, no OBS in sight.</p>
 
 <p>
+  <a href="https://github.com/Eric-Lautanen/screencapture/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Eric-Lautanen/screencapture/actions/workflows/ci.yml/badge.svg?branch=main"></a>
   <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%2010%202004%2B%20%7C%2011-0078D6?logo=windows&logoColor=white">
   <img alt="Rust" src="https://img.shields.io/badge/Rust-2024%20edition-000000?logo=rust&logoColor=white">
   <img alt="Dependencies" src="https://img.shields.io/badge/dependencies-0-brightgreen">
