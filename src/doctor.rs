@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use crate::autostart;
 use crate::cli::IDENTITY;
@@ -18,7 +19,11 @@ pub fn check(config: Option<&Path>) -> ExitCode {
     println!();
     healthy &= check_settings(config);
     healthy &= check_engine(config);
-    check_capture();
+    let capture = check_capture();
+    healthy &= capture;
+    if capture {
+        check_throughput();
+    }
     println!();
     if healthy {
         println!("result: ok");
@@ -78,15 +83,19 @@ fn check_settings(config: Option<&Path>) -> bool {
     let settings = &loaded.settings;
     println!("        profile: {}", settings.profile);
     println!(
-        "        hotkeys: record {} / photo {}",
-        settings.hotkey, settings.photo
+        "        hotkeys: record {} / photo {} / chimes {}",
+        settings.hotkey.to_combo(),
+        settings.photo.to_combo(),
+        settings.chime_hotkey.to_combo()
     );
     println!(
-        "        runtime: autostart={} cursor={}",
-        settings.autostart, settings.cursor
+        "        runtime: autostart={} cursor={} chimes={}",
+        settings.autostart, settings.cursor, settings.chimes
     );
-    println!("        media:   {}", settings.media_dir.display());
+    println!("        videos:  {}", settings.video_dir.display());
+    println!("        images:  {}", settings.image_dir.display());
     println!("        codec:   {}", settings.codec.name());
+    println!("        photo:   {}-bit PNG", settings.photo_depth);
     check_display_choice(settings.display);
     println!(
         "        engine:  {}",
@@ -96,7 +105,7 @@ fn check_settings(config: Option<&Path>) -> bool {
             .map_or_else(|| "bundled".to_owned(), |path| path.display().to_string())
     );
     println!("        autostart os-level: {}", autostart::registered());
-    check_log_file(&loaded.settings.media_dir);
+    check_log_file(&loaded.settings.video_dir);
     loaded.problems.is_empty()
 }
 
@@ -127,7 +136,7 @@ fn check_display_choice(choice: settings::DisplayChoice) {
 /// `--check` (non-fatal: hardware misses keep x264). The configured
 /// codec is marked so the demotion in the settings file is discoverable.
 fn report_codecs(binary: &ffmpeg::Binary, loaded: &settings::Loaded) {
-    let mut variants = vec![crate::encoder::Video::X264];
+    let mut variants = vec![crate::encoder::Video::X264, crate::encoder::Video::X265];
     variants.extend(crate::encoder::Video::hardware());
     let profile = &loaded.settings.profile;
     for variant in variants {
@@ -208,8 +217,7 @@ fn check_engine_integrity(binary: &ffmpeg::Binary) -> bool {
     let record = binary.path.with_file_name("engine.sha256");
     match std::fs::read_to_string(&record) {
         Ok(recorded) => {
-            let expected = recorded.trim();
-            if expected.len() >= 64 && expected[..64] == actual_hex {
+            if digest_matches(&recorded, &actual_hex) {
                 println!("{OK_TAG}engine integrity: {}..", &actual_hex[..8]);
                 true
             } else {
@@ -237,6 +245,13 @@ fn check_engine_integrity(binary: &ffmpeg::Binary) -> bool {
     }
 }
 
+/// Whether the record's first 64 bytes are the digest hex. Byte comparison
+/// keeps a corrupted, multibyte record from panicking on a char boundary.
+fn digest_matches(recorded: &str, actual_hex: &str) -> bool {
+    let recorded = recorded.trim().as_bytes();
+    recorded.len() >= 64 && &recorded[..64] == actual_hex.as_bytes()
+}
+
 /// Hash a file in 1 MiB chunks; `None` on any read/IO failure.
 fn file_digest(path: &Path) -> Option<[u8; 32]> {
     use std::io::Read;
@@ -256,7 +271,7 @@ fn file_digest(path: &Path) -> Option<[u8; 32]> {
 /// compositor cooperates, which is the fast 4K path. A miss is not an
 /// unhealthy install; the GDI fallback records everything, just slower.
 #[cfg(windows)]
-fn check_capture() {
+fn check_capture() -> bool {
     match crate::dxgi::probe() {
         Ok((width, height)) => {
             println!("{OK_TAG}capture: desktop duplication ({width}x{height})");
@@ -265,18 +280,109 @@ fn check_capture() {
             println!("        capture: GDI fallback only ({reason})");
         }
     }
+    // Duplication is an optimization here; GDI records everything.
+    true
 }
 
 /// Capture-backends line outside Windows: the native compositor or server
 /// backend IS the fast path, so its absence is an unhealthy install.
 #[cfg(not(windows))]
-fn check_capture() {
+fn check_capture() -> bool {
     match crate::capture::probe() {
         Ok((label, width, height)) => {
             println!("{OK_TAG}capture: {label} ({width}x{height})");
+            true
         }
         Err(reason) => {
             println!("{FAIL_TAG}capture: {reason}");
+            false
         }
+    }
+}
+
+/// Frames in the throughput sample; enough to average timer noise without
+/// making `--check` slow on a 4K desktop.
+const TIMED_FRAMES: u32 = 6;
+
+/// Measure one short capture burst through the fastest available backend
+/// and print real numbers. A refusal (locked desktop, no compositor) is
+/// informational: the install is still healthy, it just cannot be measured.
+fn check_throughput() {
+    let Ok(display) = crate::screen::primary() else {
+        println!("timing: no display available to measure");
+        return;
+    };
+    let region = crate::capture::Region {
+        x: display.x,
+        y: display.y,
+        width: display.width,
+        height: display.height,
+    };
+    // Duplication's idle path reuses its last frame without touching the
+    // GPU, so timing it would report a fictional rate. The blit backend
+    // copies every pixel on every frame and is the honest baseline here;
+    // duplication throughput is reported from real recordings by the
+    // recorder's measured-fps log line.
+    let measured = crate::capture::Target::new(region, false)
+        .ok()
+        .and_then(|target| measure(TIMED_FRAMES, || target.frame().map(|_| ())));
+    let label = if cfg!(windows) {
+        "GDI blit"
+    } else {
+        "native backend"
+    };
+    report_timing(label, measured);
+}
+
+/// Run `grab` up to `frames` times and time the successful ones.
+fn measure<F>(frames: u32, mut grab: F) -> Option<(u32, Duration)>
+where
+    F: FnMut() -> std::io::Result<()>,
+{
+    let started = Instant::now();
+    let mut captured = 0;
+    for _ in 0..frames {
+        if grab().is_err() {
+            break;
+        }
+        captured += 1;
+    }
+    (captured > 0).then(|| (captured, started.elapsed()))
+}
+
+fn report_timing(label: &str, measured: Option<(u32, Duration)>) {
+    match measured {
+        Some((frames, elapsed)) => {
+            let seconds = elapsed.as_secs_f64();
+            let fps = if seconds > 0.0 {
+                f64::from(frames) / seconds
+            } else {
+                0.0
+            };
+            let per_frame = if frames == 0 {
+                0.0
+            } else {
+                seconds * 1_000.0 / f64::from(frames)
+            };
+            println!(
+                "timing: {label}: {frames} frames in {seconds:.3} s ({fps:.1} fps, {per_frame:.2} ms/frame)"
+            );
+        }
+        None => println!("timing: {label}: no frame captured (locked desktop or refused backend)"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::digest_matches;
+
+    #[test]
+    fn digest_records_compare_bytes() {
+        let digest = "a".repeat(64);
+        assert!(digest_matches(&format!("{digest}\n"), &digest));
+        assert!(!digest_matches(&digest[..63], &digest));
+        // A multibyte record must mismatch, not panic on a char boundary.
+        let corrupt = format!("{}{}", "é".repeat(32), "x".repeat(10));
+        assert!(!digest_matches(&corrupt, &digest));
     }
 }

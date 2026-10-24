@@ -3,6 +3,26 @@
 //! One stamp per file; local-time conversion arrives with the settings
 //! surface for it. The calendar math is Howard Hinnant's civil algorithm.
 
+use std::path::{Path, PathBuf};
+
+/// Fresh stamped file path inside `media_dir`; appends `-2`, `-3`, ... on
+/// same-second clashes so back-to-back captures never overwrite each other.
+#[must_use]
+pub fn stamped_path(media_dir: &Path, ext: &str) -> PathBuf {
+    stamped_path_for(media_dir, &stamp(), ext)
+}
+
+fn stamped_path_for(media_dir: &Path, stamp: &str, ext: &str) -> PathBuf {
+    let stem = format!("screencapture-{stamp}");
+    let mut path = media_dir.join(format!("{stem}.{ext}"));
+    let mut counter = 1;
+    while path.exists() {
+        counter += 1;
+        path = media_dir.join(format!("{stem}-{counter}.{ext}"));
+    }
+    path
+}
+
 /// Stamp of "now", UTC, in `YYYYMMDD-HHMMSS` form.
 #[must_use]
 pub fn stamp() -> String {
@@ -50,7 +70,21 @@ fn civil_from_days(days: u64) -> (i64, u32, u32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{civil_from_days, from_epoch};
+    use super::{civil_from_days, from_epoch, stamped_path_for};
+
+    #[test]
+    fn same_second_captures_never_overwrite_each_other() {
+        let dir =
+            std::env::temp_dir().join(format!("screencapture-stamp-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let first = stamped_path_for(&dir, "20261020-120000", "mp4");
+        assert_eq!(first, dir.join("screencapture-20261020-120000.mp4"));
+        std::fs::write(&first, b"clip").expect("write first");
+        let second = stamped_path_for(&dir, "20261020-120000", "mp4");
+        assert_eq!(second, dir.join("screencapture-20261020-120000-2.mp4"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn epoch_day_zero_is_unix_epoch() {
