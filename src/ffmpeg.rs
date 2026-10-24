@@ -4,6 +4,7 @@ use std::env;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 
 use crate::recording::Profile;
 
@@ -41,6 +42,28 @@ impl Binary {
         Ok(text.lines().next().unwrap_or("").trim().to_owned())
     }
 
+    /// [`Self::supports_encoder`], remembered for the rest of the process.
+    /// The test is a full synthetic encode and costs hundreds of
+    /// milliseconds on a cold engine, which is far too long to pay in the
+    /// middle of starting a recording; an accelerator that passed once on
+    /// this machine will pass again, and a settings change to a different
+    /// codec asks a different question.
+    #[must_use]
+    pub fn supports_encoder_cached(&self, video: crate::encoder::Video, profile: &Profile) -> bool {
+        if let Ok(probes) = ANSWERS.lock()
+            && let Some(answer) = probes.iter().find_map(|(path, id, answer)| {
+                (path == &self.path && *id == video.id()).then_some(*answer)
+            })
+        {
+            return answer;
+        }
+        let answer = self.supports_encoder(video, profile);
+        if let Ok(mut probes) = ANSWERS.lock() {
+            probes.push((self.path.clone(), video.id(), answer));
+        }
+        answer
+    }
+
     /// True when the engine can complete a short synthetic encode with
     /// `video`'s exact argument set: an accelerator is present, the driver
     /// loads, and every tuner option is accepted. Hardware choices run
@@ -69,6 +92,10 @@ impl Binary {
         matches!(status, Ok(status) if status.success())
     }
 }
+
+/// Encoder probes already answered in this process: engine path, codec
+/// id, and the answer.
+static ANSWERS: Mutex<Vec<(PathBuf, &'static str, bool)>> = Mutex::new(Vec::new());
 
 /// Search configured, bundled, and system locations and return the first
 /// usable engine.
