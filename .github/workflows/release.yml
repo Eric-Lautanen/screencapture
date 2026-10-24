@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   release:
-    name: build, sign, publish
+    name: build and publish
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
@@ -44,7 +44,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "tag $env:TAG is not on main" }
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
 
-      - name: Require SignPath configuration
+      - name: Decide whether to sign
+        id: signing
         shell: pwsh
         env:
           SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -53,6 +54,8 @@ jobs:
           SIGNPATH_SIGNING_POLICY_SLUG: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG }}
           SIGNPATH_APP_ARTIFACT_CONFIGURATION_SLUG: ${{ vars.SIGNPATH_APP_ARTIFACT_CONFIGURATION_SLUG }}
           SIGNPATH_INSTALLER_ARTIFACT_CONFIGURATION_SLUG: ${{ vars.SIGNPATH_INSTALLER_ARTIFACT_CONFIGURATION_SLUG }}
+          ALLOW_UNSIGNED_TAG: ${{ vars.ALLOW_UNSIGNED_TAG }}
+          TAG: ${{ github.ref_name }}
         run: |
           $ErrorActionPreference = 'Stop'
           $missing = @()
@@ -62,9 +65,17 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:SIGNPATH_SIGNING_POLICY_SLUG)) { $missing += 'SIGNPATH_SIGNING_POLICY_SLUG variable' }
           if ([string]::IsNullOrWhiteSpace($env:SIGNPATH_APP_ARTIFACT_CONFIGURATION_SLUG)) { $missing += 'SIGNPATH_APP_ARTIFACT_CONFIGURATION_SLUG variable' }
           if ([string]::IsNullOrWhiteSpace($env:SIGNPATH_INSTALLER_ARTIFACT_CONFIGURATION_SLUG)) { $missing += 'SIGNPATH_INSTALLER_ARTIFACT_CONFIGURATION_SLUG variable' }
-          if ($missing.Count -gt 0) {
-              throw "SignPath is not configured; missing $($missing -join ', '). See docs/SIGNING.md."
+          if ($missing.Count -eq 0) {
+              Write-Host 'SignPath is configured; this release will be signed.'
+              Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'sign=true'
+              exit 0
           }
+          if ($env:ALLOW_UNSIGNED_TAG -eq $env:TAG) {
+              Write-Host "::warning::Publishing $env:TAG unsigned; missing $($missing -join ', '). Allowed because ALLOW_UNSIGNED_TAG is $env:TAG."
+              Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value 'sign=false'
+              exit 0
+          }
+          throw "SignPath is not configured; missing $($missing -join ', '). Set ALLOW_UNSIGNED_TAG=$env:TAG to publish this tag unsigned, or finish onboarding in docs/SIGNING.md."
 
       - name: Install the stable toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -164,7 +175,7 @@ jobs:
           }
           Remove-Item -LiteralPath installer/screencapture-setup.exe -Force
 
-      - name: Stage the unsigned application
+      - name: Stage the application
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -173,6 +184,7 @@ jobs:
 
       - name: Upload the unsigned application
         id: upload-app
+        if: steps.signing.outputs.sign == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: screencapture-app-${{ github.run_id }}-${{ github.run_attempt }}
@@ -181,6 +193,7 @@ jobs:
           retention-days: 1
 
       - name: Sign the application
+        if: steps.signing.outputs.sign == 'true'
         uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -197,6 +210,7 @@ jobs:
             version: ${{ toJSON(steps.version.outputs.version) }}
 
       - name: Install and verify the signed application
+        if: steps.signing.outputs.sign == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -207,7 +221,7 @@ jobs:
           Copy-Item -LiteralPath $signed.FullName -Destination dist/screencapture.exe -Force
           & ./scripts/verify-signature.ps1 -Path dist/screencapture.exe
 
-      - name: Build the installer around the signed application
+      - name: Build the installer
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -221,6 +235,7 @@ jobs:
 
       - name: Upload the unsigned installer
         id: upload-installer
+        if: steps.signing.outputs.sign == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: screencapture-installer-${{ github.run_id }}-${{ github.run_attempt }}
@@ -229,6 +244,7 @@ jobs:
           retention-days: 1
 
       - name: Sign the installer
+        if: steps.signing.outputs.sign == 'true'
         uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
@@ -244,7 +260,8 @@ jobs:
           parameters: |
             version: ${{ toJSON(steps.version.outputs.version) }}
 
-      - name: Verify the signed installer and versions
+      - name: Install the signed installer
+        if: steps.signing.outputs.sign == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -252,10 +269,21 @@ jobs:
               Select-Object -First 1
           if ($null -eq $signed) { throw 'SignPath returned no signed screencapture-setup.exe' }
           Copy-Item -LiteralPath $signed.FullName -Destination dist/screencapture-setup.exe -Force
+
+      - name: Verify the Authenticode signatures
+        if: steps.signing.outputs.sign == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
           & ./scripts/verify-signature.ps1 -Path @(
               'dist/screencapture.exe'
               'dist/screencapture-setup.exe'
           )
+
+      - name: Check the release versions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
           $version = "${{ steps.version.outputs.version }}"
           foreach ($file in @('dist/screencapture.exe', 'dist/screencapture-setup.exe')) {
               $info = (Get-Item -LiteralPath $file).VersionInfo
@@ -279,10 +307,10 @@ jobs:
           )
           Get-Content -LiteralPath dist/SHA256SUMS.txt
 
-      - name: Keep the signed artifacts
+      - name: Keep the release artifacts
         uses: actions/upload-artifact@v7
         with:
-          name: screencapture-signed-${{ github.ref_name }}-${{ github.run_attempt }}
+          name: screencapture-release-${{ github.ref_name }}-${{ github.run_attempt }}
           path: dist
           if-no-files-found: error
           retention-days: 30
@@ -293,18 +321,31 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
+          SIGNED: ${{ steps.signing.outputs.sign }}
         run: |
           $ErrorActionPreference = 'Stop'
           $policy = "https://github.com/$env:REPO/blob/$env:TAG/README.md#code-signing-policy"
-          $notes = @(
-              'Windows release binaries in this tag are Authenticode-signed with a certificate issued to SignPath Foundation.'
-              ''
-              '## Code signing policy'
-              ''
-              'Free code signing provided by SignPath.io, certificate by SignPath Foundation. Every signing request is manually approved before this release is published.'
-              ''
-              "[Read the full code signing policy]($policy)"
-          ) -join "`n"
+          $notes = if ($env:SIGNED -eq 'true') {
+              @(
+                  'Windows release binaries in this tag are Authenticode-signed with a certificate issued to SignPath Foundation.'
+                  ''
+                  '## Code signing policy'
+                  ''
+                  'Free code signing provided by SignPath.io, certificate by SignPath Foundation. Every signing request is manually approved before this release is published.'
+                  ''
+                  "[Read the full code signing policy]($policy)"
+              ) -join "`n"
+          } else {
+              @(
+                  'These Windows binaries are **unsigned**: the signing pipeline is committed, but SignPath Foundation onboarding is not complete yet. Check the downloads against `SHA256SUMS.txt`.'
+                  ''
+                  '## Code signing policy'
+                  ''
+                  'Free code signing provided by SignPath.io, certificate by SignPath Foundation. Releases are signed once that onboarding is complete.'
+                  ''
+                  "[Read the full code signing policy]($policy)"
+              ) -join "`n"
+          }
           gh release create $env:TAG `
               dist/screencapture.exe `
               dist/screencapture-setup.exe `
