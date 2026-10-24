@@ -36,18 +36,34 @@ cargo build --release
 
 Verified on this machine with NSIS 3.13 (portable): compile clean,
 output `installer\screencapture-setup.exe` (~122 MB; the engine block
-compresses ~330 MB to ~128 MB). Full interactive install/uninstall
-runs need a GUI session and an elevation prompt; silent runs claim
-admin (`RequestExecutionLevel admin`), so they still need a desktop
-session. CI compiles the script on every push and checks the built
-setup's product version, so a broken or stale script fails long before
-a release tag.
+compresses ~330 MB to ~128 MB). CI compiles the script on every push and
+checks the built setup's product version, so a broken or stale script
+fails long before a release tag.
+
+## Per-user install
+
+The setup asks for no administrator rights (`RequestExecutionLevel user`):
+it installs under `%LOCALAPPDATA%\Programs\Screencapture`, writes Start
+Menu shortcuts for the current account, and records itself in
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall`, so Settings →
+Apps can remove it. Nothing the app does needs elevation: its hotkeys,
+autostart entry and settings are per-user already.
+
+A silent run (`screencapture-setup.exe /S`) needs no desktop session and
+no elevation.
+
+Setups up to 0.1.6 installed for all users under Program Files and wrote
+an HKLM uninstall entry. `.onInit` reads that entry and asks the user to
+uninstall the old copy first, because only an elevated uninstaller can
+remove files from Program Files; the setup cannot do it for them.
 
 ## Notes
 
 - Uninstall keeps user settings and recordings (intentional).
 - Setup and the uninstaller use `assets/icon.ico`; the installed exe carries
   the same multi-size icon as a resource.
+- The remembered install directory lives in `HKCU\Software\Screencapture`,
+  so an upgrade offers the same per-user path.
 - `EstimatedSize` is computed at install time with `${GetSize}`.
 - Releases are built and published by the tag-triggered `Release` workflow;
   the setup ships unsigned beside `SHA256SUMS.txt`.

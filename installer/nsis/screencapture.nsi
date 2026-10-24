@@ -30,9 +30,14 @@ ManifestDPIAware true
 
 Name "${APPNAME} ${VERSION}"
 OutFile "${ROOT}\installer\screencapture-setup.exe"
-InstallDir "$PROGRAMFILES64\${APPNAME}"
+; Per-user install: no administrator prompt, no Program Files, no HKLM.
+; The app needs nothing elevated (its hotkeys, autostart and settings all
+; live in HKCU/%APPDATA%), so the setup should not ask for rights it will
+; never use. `.onInit` still recognises the all-users installs from
+; releases up to 0.1.6 and points their owner at the uninstaller first.
+InstallDir "$LOCALAPPDATA\Programs\${APPNAME}"
 InstallDirRegKey HKCU "Software\${APPNAME}" "InstallDir"
-RequestExecutionLevel admin
+RequestExecutionLevel user
 
 Icon "${ROOT}\assets\icon.ico"
 UninstallIcon "${ROOT}\assets\icon.ico"
@@ -59,9 +64,31 @@ VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright 2026 the screencapture au
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_LANGUAGE "English"
 
+; ── Startup checks ───────────────────────────────────────────────────────
+Function .onInit
+    ; Releases up to 0.1.6 installed for every user under Program Files and
+    ; recorded themselves in HKLM. Neither of those can be replaced from a
+    ; standard account: removing the old copy needs administrator approval.
+    ; Say so, rather than leave two versions installed and two entries in
+    ; Apps & Features. Silent runs cannot answer a prompt, so they continue.
+    ReadRegStr $0 HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" "UninstallString"
+    StrCmp $0 "" done
+    IfSilent done
+    MessageBox MB_ICONEXCLAMATION|MB_OKCANCEL|MB_DEFBUTTON2 \
+        "${APPNAME} is installed for all users under Program Files.$\r$\n$\r$\n\
+         This setup installs for your account only and needs no administrator \
+         rights, so it cannot replace that copy.$\r$\n$\r$\n\
+         Uninstall ${APPNAME} from Settings > Apps first, then run this setup \
+         again. Install anyway?" \
+        IDOK done IDCANCEL quit
+  quit:
+    Quit
+  done:
+FunctionEnd
+
 ; ── Install ──────────────────────────────────────────────────────────────
 Section "Install"
-    SetShellVarContext all
+    SetShellVarContext current
     SetOutPath "$INSTDIR"
 
     File "${ROOT}\target\release\${EXENAME}"
@@ -85,24 +112,24 @@ Section "Install"
     ; directory) is the top of its lookup order after an explicit config.
     WriteRegStr HKCU "Software\${APPNAME}" "InstallDir" "$INSTDIR"
 
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
         "DisplayName" "${APPNAME}"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
         "DisplayVersion" "${VERSION}"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
         "Publisher" "${COMPANY}"
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
         "DisplayIcon" "$\"$INSTDIR\${EXENAME}$\""
-    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
+    WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
         "UninstallString" "$\"$INSTDIR\uninstall.exe$\""
-    WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
+    WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
         "NoModify" 1
-    WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
+    WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
         "NoRepair" 1
     ; Estimated installed size, for the "Programs and Features" column.
     ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
     IntFmt $0 "0x%08X" $0
-    WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
+    WriteRegDWORD HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}" \
         "EstimatedSize" $0
 
     WriteUninstaller "$INSTDIR\uninstall.exe"
@@ -116,7 +143,7 @@ SectionEnd
 
 ; ── Uninstall ────────────────────────────────────────────────────────────
 Section "Uninstall"
-    SetShellVarContext all
+    SetShellVarContext current
     Delete "$INSTDIR\${EXENAME}"
     Delete "$INSTDIR\README.md"
     Delete "$INSTDIR\LICENSE"
@@ -135,6 +162,6 @@ Section "Uninstall"
     RMDir /r "$SMPROGRAMS\${APPNAME}"
     Delete "$DESKTOP\${APPNAME}.lnk"
 
-    DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
+    DeleteRegKey HKCU "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APPNAME}"
     ; User settings and recordings are intentionally kept.
 SectionEnd

@@ -65,6 +65,12 @@ and run it on Windows 10 2004+ or Windows 11. The installer includes the app,
 the FFmpeg engine, the license text, and Start Menu shortcuts. The build is
 unsigned, so SmartScreen may ask for confirmation.
 
+The install is per-user: no administrator prompt, no Program Files. The app
+lands in `%LOCALAPPDATA%\Programs\Screencapture` and uninstalls from
+Settings → Apps. Releases up to 0.1.6 installed for all users; if one of
+those is still on the machine, remove it first — that uninstall is the only
+step left that asks for administrator approval.
+
 ### Windows from source
 
 Requires Rust 1.85+ (edition 2024). Windows PowerShell 5.1 ships with supported
