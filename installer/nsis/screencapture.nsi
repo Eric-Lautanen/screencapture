@@ -50,6 +50,7 @@ Section "Install"
 
     File "${ROOT}\target\release\${EXENAME}"
     File "${ROOT}\README.md"
+    File "${ROOT}\LICENSE"
     File "${ROOT}\docs\FFMPEG-LICENSE.md"
 
     ; The bundled engine travels verbatim with its integrity record.
@@ -97,6 +98,7 @@ Section "Uninstall"
     SetShellVarContext all
     Delete "$INSTDIR\${EXENAME}"
     Delete "$INSTDIR\README.md"
+    Delete "$INSTDIR\LICENSE"
     Delete "$INSTDIR\docs\FFMPEG-LICENSE.md"
     Delete "$INSTDIR\ffmpeg\ffmpeg.exe"
     Delete "$INSTDIR\ffmpeg\ffprobe.exe"

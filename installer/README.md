@@ -19,7 +19,8 @@ uninstall entries.
    is in place.
 3. `docs\FFMPEG-LICENSE.md` records the GPL engine decision and the
    upstream source URL (kept in the payload for the license/source
-   offer).
+   offer); `LICENSE` (Apache-2.0, the app's own license) ships next to
+   `README.md`.
 
 ## Build
 
