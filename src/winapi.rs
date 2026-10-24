@@ -144,6 +144,24 @@ unsafe extern "system" {
     ) -> i32;
 }
 
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    /// Drops this process's console; the window closes when no other
+    /// process is attached to it.
+    pub fn FreeConsole() -> Bool;
+}
+
+/// Detach from the console Windows hands a console-subsystem process, so
+/// the tray application never leaves a terminal window behind and closing
+/// such a window cannot end it. Failures mean there was no console.
+pub fn detach_console() {
+    // SAFETY: no arguments, no pointers, and no state to keep; a false
+    // return only means the process had no console to drop.
+    unsafe {
+        FreeConsole();
+    }
+}
+
 #[link(name = "dwmapi")]
 unsafe extern "system" {
     /// Decoration-aware bounds for highlights and captures; the display

@@ -65,13 +65,26 @@ struct Invocation {
 /// Parse `args` and dispatch; returns the process exit code.
 pub fn run(args: &[String]) -> ExitCode {
     match parse(args) {
-        Ok(invocation) => dispatch(&invocation),
+        Ok(invocation) => {
+            if matches!(invocation.command, Command::Run) {
+                detach_tray_console();
+            }
+            dispatch(&invocation)
+        }
         Err(message) => {
             eprintln!("error: {message}");
             eprintln!("try: screencapture --help");
             ExitCode::FAILURE
         }
     }
+}
+
+/// The binary is a console-subsystem program so `--check` and friends keep
+/// their output; the tray drops that console once it knows it is the tray,
+/// so the installer or Explorer never leaves a terminal window open.
+fn detach_tray_console() {
+    #[cfg(windows)]
+    crate::winapi::detach_console();
 }
 
 fn parse(args: &[String]) -> Result<Invocation, String> {
