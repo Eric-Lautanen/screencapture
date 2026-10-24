@@ -8,14 +8,16 @@ use crate::capture::Region;
 use crate::screen::Display;
 use crate::xlib::{Api, Window};
 
-/// The default root of the default screen.
-///
-/// # Errors
-/// `libX11` is missing or no X server answers.
+/// The default root of the default screen; empty when `libX11` is absent,
+/// no X server answers, or the reported screen is degenerate.
+#[must_use]
 pub fn list() -> Vec<Display> {
     let Some(session) = Session::open() else {
         return Vec::new();
     };
+    if session.extent.0 == 0 || session.extent.1 == 0 {
+        return Vec::new();
+    }
     vec![Display {
         x: 0,
         y: 0,
@@ -58,8 +60,8 @@ impl Drop for Session {
 /// A window's capture region: the client rectangle of the window under
 /// the cursor, translated into root coordinates and clamped to the
 /// root's extent. The window under the desktop itself names the whole
-/// root, matching the Windows desktop-handle answer. `preferred` is a
-/// Windows notion (the tray's focus stash); Linux answers from the
+/// root, matching the Windows desktop-handle answer. `preferred` (a
+/// picked Windows handle) is a Windows notion; Linux answers from the
 /// cursor either way.
 ///
 /// # Errors

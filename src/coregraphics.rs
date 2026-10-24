@@ -1,9 +1,10 @@
 //! CoreGraphics C surface: the framework load, callable signatures, and
-//! display geometry shared by the macOS capture backend and screen module.
-//! Symbols and constants were transcribed from Apple's SDK headers
-//! (`CGBitmapContext.h`, `CGImage.h`, `CGWindow.h`, `CGGeometry.h`,
-//! `CGDirectDisplay.h`).
+//! display geometry shared by the macOS capture backend, screen module,
+//! and window picking. Symbols and constants were transcribed from
+//! Apple's SDK headers (`CGBitmapContext.h`, `CGImage.h`, `CGWindow.h`,
+//! `CGWindowLevel.h`, `CGEvent.h`, `CGGeometry.h`, `CGDirectDisplay.h`).
 
+use crate::pin_layout;
 use std::ffi::c_void;
 use std::io;
 use std::mem;
@@ -49,6 +50,9 @@ pub struct Rect {
     pub size: [f64; 2],
 }
 
+// `CGRect` exactly: two 16-byte halves, origin then size.
+pin_layout!(Rect, 32; origin = 0, size = 16);
+
 type WindowListImageProc = unsafe extern "C" fn(Rect, u32, Id, u32) -> Ref;
 type BitmapContextProc = unsafe extern "C" fn(
     // data (null lets CG allocate); dimensions and row pitch; color
@@ -70,6 +74,10 @@ type ColorSpaceProc = unsafe extern "C" fn() -> Ref;
 type MainDisplayProc = unsafe extern "C" fn() -> Id;
 type DisplayBoundsProc = unsafe extern "C" fn(Id) -> Rect;
 type PixelCountProc = unsafe extern "C" fn(Id) -> usize;
+type WindowListInfoProc = unsafe extern "C" fn(u32, Id) -> Ref;
+type RectFromDictProc = unsafe extern "C" fn(Ref, *mut Rect) -> u8;
+type EventCreateProc = unsafe extern "C" fn(*const c_void) -> Ref;
+type EventLocationProc = unsafe extern "C" fn(Ref) -> [f64; 2];
 
 /// Every export used by the macOS backends; each signature matches the
 /// SDK header exactly. One load per construction, closed on drop.
@@ -106,6 +114,14 @@ pub struct Api {
     pub display_pixels_wide: PixelCountProc,
     /// `CGDisplayPixelsHigh`.
     pub display_pixels_high: PixelCountProc,
+    /// `CGWindowListCopyWindowInfo` (owned array; release with CF).
+    pub window_list_info: WindowListInfoProc,
+    /// `CGRectMakeWithDictionaryRepresentation`.
+    pub rect_from_dict: RectFromDictProc,
+    /// `CGEventCreate` (owned event; release with CF).
+    pub event_create: EventCreateProc,
+    /// `CGEventGetLocation`.
+    pub event_location: EventLocationProc,
 }
 
 impl Api {
@@ -137,6 +153,10 @@ impl Api {
             display_bounds: symbol(&library, b"CGDisplayBounds\0")?,
             display_pixels_wide: symbol(&library, b"CGDisplayPixelsWide\0")?,
             display_pixels_high: symbol(&library, b"CGDisplayPixelsHigh\0")?,
+            window_list_info: symbol(&library, b"CGWindowListCopyWindowInfo\0")?,
+            rect_from_dict: symbol(&library, b"CGRectMakeWithDictionaryRepresentation\0")?,
+            event_create: symbol(&library, b"CGEventCreate\0")?,
+            event_location: symbol(&library, b"CGEventGetLocation\0")?,
         };
         // The handle is parked loaded for the process lifetime, exactly
         // like the Windows dxgi loader; closing it would invalidate the
@@ -285,6 +305,32 @@ impl Api {
     pub fn pixel_width(&self, id: Id) -> usize {
         // SAFETY: a read-only metric for an id the caller owns.
         unsafe { (self.display_pixels_wide)(id) }
+    }
+
+    /// The on-screen window list, front to back, as a raw CoreFoundation
+    /// array handle. Ownership is the Copy rule's: the caller releases it
+    /// with the CoreFoundation surface's [`crate::corefoundation::Api::release`].
+    pub fn window_list(&self) -> Ref {
+        // SAFETY: the arguments are `kCGWindowListOptionOnScreenOnly` and
+        // `kCGNullWindowID` (`o1 << 0` and `0` per CGWindow.h).
+        unsafe { (self.window_list_info)(LIST_ON_SCREEN, WINDOW_ALL) }
+    }
+
+    /// Read one window's bounds dictionary (`kCGWindowBounds`, the rect
+    /// encoding CG documents) as a screen-space rect, or `None` when the
+    /// caller passed no dictionary or the framework refused it.
+    pub fn bounds_value(&self, bounds: Ref) -> Option<Rect> {
+        if bounds.is_null() {
+            return None;
+        }
+        let mut rect = Rect {
+            origin: [0.0; 2],
+            size: [0.0; 2],
+        };
+        // SAFETY: `bounds` is a live CFDictionary of the documented rect
+        // encoding, and the output pointer targets the local above.
+        let ok = unsafe { (self.rect_from_dict)(bounds, &raw mut rect) };
+        (ok != 0).then_some(rect)
     }
 }
 

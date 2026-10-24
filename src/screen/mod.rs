@@ -2,8 +2,8 @@
 //! its displays in physical-pixel semantics (Windows enumerate monitors,
 //! macOS answers the compositor's main display, Linux the default screen
 //! root), and window picking answers per platform: Windows DWM bounds,
-//! Linux the X client rectangle under the cursor, macOS later (needs
-//! the CoreGraphics window-list session).
+//! Linux the X client rectangle under the cursor, macOS the backend
+//! window via the compositor's window list.
 
 use std::io;
 
@@ -14,7 +14,7 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod mac;
 #[cfg(windows)]
-mod win;
+pub(crate) mod win;
 
 /// One attached display: origin plus size in physical pixels.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,9 +53,11 @@ pub fn primary() -> io::Result<Display> {
 /// Returns an error when the number is not currently attached.
 pub fn display_at(number: u32) -> io::Result<Display> {
     let all = displays();
-    let index = usize::try_from(number - 1).unwrap_or(usize::MAX);
+    let Some(index) = number.checked_sub(1) else {
+        return Err(io::Error::other("display numbers start at 1"));
+    };
     all.into_iter()
-        .nth(index)
+        .nth(usize::try_from(index).unwrap_or(usize::MAX))
         .ok_or_else(|| io::Error::other(format!("display {number} is not attached")))
 }
 
@@ -72,9 +74,11 @@ pub fn displays() -> Vec<Display> {
 
 /// A window's capture region: (Windows) DWM extended frame bounds, no
 /// borders or shadows, clamped to the visible desktop; (Linux) the
-/// client rectangle of the window under the cursor. `preferred` names a
-/// window the caller had focused just before a tray menu opened;
-/// otherwise the window under the cursor is used.
+/// client rectangle of the window under the cursor; (macOS) the bounds
+/// of the frontmost application window under the cursor through the
+/// compositor's window list. `preferred` — when given — names the
+/// window handle the picker session chose (Windows pointer bits);
+/// otherwise (and elsewhere) the window under the cursor answers.
 ///
 /// # Errors
 /// Returns an error when no window bounds can be resolved.
@@ -84,12 +88,7 @@ pub fn window_region(preferred: Option<usize>) -> Result<Region, io::Error> {
     #[cfg(target_os = "linux")]
     return linux::window_region(preferred);
     #[cfg(target_os = "macos")]
-    {
-        let _ = preferred;
-        Err(io::Error::other(
-            "macOS window picking lands with the mac capture session",
-        ))
-    }
+    return mac::window_region(preferred);
 }
 
 #[cfg(test)]
@@ -117,5 +116,6 @@ mod tests {
         }
         assert!(display_at(count + 1).is_err());
         assert!(display_at(999).is_err());
+        assert!(display_at(0).is_err());
     }
 }
