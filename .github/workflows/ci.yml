@@ -88,6 +88,16 @@ jobs:
         shell: powershell
         run: ./scripts/fetch-ffmpeg.ps1
 
+      - name: Record the engine integrity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $engine = 'vendor/ffmpeg/ffmpeg.exe'
+          if (-not (Test-Path -LiteralPath $engine)) { throw 'the fetched engine is missing' }
+          $hash = (Get-FileHash -LiteralPath $engine -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath 'vendor/ffmpeg/engine.sha256' -Value $hash
+          Write-Host "engine sha256: $hash"
+
       - name: Build the release executable
         shell: pwsh
         run: |
