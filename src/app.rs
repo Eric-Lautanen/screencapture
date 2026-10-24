@@ -297,13 +297,16 @@ fn display_region(display: screen::Display) -> Selection {
     })
 }
 
-/// The configured display as a capture region (Full mode).
+/// The configured display as a capture region (Full mode). Without a named
+/// display the screen under the pointer is the one recorded, which is what
+/// "here" means to somebody pressing a hotkey on a second monitor.
 fn full_region(loaded: &Loaded, override_display: Option<u32>) -> io::Result<Selection> {
     let which = override_display.map_or(loaded.settings.display, DisplayChoice::Number);
-    which
-        .number()
-        .map_or_else(screen::primary, screen::display_at)
-        .map(display_region)
+    let display = match which.number() {
+        Some(number) => screen::display_at(number)?,
+        None => screen::under_cursor(),
+    };
+    Ok(display_region(display))
 }
 
 /// Begin encoding `selection`, replacing any recording already running.

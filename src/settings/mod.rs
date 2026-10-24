@@ -63,11 +63,11 @@ pub enum CaptureMode {
     Window,
 }
 
-/// Which display a Full capture records: the primary or a numbered one
-/// (1-based, matching the tray's "Display N" menu entries).
+/// Which display a Full capture records: the one the capture starts on,
+/// or a numbered one (1-based).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum DisplayChoice {
-    /// The display at the desktop origin.
+    /// Wherever the pointer is when the capture starts.
     #[default]
     Primary,
     /// A named part of the enumeration order, 1-based.

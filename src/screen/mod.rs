@@ -61,6 +61,50 @@ pub fn display_at(number: u32) -> io::Result<Display> {
         .ok_or_else(|| io::Error::other(format!("display {number} is not attached")))
 }
 
+/// The display the mouse pointer is on, else the primary one.
+///
+/// A capture started from the keyboard has no rectangle and no window to
+/// learn a monitor from, so the pointer is what the user means by "here":
+/// click the other screen, press the hotkey, and that screen is recorded
+/// instead of whichever monitor happens to sit at the desktop origin.
+#[must_use]
+pub fn under_cursor() -> Display {
+    if let Some(point) = cursor() {
+        let all = displays();
+        if let Some(display) = all.iter().find(|display| contains(**display, point)) {
+            return *display;
+        }
+    }
+    primary().unwrap_or(Display {
+        x: 0,
+        y: 0,
+        width: 0,
+        height: 0,
+    })
+}
+
+/// Whether `display` covers `(x, y)`.
+fn contains(display: Display, point: (i32, i32)) -> bool {
+    let width = i32::try_from(display.width).unwrap_or(0);
+    let height = i32::try_from(display.height).unwrap_or(0);
+    point.0 >= display.x
+        && point.0 < display.x.saturating_add(width)
+        && point.1 >= display.y
+        && point.1 < display.y.saturating_add(height)
+}
+
+/// The pointer's desktop position, where the platform can report it.
+fn cursor() -> Option<(i32, i32)> {
+    #[cfg(windows)]
+    {
+        win::cursor_position().map(|point| (point.x, point.y))
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// Every attached display in enumeration order.
 #[must_use]
 pub fn displays() -> Vec<Display> {
