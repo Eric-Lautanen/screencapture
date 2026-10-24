@@ -28,10 +28,12 @@ The Windows engine stays the **GPL build**
   1. ship the license text with the engine (done: the installer copies
      `FFMPEG-LICENSE.md` under `docs\`, and that file points at the engine's
      own license), and
-  2. make the **corresponding source** of that engine available — the
-     upstream build's release page publishes the exact source revision, and
-     the shipped `docs/FFMPEG-LICENSE.md` records the upstream URL. That
-     satisfies the source offer without rebuilding FFmpeg ourselves.
+  2. make the **corresponding source** of that engine available — this
+     build is FFmpeg commit
+     [`669f5ab083c7732c10f1ce9e4f1915960dd88457`](https://github.com/FFmpeg/FFmpeg/commit/669f5ab083c7732c10f1ce9e4f1915960dd88457),
+     built by the [BtbN build scripts](https://github.com/BtbN/FFmpeg-Builds).
+     The shipped `docs/FFMPEG-LICENSE.md` records both URLs, which satisfies
+     the source offer without rebuilding FFmpeg ourselves.
 - The engine integrity record (`engine.sha256`) is shipped alongside so any
   replaced engine fails `--check` loudly instead of shipping silently.
 
