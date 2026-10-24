@@ -4,16 +4,19 @@
 //! `WDA_EXCLUDEFROMCAPTURE` so the chrome never appears in captured frames.
 //!
 //! The recording frame is quiet on purpose: a two-tone hairline that reads
-//! on any content, an accent bracket at each corner, and a slow breath in
-//! the window's own opacity. The breath is a window attribute, not a
-//! repaint, so announcing a live take costs the capture nothing.
+//! on any content, closed into one continuous line all the way round, and a
+//! slow breath in the window's own opacity. The breath is a window
+//! attribute, not a repaint, so announcing a live take costs the capture
+//! nothing.
 
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::io;
+use std::mem::size_of;
 use std::time::{Duration, Instant};
 
 use crate::capture::Region;
+use crate::pin_layout;
 use crate::winapi::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, Hcursor, Hdc, Hinstance, Hwnd, Lparam, Lresult,
     Rect, RegisterClassExW, WndClassExW, Wparam,
@@ -78,18 +81,9 @@ pub(super) const fn rgb(red: u32, green: u32, blue: u32) -> u32 {
 }
 
 // The recording frame's palette: a hairline drawn dark outside and light
-// inside so it reads on any content, and one soft accent at the corners.
+// inside so it reads on any content.
 const FRAME_SHADE: u32 = rgb(0x12, 0x12, 0x16);
 const FRAME_LIGHT: u32 = rgb(0xEC, 0xED, 0xF1);
-const FRAME_ACCENT: u32 = rgb(0xFF, 0x5C, 0x5C);
-/// The corner bracket: a gap from the hairline, then a leg sized from the
-/// frame's shorter side (clamped, so a 4K take and a small window both
-/// read), and its thickness in physical pixels.
-const BRACKET_INSET: i32 = 4;
-const BRACKET_DIV: i32 = 12;
-const BRACKET_MIN: i32 = 20;
-const BRACKET_MAX: i32 = 64;
-const BRACKET_THICK: i32 = 2;
 
 /// The breath: one slow cycle, kept well inside the readable range so the
 /// frame never becomes a stripe and never disappears.
@@ -101,6 +95,143 @@ const BREATH_HIGH: u8 = 216;
 const BREATH_SCALE: u64 = 1024;
 /// The frame's animation timer.
 const BREATH_TIMER: usize = 1;
+/// `DEFAULT_DPI` (wingdi.h): 100% scale.
+const DEFAULT_DPI: u32 = 96;
+
+/// The DPI setting's scale as an integer percentage (100 at 96 DPI) for the
+/// monitor `window` is on.
+///
+/// The process is per-monitor DPI aware, so Windows will not scale these
+/// windows for us: every designed pixel goes through [`scaled`] instead. This
+/// is only half of the answer — [`chrome_percent`] raises it to the panel's
+/// real density — but it is the half that survives a driver that lies about
+/// its size.
+pub(super) fn dpi_percent(window: Hwnd) -> i32 {
+    // SAFETY: parameterless query about a window this process owns.
+    let dpi = unsafe { GetDpiForWindow(window) };
+    let dpi = if dpi == 0 { DEFAULT_DPI } else { dpi };
+    let dpi = i32::try_from(dpi).unwrap_or(i32::try_from(DEFAULT_DPI).unwrap_or(96));
+    (dpi * 100 / 96).clamp(100, 400)
+}
+
+/// One designed pixel value at `percent` scale, rounded to nearest.
+pub(super) const fn scaled(value: i32, percent: i32) -> i32 {
+    (value * percent + 50) / 100
+}
+
+/// `HORZSIZE` and `HORZRES` (wingdi.h): a display's width in millimetres and
+/// in pixels, the pair that gives a panel's real pixels per inch.
+const HORZSIZE: i32 = 4;
+const HORZRES: i32 = 8;
+/// `MONITOR_DEFAULTTONEAREST` (winuser.h): the display the window is on.
+const MONITOR_DEFAULTTONEAREST: u32 = 2;
+/// The pill's smallest physical width: 24 mm, which is exactly what the
+/// designed 96-pixel pill measures on a 100 PPI panel and what it was drawn to
+/// feel like under the pointer.
+const MIN_PILL_MM: i32 = 24;
+/// Plausible physical density, in tenths of a dot per inch: 36 to 320 DPI.
+/// A driver outside that range is reporting something that is not this
+/// panel's size, and obeying it would make the chrome enormous.
+const MIN_DPI_X10: i64 = 360;
+const MAX_DPI_X10: i64 = 3200;
+
+/// `MONITORINFOEXW` (winuser.h): the display's bounds and its device name —
+/// the name `CreateDCW` needs before `GetDeviceCaps` answers for that panel
+/// rather than for the desktop.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(super) struct MonitorInfoEx {
+    size: u32,
+    monitor: Rect,
+    work: Rect,
+    flags: u32,
+    device: [u16; 32],
+}
+
+pin_layout!(MonitorInfoEx, 104; size = 0, monitor = 4, work = 20, flags = 36, device = 40);
+
+/// The scale the frame and the bar are drawn at.
+///
+/// [`dpi_percent`] alone keeps the *logical* size constant, and Windows' scale
+/// steps are too coarse for that to keep the *physical* size constant: the
+/// same pill is 24 mm wide on a 15.6-inch 1366x768 panel at 100%, and only
+/// 15 mm on a 14-inch 1920x1200 panel at 100%. The bar is aimed at, so it is
+/// never allowed under [`MIN_PILL_MM`]: whichever is larger, the DPI scale or
+/// the answer from the panel's own millimetres, wins.
+pub(super) fn chrome_percent(window: Hwnd) -> i32 {
+    let dpi = dpi_percent(window);
+    monitor_size(window)
+        .and_then(|(millimetres, pixels)| percent_for(millimetres, pixels))
+        .map_or(dpi, |physical| dpi.max(physical))
+}
+
+/// The percent that makes the designed pill at least [`MIN_PILL_MM`] wide on
+/// a panel `millimetres` across showing `pixels` pixels, or `None` when the
+/// answer cannot be believed.
+///
+/// Integer arithmetic on purpose: the straight
+/// `100 * MIN_PILL_MM * pixels / (design width * millimetres)`, with the
+/// rounding added once before the divide. At the design's own 96 pixels and
+/// 24 mm that is `25 * pixels / millimetres`.
+pub(super) fn percent_for(millimetres: i32, pixels: i32) -> Option<i32> {
+    if millimetres <= 0 || pixels <= 0 {
+        return None;
+    }
+    let (millimetres, pixels) = (i64::from(millimetres), i64::from(pixels));
+    // Physical DPI in tenths: pixels / millimetres * 25.4, kept integral.
+    let dpi_x10 = pixels * 254 / millimetres;
+    if !(MIN_DPI_X10..=MAX_DPI_X10).contains(&dpi_x10) {
+        return None;
+    }
+    let design = i64::from(bar::DESIGN_WIDTH);
+    let wanted = i64::from(MIN_PILL_MM) * 100 * pixels;
+    let denominator = design * millimetres;
+    let percent = (wanted * 2 + denominator) / (2 * denominator);
+    let percent = i32::try_from(percent).unwrap_or(i32::MAX);
+    Some(percent.clamp(100, 400))
+}
+
+/// The window's display: its width in millimetres and in pixels.
+fn monitor_size(window: Hwnd) -> Option<(i32, i32)> {
+    // SAFETY: a read-only query about a window this process owns.
+    let monitor = unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST) };
+    if monitor.is_null() {
+        return None;
+    }
+    let mut info = MonitorInfoEx {
+        size: u32::try_from(size_of::<MonitorInfoEx>()).ok()?,
+        monitor: Rect::default(),
+        work: Rect::default(),
+        flags: 0,
+        device: [0; 32],
+    };
+    // SAFETY: `info` carries its own size and is filled in place; the monitor
+    // handle came from a live window.
+    if unsafe { GetMonitorInfoW(monitor, &raw mut info) } == 0 {
+        return None;
+    }
+    let driver = wide("DISPLAY");
+    // SAFETY: the driver and device names are NUL-terminated and outlive the
+    // call; a display DC needs no port or initialisation data.
+    let dc = unsafe {
+        CreateDCW(
+            driver.as_ptr(),
+            info.device.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    if dc.is_null() {
+        return None;
+    }
+    // SAFETY: `dc` was just created and nothing between these reads can
+    // unwind; the caps are plain integers for that device.
+    let (millimetres, pixels) =
+        unsafe { (GetDeviceCaps(dc, HORZSIZE), GetDeviceCaps(dc, HORZRES)) };
+    // SAFETY: the same DC, released exactly once.
+    unsafe { DeleteDC(dc) };
+    (millimetres > 0 && pixels > 0).then_some((millimetres, pixels))
+}
 
 thread_local! {
     /// When the live frame appeared: its breath counts from here.
@@ -113,6 +244,9 @@ unsafe extern "system" {
     pub(super) fn LoadCursorW(instance: *mut c_void, cursor: *const u16) -> Hcursor;
     pub(super) fn EndPaint(window: Hwnd, paint: *const c_void) -> i32;
     pub(super) fn GetClientRect(window: Hwnd, rect: *mut Rect) -> i32;
+    pub(super) fn GetDpiForWindow(window: Hwnd) -> u32;
+    pub(super) fn MonitorFromWindow(window: Hwnd, flags: u32) -> *mut c_void;
+    pub(super) fn GetMonitorInfoW(monitor: *mut c_void, info: *mut MonitorInfoEx) -> i32;
     pub(super) fn SetLayeredWindowAttributes(window: Hwnd, key: u32, alpha: u8, flags: u32) -> i32;
     pub(super) fn SetTimer(window: Hwnd, id: usize, elapse: u32, callback: *const c_void) -> usize;
     pub(super) fn KillTimer(window: Hwnd, id: usize) -> i32;
@@ -133,6 +267,15 @@ unsafe extern "system" {
 #[link(name = "gdi32")]
 unsafe extern "system" {
     pub(super) fn CreateSolidBrush(color: u32) -> *mut c_void;
+    /// A display DC, which is what answers a panel's own physical size.
+    pub(super) fn CreateDCW(
+        driver: *const u16,
+        device: *const u16,
+        port: *const u16,
+        mode: *const c_void,
+    ) -> Hdc;
+    pub(super) fn DeleteDC(dc: Hdc) -> i32;
+    pub(super) fn GetDeviceCaps(dc: Hdc, index: i32) -> i32;
     pub(super) fn DeleteObject(object: *mut c_void) -> i32;
     pub(super) fn FillRect(dc: Hdc, rect: *const Rect, brush: *mut c_void) -> i32;
     pub(super) fn SelectObject(dc: Hdc, object: *mut c_void) -> *mut c_void;
@@ -410,18 +553,17 @@ unsafe fn paint(window: Hwnd) {
         }
         let shade = CreateSolidBrush(FRAME_SHADE);
         let light = CreateSolidBrush(FRAME_LIGHT);
-        let accent = CreateSolidBrush(FRAME_ACCENT);
-        for (rect, tone) in frame_rects(client.right, client.bottom) {
+        let percent = chrome_percent(window);
+        for (rect, tone) in frame_rects(client.right, client.bottom, percent) {
             let brush = match tone {
                 Tone::Shade => shade,
                 Tone::Light => light,
-                Tone::Accent => accent,
             };
             if !brush.is_null() {
                 FillRect(dc, &raw const rect, brush);
             }
         }
-        for brush in [shade, light, accent] {
+        for brush in [shade, light] {
             if !brush.is_null() {
                 DeleteObject(brush);
             }
@@ -430,29 +572,37 @@ unsafe fn paint(window: Hwnd) {
     }
 }
 
-/// Which of the frame's three tones a rectangle is drawn in.
+/// Which of the frame's two tones a rectangle is drawn in.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum Tone {
-    /// The outer hairline: dark, so the light line has an edge to read
+    /// The outer hairline: light, and flush with the app's edge, so the
+    /// frame lands exactly where the window ends instead of leaving a dark
+    /// strip of its own between the line and the edge.
+    Light,
+    /// The inner hairline: dark, so the light line has an edge to read
     /// against on pale content.
     Shade,
-    /// The inner hairline: light, for dark content.
-    Light,
-    /// The corner brackets that say a take is running.
-    Accent,
 }
 
 /// The recording frame for a `width` by `height` client area: a hairline
-/// drawn dark outside and light inside around the whole edge, then an
-/// accent bracket at each corner.
-pub(super) fn frame_rects(width: i32, height: i32) -> Vec<(Rect, Tone)> {
+/// drawn light on the outer edge and dark just inside it. The light line is
+/// what the eye reads, so it hugs the app's own boundary; the shaded inner
+/// line is inset on every edge, which is what lines the corners up as one
+/// continuous frame rather than four arms that each overshoot. Every
+/// dimension is a designed pixel at 96 DPI and goes through [`scaled`], so
+/// the frame keeps its weight on a high-DPI display instead of thinning to
+/// half a point.
+pub(super) fn frame_rects(width: i32, height: i32, percent: i32) -> Vec<(Rect, Tone)> {
     let mut rects = Vec::new();
     if width <= 0 || height <= 0 {
         return rects;
     }
+    let percent = percent.clamp(100, 400);
+    let hair = scaled(1, percent).max(1);
     let mut add = |left: i32, top: i32, right: i32, bottom: i32, tone: Tone| {
-        // Bracket legs are given as a corner plus a direction, so each rect
-        // is normalized before it is clipped.
+        // Each rect is normalized and clipped to the frame: a frame
+        // thinner than its own hairline keeps only the part of each line
+        // that exists.
         let (left, right) = (left.min(right), left.max(right));
         let (top, bottom) = (top.min(bottom), top.max(bottom));
         // A frame thinner than its own hairline keeps only the part of
@@ -471,49 +621,31 @@ pub(super) fn frame_rects(width: i32, height: i32) -> Vec<(Rect, Tone)> {
             ));
         }
     };
-    // The hairline: dark outside, light inside, so it reads on any content.
-    add(0, 0, width, 1, Tone::Shade);
-    add(0, height - 1, width, height, Tone::Shade);
-    add(0, 0, 1, height, Tone::Shade);
-    add(width - 1, 0, width, height, Tone::Shade);
-    add(0, 1, width, 2, Tone::Light);
-    add(0, height - 2, width, height - 1, Tone::Light);
-    add(1, 0, 2, height, Tone::Light);
-    add(width - 2, 0, width - 1, height, Tone::Light);
-    // The corners: an L of accent that stands clear of the hairline, so it
-    // frames the picture instead of thickening the border. A single shade
-    // pixel on its inner side gives the accent an edge to read against on
-    // pale content, the same trick the hairline itself uses.
-    let inset = BRACKET_INSET.min(width / 4).min(height / 4);
-    let leg = (width.min(height) / BRACKET_DIV)
-        .clamp(BRACKET_MIN, BRACKET_MAX)
-        .min(width / 2)
-        .min(height / 2);
-    let thick = BRACKET_THICK.min(width / 4).min(height / 4).max(1);
-    for (x, y, across, down) in [
-        (inset, inset, 1, 1),
-        (width - inset, inset, -1, 1),
-        (inset, height - inset, 1, -1),
-        (width - inset, height - inset, -1, -1),
-    ] {
-        // Each leg, then its shade edge one pixel further into the frame.
-        add(x, y, x + across * leg, y + down * thick, Tone::Accent);
-        add(x, y, x + across * thick, y + down * leg, Tone::Accent);
-        add(
-            x,
-            y + down * thick,
-            x + across * leg,
-            y + down * (thick + 1),
-            Tone::Shade,
-        );
-        add(
-            x + across * thick,
-            y,
-            x + across * (thick + 1),
-            y + down * leg,
-            Tone::Shade,
-        );
-    }
+    // The hairline: light on the outer edge, where it lands on the app's
+    // own boundary, and dark just inside it for contrast on pale content.
+    // Each line is inset on all four edges, so its arms stop at the same
+    // corner instead of each running out past the others.
+    let inner = hair.saturating_mul(2);
+    add(0, 0, width, hair, Tone::Light);
+    add(0, height - hair, width, height, Tone::Light);
+    add(0, 0, hair, height, Tone::Light);
+    add(width - hair, 0, width, height, Tone::Light);
+    add(hair, hair, width - hair, inner, Tone::Shade);
+    add(
+        hair,
+        height - inner,
+        width - hair,
+        height - hair,
+        Tone::Shade,
+    );
+    add(hair, hair, inner, height - hair, Tone::Shade);
+    add(
+        width - inner,
+        hair,
+        width - hair,
+        height - hair,
+        Tone::Shade,
+    );
     rects
 }
 

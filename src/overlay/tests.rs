@@ -2,7 +2,34 @@
 //! recording frame, and crosshair arms). The control bar's own layout is
 //! pinned in `bar::tests`, beside the code that draws it.
 
-use super::{SELECTION_DOT, Tone, crosshair::crosshair_segments, frame_rects, selection_dots};
+use super::{
+    SELECTION_DOT, Tone, crosshair::crosshair_segments, frame_rects, percent_for, selection_dots,
+};
+
+/// The pill is aimed at, so its physical size matters more than the logical
+/// one Windows' scale keeps constant. These are real panels: the reference
+/// 14-inch 1920x1200 (302 mm), a 27-inch 4K (598 mm), and a 15.6-inch
+/// 1366x768 (345 mm), where 96 pixels is already the 24 mm the bar was drawn
+/// for.
+#[test]
+fn a_dense_panel_gets_a_pill_big_enough_to_hit() {
+    assert_eq!(percent_for(302, 1920), Some(159));
+    assert_eq!(percent_for(598, 3840), Some(161));
+    assert_eq!(percent_for(345, 1366), Some(100));
+    // A 13-inch 2560x1600 panel: 15 mm at 100% would be too small.
+    assert!(percent_for(286, 2560).is_some_and(|percent| percent > 200));
+}
+
+#[test]
+fn a_driver_that_reports_nonsense_is_ignored() {
+    assert_eq!(percent_for(0, 1920), None);
+    assert_eq!(percent_for(302, 0), None);
+    // A desktop-sized millimetre answer is 10 DPI; a made-up micro panel is
+    // thousands. Either way the DPI scale is the only evidence left.
+    assert_eq!(percent_for(5000, 1920), None);
+    assert_eq!(percent_for(20, 3840), None);
+    assert_eq!(percent_for(-302, 1920), None);
+}
 
 #[test]
 fn selection_outline_is_a_bounded_two_tone_dot_line() {
@@ -34,7 +61,7 @@ fn selection_outline_is_a_bounded_two_tone_dot_line() {
 #[test]
 fn frame_rects_stay_inside_the_client_area() {
     for (width, height) in [(320, 240), (1920, 1080), (1, 1), (5, 3), (400, 12)] {
-        for (rect, _) in frame_rects(width, height) {
+        for (rect, _) in frame_rects(width, height, 100) {
             assert!(
                 rect.left >= 0 && rect.top >= 0,
                 "origin inside {width}x{height}"
@@ -51,9 +78,41 @@ fn frame_rects_stay_inside_the_client_area() {
     }
 }
 
+/// A 200% display draws the same frame twice as thick instead of thinning
+/// to a hairline.
+#[test]
+fn the_frame_keeps_its_weight_on_a_scaled_display() {
+    let plain = frame_rects(400, 300, 100);
+    let scaled = frame_rects(400, 300, 200);
+    let thickness = |rects: &[(super::Rect, Tone)]| {
+        rects
+            .iter()
+            .filter(|(_, tone)| *tone == Tone::Light)
+            .map(|(rect, _)| rect.bottom - rect.top)
+            .max()
+            .unwrap_or(0)
+    };
+    assert!(
+        thickness(&scaled) >= thickness(&plain),
+        "the light line never thins on a bigger display"
+    );
+    for (rect, _) in &scaled {
+        assert!(rect.left >= 0 && rect.top >= 0);
+        assert!(rect.right <= 400 && rect.bottom <= 300);
+        assert!(rect.right > rect.left && rect.bottom > rect.top);
+    }
+    // A hairline at 200% is two device pixels, so the frame reads the same
+    // size on screen as it does at 100%.
+    let hairline = scaled
+        .iter()
+        .find(|(rect, tone)| *tone == Tone::Light && rect.top == 0 && rect.left == 0)
+        .map(|(rect, _)| rect.bottom);
+    assert_eq!(hairline, Some(2));
+}
+
 #[test]
 fn every_edge_is_outlined() {
-    let rects = frame_rects(400, 300);
+    let rects = frame_rects(400, 300, 100);
     assert!(rects.iter().any(|(rect, _)| rect.top == 0));
     assert!(rects.iter().any(|(rect, _)| rect.bottom == 300));
     assert!(rects.iter().any(|(rect, _)| rect.left == 0));
@@ -64,73 +123,92 @@ fn every_edge_is_outlined() {
     assert!(rects.iter().any(|(_, tone)| *tone == Tone::Light));
 }
 
+/// The frame is one line, not a line plus corner marks: four light rects on
+/// the edge and four shade ones inside it, and nothing else.
 #[test]
-fn every_corner_carries_an_inset_bracket() {
-    let (width, height) = (400, 300);
-    let rects = frame_rects(width, height);
-    // A probe box just inside each corner lands on the bracket's elbow. The
-    // frame's own corner pixel stays hairline: that inset is what keeps the
-    // mark reading as framing rather than a thicker border.
-    let probe = 10;
-    for (x, y, across, down) in [
-        (0, 0, 1, 1),
-        (width, 0, -1, 1),
-        (0, height, 1, -1),
-        (width, height, -1, -1),
-    ] {
-        let (left, right) = if across > 0 {
-            (x, x + probe)
-        } else {
-            (x - probe, x)
-        };
-        let (top, bottom) = if down > 0 {
-            (y, y + probe)
-        } else {
-            (y - probe, y)
-        };
-        assert!(
-            rects.iter().any(|(rect, tone)| {
-                *tone == Tone::Accent
-                    && rect.left < right
-                    && rect.right > left
-                    && rect.top < bottom
-                    && rect.bottom > top
-            }),
-            "a bracket inside {x},{y}"
-        );
-    }
-    assert!(
-        !rects.iter().any(|(rect, tone)| *tone == Tone::Accent
-            && rect.left <= 0
-            && rect.right > 0
-            && rect.top <= 0
-            && rect.bottom > 0),
-        "the accent stands clear of the corner"
+fn the_frame_is_a_single_closed_line() {
+    let rects = frame_rects(400, 300, 100);
+    assert_eq!(rects.len(), 8, "one closed two-tone ring");
+    assert_eq!(
+        rects
+            .iter()
+            .filter(|(_, tone)| *tone == Tone::Shade)
+            .count(),
+        4
+    );
+    assert_eq!(
+        rects
+            .iter()
+            .filter(|(_, tone)| *tone == Tone::Light)
+            .count(),
+        4
     );
 }
 
+/// The line the eye reads has to land on the app's own boundary: a dark
+/// strip between the edge and the light line reads as a gutter, and the
+/// frame then looks inset from the window instead of drawn on it.
 #[test]
-fn brackets_scale_with_the_frame_but_stay_bounded() {
-    use super::{BRACKET_MAX, BRACKET_MIN};
-    // The top-left bracket's horizontal leg is the widest accent rect in the
-    // corner, so its width is the leg length.
-    let leg = |width: i32, height: i32| {
-        frame_rects(width, height)
-            .into_iter()
-            .filter(|(rect, tone)| *tone == Tone::Accent && rect.left < 10 && rect.top < 10)
-            .map(|(rect, _)| rect.right - rect.left)
-            .max()
-            .unwrap_or(0)
+fn the_light_line_sits_on_the_app_edge() {
+    let (width, height) = (400, 300);
+    let rects = frame_rects(width, height, 100);
+    let light_at = |x: i32, y: i32| {
+        rects.iter().any(|(rect, tone)| {
+            *tone == Tone::Light
+                && rect.left <= x
+                && x < rect.right
+                && rect.top <= y
+                && y < rect.bottom
+        })
     };
-    assert_eq!(leg(3840, 2160), BRACKET_MAX, "a 4K take gets the full leg");
-    assert!(
-        (BRACKET_MIN..=BRACKET_MAX).contains(&leg(200, 150)),
-        "a small window keeps a readable leg"
-    );
-    assert!(
-        leg(40, 30) <= 15,
-        "a tiny frame keeps its bracket inside the frame"
-    );
+    for x in [0, 1, width / 2, width - 2, width - 1] {
+        assert!(light_at(x, 0), "the top edge at {x} is light");
+        assert!(light_at(x, height - 1), "the bottom edge at {x} is light");
+    }
+    for y in [0, 1, height / 2, height - 2, height - 1] {
+        assert!(light_at(0, y), "the left edge at {y} is light");
+        assert!(light_at(width - 1, y), "the right edge at {y} is light");
+    }
+    // The shade line is the inner one, so it never covers the boundary.
+    for (rect, tone) in &rects {
+        if *tone == Tone::Shade {
+            assert!(rect.left > 0 && rect.top > 0, "inset on the leading edges");
+            assert!(
+                rect.right < width && rect.bottom < height,
+                "inset on the trailing edges"
+            );
+        }
+    }
+}
+
+/// The corners are what the frame used to get wrong: each inner arm ran out
+/// to the outer edge on its own axis, so the four of them overshot the
+/// corner and the line read as four separate strokes. Both arms of a corner
+/// now stop at the same inset, so they cross in one square.
+#[test]
+fn the_inner_line_meets_flush_at_each_corner() {
+    let (width, height) = (400, 300);
+    let rects = frame_rects(width, height, 100);
+    let arms_at_corner = |x: i32, y: i32| {
+        rects
+            .iter()
+            .filter(|(rect, tone)| {
+                *tone == Tone::Shade
+                    && rect.left <= x
+                    && x < rect.right
+                    && rect.top <= y
+                    && y < rect.bottom
+            })
+            .count()
+    };
+    for (x, y) in [
+        (1, 1),
+        (width - 2, 1),
+        (1, height - 2),
+        (width - 2, height - 2),
+    ] {
+        assert_eq!(arms_at_corner(x, y), 2, "both arms meet at {x},{y}");
+    }
 }
 
 #[test]

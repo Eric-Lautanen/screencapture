@@ -23,10 +23,10 @@ use crate::winapi::{
 
 use super::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, HWND_TOPMOST, KillTimer, LoadCursorW,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SelectObject, SetTimer, SetWindowDisplayAffinity,
-    SetWindowPos, StopAction, WDA_EXCLUDEFROMCAPTURE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_PAINT, WM_TIMER, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, kept_wide, module_handle, rgb, wide,
+    SWP_NOACTIVATE, SelectObject, SetTimer, SetWindowDisplayAffinity, SetWindowPos, StopAction,
+    WDA_EXCLUDEFROMCAPTURE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
+    WM_TIMER, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    chrome_percent, kept_wide, module_handle, rgb, scaled, wide,
 };
 
 #[link(name = "gdi32")]
@@ -65,6 +65,7 @@ unsafe extern "system" {
 
 #[link(name = "user32")]
 unsafe extern "system" {
+    fn ShowWindow(window: Hwnd, command: i32) -> i32;
     fn TrackMouseEvent(event: *mut TrackMouse) -> i32;
     fn UpdateLayeredWindow(
         window: Hwnd,
@@ -132,6 +133,8 @@ struct TrackMouse {
 const PS_SOLID: i32 = 0;
 const NULL_BRUSH: i32 = 5;
 const MM_ANISOTROPIC: i32 = 8;
+/// `SW_SHOWNOACTIVATE` (winuser.h): show the bar without taking focus.
+const SW_SHOWNOACTIVATE: i32 = 4;
 /// `TME_LEAVE`, `WM_MOUSELEAVE`, `WM_CAPTURECHANGED`.
 const TME_LEAVE: u32 = 0x0000_0002;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -160,6 +163,10 @@ const PADDING: i32 = 4;
 const BUTTON: i32 = 28;
 const GAP: i32 = 2;
 const BUTTON_RADIUS: i32 = 9;
+/// The pill's designed size at 100%, and the measure the physical-size floor
+/// in [`super::percent_for`] is taken against.
+pub(super) const DESIGN_WIDTH: i32 = PADDING * 2 + BUTTON * 3 + GAP * 2;
+pub(super) const DESIGN_HEIGHT: i32 = HEIGHT;
 const ICON: i32 = 16;
 
 // The bar borrows the frame's own edge, so the pill reads as part of the
@@ -200,23 +207,28 @@ pub(super) enum Role {
 /// stop button.
 #[derive(Clone, Copy)]
 struct Layout {
+    /// The designed width at 96 DPI; the device width follows the display.
     width: i32,
+    /// The display's scale percentage this bar was laid out for.
+    percent: i32,
     stop: Rect,
     microphone: Option<Rect>,
     system: Option<Rect>,
 }
 
 impl Layout {
-    /// Lay out the bar inside a region `available` pixels wide: stop, the
-    /// microphone, and the system mix, or the stop button alone when the
-    /// row does not fit.
-    fn new(available: i32) -> Self {
-        let width = PADDING * 2 + BUTTON * 3 + GAP * 2;
-        if width > available {
-            return Self::stop_only();
+    /// Lay out the bar for a region `available` device pixels wide: stop, the
+    /// microphone, and the system mix, or the stop button alone when the row
+    /// does not fit at this display's scale.
+    fn new(available: i32, percent: i32) -> Self {
+        let percent = percent.clamp(100, 400);
+        let width = DESIGN_WIDTH;
+        if scaled(width, percent) > available {
+            return Self::stop_only(percent);
         }
         Self {
             width,
+            percent,
             stop: slot(0),
             microphone: Some(slot(1)),
             system: Some(slot(2)),
@@ -224,12 +236,36 @@ impl Layout {
     }
 
     /// The bar with the stop button alone.
-    const fn stop_only() -> Self {
+    const fn stop_only(percent: i32) -> Self {
         Self {
             width: PADDING * 2 + BUTTON,
+            percent,
             stop: slot(0),
             microphone: None,
             system: None,
+        }
+    }
+
+    /// The bar's width in the display's own pixels.
+    fn device_width(self) -> i32 {
+        scaled(self.width, self.percent)
+    }
+
+    /// The bar's height in the display's own pixels.
+    fn device_height(self) -> i32 {
+        scaled(HEIGHT, self.percent)
+    }
+
+    /// One designed rect in the display's own pixels: what a click at that
+    /// button's position actually sends. Only the tests need it, since the
+    /// bar itself paints in designed units.
+    #[cfg(test)]
+    fn device(self, rect: Rect) -> Rect {
+        Rect {
+            left: scaled(rect.left, self.percent),
+            top: scaled(rect.top, self.percent),
+            right: scaled(rect.right, self.percent),
+            bottom: scaled(rect.bottom, self.percent),
         }
     }
 
@@ -242,8 +278,10 @@ impl Layout {
         }
     }
 
-    /// The button under a point in the bar's own coordinates.
+    /// The button under a point in the display's own pixels: the mouse
+    /// reports device coordinates, the buttons are designed ones.
     fn role_at(self, x: i32, y: i32) -> Option<Role> {
+        let (x, y) = (x * 100 / self.percent, y * 100 / self.percent);
         [Role::Stop, Role::Microphone, Role::System]
             .into_iter()
             .find(|role| self.button(*role).is_some_and(|rect| hits(rect, x, y)))
@@ -254,14 +292,16 @@ impl Layout {
     /// screen (where half the bar would fall off it).
     fn rect(self, region: Region) -> Rect {
         let width = i32::try_from(region.width).unwrap_or(0);
-        let x = region.x + (width - self.width).max(0) / 2;
-        let lifted = region.y - HEIGHT / 2;
+        let bar_width = self.device_width();
+        let bar_height = self.device_height();
+        let x = region.x + (width - bar_width).max(0) / 2;
+        let lifted = region.y - bar_height / 2;
         let y = if lifted < 0 { region.y } else { lifted };
         Rect {
             left: x,
             top: y,
-            right: x + self.width,
-            bottom: y + HEIGHT,
+            right: x + bar_width,
+            bottom: y + bar_height,
         }
     }
 }
@@ -318,8 +358,35 @@ pub(super) fn disarm() {
 /// `None` when Windows refuses the window or the layer (the outline,
 /// Escape, and the hotkey still stop the take).
 pub(super) fn show_bar(region: Region, action: StopAction, live: &Live) -> Option<Hwnd> {
+    let instance = module_handle();
+    register_class(instance);
+    let class = wide(CLASS_NAME);
+    // Created hidden at the region's own origin: the bar's size depends on
+    // the display's scale, which only answers for the monitor the window is
+    // already on.
+    // SAFETY: strings and handles outlive the call; the window is owned by
+    // this process and destroyed by the caller's guard.
+    let window = unsafe {
+        CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
+            class.as_ptr(),
+            std::ptr::null(),
+            WS_POPUP,
+            region.x,
+            region.y,
+            DESIGN_WIDTH,
+            DESIGN_HEIGHT,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            instance,
+            std::ptr::null_mut(),
+        )
+    };
+    if window.is_null() {
+        return None;
+    }
     let available = i32::try_from(region.width).unwrap_or(0);
-    let layout = Layout::new(available);
+    let layout = Layout::new(available, chrome_percent(window));
     let rect = layout.rect(region);
     BAR.with_borrow_mut(|slot| {
         *slot = Some(Bar {
@@ -331,37 +398,21 @@ pub(super) fn show_bar(region: Region, action: StopAction, live: &Live) -> Optio
             pressed: None,
         });
     });
-    let instance = module_handle();
-    register_class(instance);
-    let class = wide(CLASS_NAME);
-    // SAFETY: strings and handles outlive the call; the window is owned by
-    // this process and destroyed by the caller's guard.
-    let window = unsafe {
-        CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_LAYERED,
-            class.as_ptr(),
-            std::ptr::null(),
-            WS_POPUP | WS_VISIBLE,
-            rect.left,
-            rect.top,
-            layout.width,
-            HEIGHT,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            instance,
-            std::ptr::null_mut(),
-        )
-    };
-    if window.is_null() {
-        disarm();
-        return None;
-    }
     // SAFETY: `window` was created above on this thread.
     unsafe {
         // Keep the bar out of the recording it controls; older Windows
         // builds refuse and the bar then appears in the shot, which is a
         // cosmetic loss, not a failure.
         let _ = SetWindowDisplayAffinity(window, WDA_EXCLUDEFROMCAPTURE);
+        SetWindowPos(
+            window,
+            HWND_TOPMOST,
+            rect.left,
+            rect.top,
+            layout.device_width(),
+            layout.device_height(),
+            SWP_NOACTIVATE,
+        );
     }
     if !redraw(window) {
         // A bar nobody can see would swallow clicks over a strip of the
@@ -373,17 +424,9 @@ pub(super) fn show_bar(region: Region, action: StopAction, live: &Live) -> Optio
         disarm();
         return None;
     }
-    // SAFETY: a live window this process owns.
+    // SAFETY: a live window this process owns, created hidden above.
     unsafe {
-        SetWindowPos(
-            window,
-            HWND_TOPMOST,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-        );
+        ShowWindow(window, SW_SHOWNOACTIVATE);
     }
     Some(window)
 }
@@ -684,7 +727,7 @@ fn redraw(window: Hwnd) -> bool {
     let Some((layout, look)) = state else {
         return false;
     };
-    let Some(surface) = Surface::new(layout.width) else {
+    let Some(surface) = Surface::new(layout) else {
         return false;
     };
     surface.clear();
@@ -1064,14 +1107,17 @@ impl Canvas {
         })
     }
 
-    /// Map logical pixels onto this canvas's own pixels: the four-fold
-    /// oversize that every drawn edge is filtered out of.
-    fn scale(&self) {
+    /// Map the bar's designed pixels onto this canvas: one design pixel
+    /// spans `width / design_width` device pixels, which is the display's
+    /// scale times the four-fold oversize every drawn edge is filtered out
+    /// of. GDI scales the pens with the mapping, so the icons grow with the
+    /// bar instead of staying 16 pixels on a 200% screen.
+    fn scale(&self, design: (i32, i32)) {
         // SAFETY: a live canvas this value owns.
         unsafe {
             SetMapMode(self.dc, MM_ANISOTROPIC);
-            SetWindowExtEx(self.dc, 1, 1, std::ptr::null_mut());
-            SetViewportExtEx(self.dc, SCALE, SCALE, std::ptr::null_mut());
+            SetWindowExtEx(self.dc, design.0, design.1, std::ptr::null_mut());
+            SetViewportExtEx(self.dc, self.width, self.height, std::ptr::null_mut());
         }
     }
 
@@ -1125,16 +1171,18 @@ struct Surface {
 }
 
 impl Surface {
-    /// A layer `width` by [`HEIGHT`] logical pixels.
-    fn new(width: i32) -> Option<Self> {
-        let work = Canvas::new(width * SCALE, HEIGHT * SCALE)?;
-        work.scale();
-        let out = Canvas::new(width, HEIGHT)?;
+    /// A layer the size the bar's layout asks for on this display.
+    fn new(layout: Layout) -> Option<Self> {
+        let width = layout.device_width();
+        let height = layout.device_height();
+        let work = Canvas::new(width * SCALE, height * SCALE)?;
+        work.scale((layout.width, HEIGHT));
+        let out = Canvas::new(width, height)?;
         Some(Self {
             work,
             out,
             width,
-            height: HEIGHT,
+            height,
         })
     }
 
@@ -1218,107 +1266,4 @@ impl Surface {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{BUTTON, GAP, HEIGHT, Layout, PADDING, Role, slot};
-    use crate::capture::Region;
-
-    fn region(x: i32, y: i32, width: u32, height: u32) -> Region {
-        Region {
-            x,
-            y,
-            width,
-            height,
-        }
-    }
-
-    #[test]
-    fn the_bar_centers_on_the_top_edge() {
-        let layout = Layout::new(1920);
-        let rect = layout.rect(region(100, 100, 800, 600));
-        assert_eq!(rect.right - rect.left, layout.width);
-        assert_eq!(rect.bottom - rect.top, HEIGHT);
-        assert_eq!(rect.left, 100 + (800 - layout.width) / 2);
-        assert_eq!(rect.top, 100 - HEIGHT / 2);
-    }
-
-    #[test]
-    fn the_bar_never_leaves_the_screen() {
-        let layout = Layout::new(1920);
-        let top = layout.rect(region(0, 0, 400, 300));
-        assert_eq!(top.top, 0, "a bar at the top edge sits inside the region");
-        let narrow = layout.rect(region(10, 50, 20, 20));
-        assert_eq!(narrow.left, 10);
-        assert_eq!(narrow.top, 50 - HEIGHT / 2);
-    }
-
-    #[test]
-    fn audio_buttons_sit_level_beside_stop() {
-        let layout = Layout::new(1920);
-        let stop = layout.stop;
-        let microphone = layout.microphone.expect("a microphone button");
-        let system = layout.system.expect("a system button");
-        assert_eq!(microphone.left, stop.right + GAP);
-        assert_eq!(system.left, microphone.right + GAP);
-        for button in [stop, microphone, system] {
-            assert_eq!(button.right - button.left, BUTTON);
-            assert_eq!(button.top, (HEIGHT - BUTTON) / 2);
-        }
-        assert_eq!(
-            layout.width,
-            PADDING * 2 + BUTTON * 3 + GAP * 2,
-            "the bar wraps its three buttons"
-        );
-    }
-
-    #[test]
-    fn both_audio_buttons_are_always_there() {
-        let layout = Layout::new(1920);
-        assert!(
-            layout.microphone.is_some(),
-            "a silent take can ask for a mic"
-        );
-        assert!(layout.system.is_some());
-        assert_eq!(layout.width, PADDING * 2 + BUTTON * 3 + GAP * 2);
-    }
-
-    #[test]
-    fn a_narrow_region_keeps_the_stop_button_alone() {
-        let layout = Layout::new(60);
-        assert!(layout.microphone.is_none() && layout.system.is_none());
-        assert_eq!(layout.width, PADDING * 2 + BUTTON);
-    }
-
-    #[test]
-    fn hit_testing_finds_each_button_and_their_gaps() {
-        let layout = Layout::new(1920);
-        for role in [Role::Stop, Role::Microphone, Role::System] {
-            let button = layout.button(role).expect("a button");
-            let x = button.left + BUTTON / 2;
-            let y = button.top + BUTTON / 2;
-            assert_eq!(layout.role_at(x, y), Some(role));
-            assert_eq!(layout.role_at(button.left, button.top), Some(role));
-            assert_eq!(
-                layout.role_at(button.right - 1, button.bottom - 1),
-                Some(role)
-            );
-            assert_eq!(layout.role_at(button.right, y), None, "past the edge");
-            assert_eq!(layout.role_at(x, button.bottom), None, "below the button");
-        }
-        assert_eq!(
-            layout.role_at(layout.stop.right + GAP / 2, 10),
-            None,
-            "the gap between buttons is not a target"
-        );
-    }
-
-    #[test]
-    fn buttons_never_overlap_the_bar_edges() {
-        let layout = Layout::new(1920);
-        for index in 0..3 {
-            let button = slot(index);
-            assert!(button.left >= PADDING);
-            assert!(button.right <= layout.width - PADDING);
-            assert!(button.top >= 0 && button.bottom <= HEIGHT);
-        }
-    }
-}
+mod tests;
