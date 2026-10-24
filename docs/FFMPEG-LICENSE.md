@@ -17,8 +17,10 @@ The Windows engine stays the **GPL build**
 
 - The engine binaries (`ffmpeg.exe`, `ffprobe.exe`) are covered by the
   **GNU GPL v3** (see `vendor/ffmpeg/ffmpeg.LICENSE.txt`, shipped unmodified).
-- Our application code is a **separate work**; bundling them in the installer
-  is mere aggregation and does not put the app itself under the GPL.
+- Our application code is a **separate work**, licensed under the
+  **Apache License 2.0** (see `LICENSE` at the repository root); bundling the
+  engine in the installer is mere aggregation and does not put the app itself
+  under the GPL.
 - Distributing the engine imposes on **us**:
   1. ship the license text with the engine (done: the installer copies
      `FFMPEG-LICENSE.md` next to `README.md`, and this file points at the
