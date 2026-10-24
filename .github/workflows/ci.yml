@@ -29,6 +29,19 @@ jobs:
       - name: Check out the tree
         uses: actions/checkout@v7
 
+      - name: Check the FFmpeg fetch script
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $PWD 'scripts\fetch-ffmpeg.ps1'), [ref]$null, [ref]$errors
+          ) > $null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+
       - name: Install the stable toolchain
         uses: dtolnay/rust-toolchain@stable
         with:

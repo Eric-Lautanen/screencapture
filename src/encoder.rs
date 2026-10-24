@@ -1,10 +1,12 @@
 //! Video encoder selection. x264 is the universal default; the hardware
 //! H.264 and HEVC units (AMD AMF, Intel QSV, NVIDIA NVENC, and Windows
-//! Media Foundation) plus the CPU x265 belt are opt-in and always probed
-//! with their exact argument set before first use, so a machine without
-//! an accelerator demotes to x264 with a notice instead of recording a
-//! dead stream. Every anchored switch and the per-encoder pixel format
-//! were verified against this engine's `ffmpeg -h encoder` pages.
+//! Media Foundation) plus the CPU x265 belt are opt-in. Every choice is
+//! probed with its exact argument set before first use. A failed choice
+//! falls back through H.264 (x264, then hardware) and only reaches x265
+//! when no H.264 encoder can run, so a missing accelerator never turns a
+//! recording into HEVC by accident. Every anchored switch and the
+//! per-encoder pixel format were verified against this engine's
+//! `ffmpeg -h encoder` pages.
 
 use crate::recording::Profile;
 
@@ -66,6 +68,41 @@ impl Video {
                 | Self::NvencHevc
                 | Self::MfHevc
         )
+    }
+
+    /// Alternatives tried when `self` cannot encode, in priority order:
+    /// software H.264 first, then every hardware H.264 unit, and finally
+    /// CPU x265. H.264 therefore wins over HEVC at every step; x265 is only
+    /// a last resort for an engine built without libx264 and without a
+    /// usable H.264 accelerator.
+    #[must_use]
+    pub fn fallback_order(self) -> Vec<Self> {
+        let mut order = vec![
+            Self::X264,
+            Self::AmfH264,
+            Self::QsvH264,
+            Self::NvencH264,
+            Self::MfH264,
+            Self::X265,
+        ];
+        order.retain(|codec| *codec != self);
+        order
+    }
+
+    /// The requested encoder when it works, otherwise the first usable
+    /// entry in [`Self::fallback_order`]. `None` means no encoder on this
+    /// engine can complete a synthetic encode with its real arguments.
+    #[must_use]
+    pub fn choose<F>(self, mut works: F) -> Option<Self>
+    where
+        F: FnMut(Self) -> bool,
+    {
+        if works(self) {
+            return Some(self);
+        }
+        self.fallback_order()
+            .into_iter()
+            .find(|codec| works(*codec))
     }
 
     /// Parse a settings value (case-insensitive).
@@ -222,6 +259,42 @@ mod tests {
             assert_eq!(args.contains(&"nv12".to_owned()), codec == Video::QsvH264);
         }
         assert_eq!(Video::DEFAULT.name(), "libx264");
+    }
+
+    #[test]
+    fn fallbacks_keep_h264_ahead_of_hevc() {
+        assert_eq!(
+            Video::X264.fallback_order(),
+            vec![
+                Video::AmfH264,
+                Video::QsvH264,
+                Video::NvencH264,
+                Video::MfH264,
+                Video::X265,
+            ],
+            "hardware H.264 comes next, and HEVC is the last resort"
+        );
+        assert_eq!(
+            Video::X265.choose(|codec| matches!(codec, Video::X264 | Video::MfH264)),
+            Some(Video::X264),
+            "an HEVC request still prefers H.264 when HEVC is unavailable"
+        );
+        assert_eq!(
+            Video::X264.choose(|codec| matches!(codec, Video::MfH264 | Video::X265)),
+            Some(Video::MfH264),
+            "a hardware H.264 unit beats CPU HEVC"
+        );
+        assert_eq!(
+            Video::AmfH264.choose(|codec| matches!(codec, Video::X264 | Video::QsvH264)),
+            Some(Video::X264),
+            "a failed hardware choice demotes to software H.264 first"
+        );
+        assert_eq!(
+            Video::X264.choose(|codec| codec == Video::X265),
+            Some(Video::X265),
+            "x265 remains available when no H.264 encoder works"
+        );
+        assert_eq!(Video::X264.choose(|_| false), None);
     }
 
     #[test]

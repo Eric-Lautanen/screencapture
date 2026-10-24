@@ -133,22 +133,27 @@ fn check_display_choice(choice: settings::DisplayChoice) {
 }
 
 /// Report every encoder's usability, inside the engine block of
-/// `--check` (non-fatal: hardware misses keep x264). The configured
-/// codec is marked so the demotion in the settings file is discoverable.
+/// `--check`. The configured codec is marked, and an unusable one gets
+/// the fallback that the recorder will actually choose, so a demotion is
+/// discoverable before the first recording.
 fn report_codecs(binary: &ffmpeg::Binary, loaded: &settings::Loaded) {
+    let requested = loaded.settings.codec;
     let mut variants = vec![crate::encoder::Video::X264, crate::encoder::Video::X265];
     variants.extend(crate::encoder::Video::hardware());
     let profile = &loaded.settings.profile;
-    for variant in variants {
-        let usable = binary.supports_encoder(variant, profile);
+    let availability: Vec<_> = variants
+        .into_iter()
+        .map(|variant| (variant, binary.supports_encoder(variant, profile)))
+        .collect();
+    for &(variant, usable) in &availability {
         let verdict = if usable {
             "ready"
         } else {
             "not usable on this machine"
         };
-        let marked = match (variant == loaded.settings.codec, usable) {
+        let marked = match (variant == requested, usable) {
             (true, true) => " (configured)",
-            (true, false) => " (configured; recordings use x264)",
+            (true, false) => " (configured; recordings fall back)",
             (false, _) => "",
         };
         let kind = if variant.is_hardware() { "hw" } else { "cpu" };
@@ -156,6 +161,23 @@ fn report_codecs(binary: &ffmpeg::Binary, loaded: &settings::Loaded) {
             "        encoder [{kind}]: {} is {verdict}{marked}",
             variant.name()
         );
+    }
+    if !availability
+        .iter()
+        .any(|&(variant, usable)| variant == requested && usable)
+    {
+        let chosen = requested.choose(|variant| {
+            availability
+                .iter()
+                .any(|&(candidate, usable)| candidate == variant && usable)
+        });
+        match chosen {
+            Some(codec) => println!(
+                "        encoder fallback: {} will be used at record start",
+                codec.name()
+            ),
+            None => println!("        encoder fallback: none; recordings will refuse to start"),
+        }
     }
 }
 

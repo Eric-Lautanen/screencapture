@@ -4,9 +4,12 @@
 
 The Windows engine stays the **GPL build**
 
-- `vendor/ffmpeg/ffmpeg-n9.0-latest-win64-gpl-9.0.zip`
-  (upstream: <https://github.com/BtbN/FFmpeg-Builds>, `n9.0-latest-win64-gpl`
-  release bundle, shipped unmodified).
+- `ffmpeg-n9.0.2-28-g669f5ab083-win64-gpl-9.0.zip` from
+  [`autobuild-2026-10-18-13-01`](https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-10-18-13-01)
+  (upstream: <https://github.com/BtbN/FFmpeg-Builds>), shipped unmodified.
+  Archive SHA-256: `a38198cc130ed3fa02097d0baebcea9c1b8a9d9d3d1d8161d691d1f03709158b`.
+  [`scripts/fetch-ffmpeg.ps1`](../scripts/fetch-ffmpeg.ps1) downloads and
+  verifies that pin with Windows PowerShell and .NET; no curl is required.
 
 - It keeps `libx264` / `libx265`, which the 4K quality profiles rely on.
 - Dropping to an LGPL build would lose x264 and force a different encoder mix —
@@ -23,12 +26,12 @@ The Windows engine stays the **GPL build**
   under the GPL.
 - Distributing the engine imposes on **us**:
   1. ship the license text with the engine (done: the installer copies
-     `FFMPEG-LICENSE.md` next to `README.md`, and this file points at the
-     engine's own license), and
+     `FFMPEG-LICENSE.md` under `docs\`, and that file points at the engine's
+     own license), and
   2. make the **corresponding source** of that engine available — the
-     the upstream build's own page publishes the exact source revision; the
-     installer header records the upstream URL. That satisfies the source
-     offer without rebuilding FFmpeg ourselves.
+     upstream build's release page publishes the exact source revision, and
+     the shipped `docs/FFMPEG-LICENSE.md` records the upstream URL. That
+     satisfies the source offer without rebuilding FFmpeg ourselves.
 - The engine integrity record (`engine.sha256`) is shipped alongside so any
   replaced engine fails `--check` loudly instead of shipping silently.
 
@@ -37,5 +40,5 @@ The Windows engine stays the **GPL build**
 `vendor/ffmpeg/engine.sha256` is regenerated automatically on the next
 `--check` after the binary swap (record-file absent → re-record; present and
 different → hard fail). An LGPL switch also means dropping x264 from the
-profile table (`src/settings.rs`) and re-verifying encoder negotiation in
+profile table (`src/settings/mod.rs`) and re-verifying encoder negotiation in
 `src/encoder.rs`.
