@@ -7,10 +7,10 @@ use std::ffi::c_void;
 
 pub(super) use crate::winapi::{
     CW_USEDEFAULT, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GETMESSAGE_QUIT, GetCursorPos, GetMessageW, GetModuleHandleW, Hicon, Hinstance, Hwnd, Lparam,
-    Lresult, Msg, Point, PostMessageW, PostQuitMessage, RegisterClassExW, SetForegroundWindow,
-    TranslateMessage, UnregisterClassW, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP,
-    WM_NULL, WM_RBUTTONUP, WM_TIMER, WM_USER, WndClassExW, Wparam,
+    GETMESSAGE_QUIT, GetCursorPos, GetMessageW, Hicon, Hinstance, Hwnd, Lparam, Lresult, Msg,
+    Point, PostMessageW, PostQuitMessage, RegisterClassExW, SetForegroundWindow, TranslateMessage,
+    UnregisterClassW, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_HOTKEY, WM_LBUTTONUP, WM_NULL,
+    WM_RBUTTONUP, WM_TIMER, WM_USER, WndClassExW, Wparam,
 };
 
 // Shell namespace (shellapi.h).

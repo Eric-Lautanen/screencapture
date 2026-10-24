@@ -4,6 +4,7 @@
 
 use crate::pin_layout;
 use std::ffi::c_void;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 pub type Hwnd = *mut c_void;
@@ -83,6 +84,55 @@ pub const DWMWA_EXTENDED_FRAME_BOUNDS: u32 = 9;
 /// translucent over the desktop, so a capture that keeps it shows what
 /// is behind the window along the edges.
 pub const DWMWA_VISIBLE_FRAME_BORDER_THICKNESS: u32 = 37;
+
+// ---------------------------------------------------------------------------
+// String and instance plumbing shared by every frontend
+// ---------------------------------------------------------------------------
+
+/// UTF-16 with the trailing NUL every `*W` entry point expects.
+#[must_use]
+pub fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// Decode a NUL-terminated UTF-16 buffer, the answer shape of the `*W`
+/// getters.
+#[must_use]
+pub fn wide_to_string(buffer: &[u16]) -> String {
+    let upto = buffer
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(buffer.len());
+    String::from_utf16_lossy(&buffer[..upto])
+}
+
+/// A [`wide`] buffer that stays alive for the process lifetime, for
+/// strings the OS keeps after the call returns (window class names).
+/// Repeated calls with the same text answer the same pointer, so a
+/// frontend that registers a class per capture cannot leak a fresh copy
+/// every time.
+#[must_use]
+pub fn kept_wide(text: &'static str) -> *const u16 {
+    static KEPT: Mutex<Vec<(&'static str, &'static [u16])>> = Mutex::new(Vec::new());
+    let mut kept = KEPT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((_, units)) = kept.iter().find(|(key, _)| *key == text) {
+        return units.as_ptr();
+    }
+    let units: &'static [u16] = Box::leak(wide(text).into_boxed_slice());
+    kept.push((text, units));
+    units.as_ptr()
+}
+
+/// This executable's module handle, for window classes and hook
+/// registration: a null name always resolves the running image.
+#[must_use]
+pub fn module_handle() -> Hinstance {
+    // SAFETY: a null name asks for this process's own module, and the
+    // handle is owned by the loader rather than freed here.
+    unsafe { GetModuleHandleW(std::ptr::null()) }
+}
 
 #[link(name = "user32")]
 unsafe extern "system" {
@@ -340,5 +390,31 @@ pub fn pump_until(budget: Duration, done: impl Fn() -> bool) -> PumpEnd {
             cursor = moved;
             deadline = Instant::now() + budget;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{kept_wide, wide, wide_to_string};
+
+    #[test]
+    fn wide_is_nul_terminated() {
+        assert_eq!(wide(""), vec![0]);
+        assert_eq!(wide("x").last(), Some(&0));
+    }
+
+    #[test]
+    fn wide_round_trips_through_the_decoder() {
+        for text in ["", "ctrl+shift+x", "Settings — screencapture", "平面"] {
+            assert_eq!(wide_to_string(&wide(text)), text);
+        }
+    }
+
+    #[test]
+    fn kept_wide_answers_one_pointer_per_text() {
+        let first = kept_wide("screencapture.test.class");
+        assert!(!first.is_null(), "a kept name must stay addressable");
+        assert_eq!(first, kept_wide("screencapture.test.class"));
+        assert_ne!(first, kept_wide("screencapture.test.other"));
     }
 }

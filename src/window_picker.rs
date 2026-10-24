@@ -19,9 +19,9 @@ use crate::guard::{EscapeWatch, Hook};
 use crate::overlay::{Border, Crosshair, Style};
 use crate::screen::win::window_bounds;
 use crate::winapi::{
-    GA_ROOT, GetAncestor, GetCursorPos, GetModuleHandleW, Hinstance, Point, PostQuitMessage,
-    PumpEnd, Rect, SELECTION_IDLE_LIMIT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_RBUTTONDOWN, WindowFromPoint, pump_until,
+    GA_ROOT, GetAncestor, GetCursorPos, Point, PostQuitMessage, PumpEnd, Rect,
+    SELECTION_IDLE_LIMIT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN,
+    WindowFromPoint, module_handle, pump_until,
 };
 
 /// `WH_MOUSE_LL` (winuser.h): the low-level mouse hook.
@@ -344,12 +344,6 @@ fn region_from_rect(rect: Rect) -> Region {
         width: u32::try_from((rect.right - rect.left).max(1)).unwrap_or(1),
         height: u32::try_from((rect.bottom - rect.top).max(1)).unwrap_or(1),
     }
-}
-
-/// This module's instance handle for the hook registrations.
-fn module_handle() -> Hinstance {
-    // SAFETY: null resolves the executable module.
-    unsafe { GetModuleHandleW(std::ptr::null()) }
 }
 
 #[cfg(test)]

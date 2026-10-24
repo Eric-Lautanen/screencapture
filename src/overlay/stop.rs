@@ -15,7 +15,8 @@ use super::{
     HWND_TOPMOST, InvalidateRect, LoadCursorW, SWP_NOACTIVATE, SWP_SHOWWINDOW, SelectObject,
     SetBkMode, SetTextColor, SetWindowDisplayAffinity, SetWindowPos, StopAction, TRANSPARENT,
     UpdateWindow, WDA_EXCLUDEFROMCAPTURE, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_PAINT,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, module_handle, wide,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WS_VISIBLE, kept_wide,
+    module_handle, wide,
 };
 
 const STOP_CLASS: &str = "screencapture.recording.stop";
@@ -108,8 +109,11 @@ pub(super) fn show_stop_button(region: Region, action: StopAction) -> Option<Hwn
 }
 
 /// Register the Stop button class; repeats answer "already registered".
+///
+/// The name buffer is kept for the process lifetime: the class table stores
+/// the pointer it was given, so a local buffer would dangle after return.
 fn register_stop_class(instance: Hinstance) {
-    let name = wide(STOP_CLASS);
+    let name = kept_wide(STOP_CLASS);
     let class = WndClassExW {
         size: u32::try_from(std::mem::size_of::<WndClassExW>()).expect("class size fits u32"),
         style: 0,
@@ -121,10 +125,11 @@ fn register_stop_class(instance: Hinstance) {
         cursor: stop_cursor(),
         background: std::ptr::null_mut(),
         menu_name: std::ptr::null(),
-        class_name: name.as_ptr(),
+        class_name: name,
         icon_small: std::ptr::null_mut(),
     };
-    // SAFETY: the class struct and its wide string live through the call.
+    // SAFETY: the class struct is a fully initialized local and the name
+    // buffer outlives the registration.
     unsafe {
         RegisterClassExW(&raw const class);
     }

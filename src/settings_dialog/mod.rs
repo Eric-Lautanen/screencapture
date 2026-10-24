@@ -11,16 +11,17 @@
 //! [`ffi`].
 
 use std::cell::RefCell;
+use std::io;
 use std::path::Path;
-use std::{io, iter};
 
 use crate::settings::{Hotkey, Settings};
 use crate::winapi::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    GetModuleHandleW, Hbrush, Hinstance, Hwnd, Msg, Point, PostQuitMessage, RegisterClassExW,
-    SW_SHOW, SetForegroundWindow, ShowWindow, TranslateMessage, VK_ESCAPE, WM_KEYDOWN, WndClassExW,
-    Wparam,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, Hbrush,
+    Hinstance, Hwnd, Msg, Point, PostQuitMessage, RegisterClassExW, SW_SHOW, SetForegroundWindow,
+    ShowWindow, TranslateMessage, VK_ESCAPE, WM_KEYDOWN, WndClassExW, Wparam,
 };
+
+pub(super) use crate::winapi::{kept_wide, module_handle, wide, wide_to_string};
 
 use std::ffi::c_void;
 
@@ -200,8 +201,12 @@ fn pump(window: Hwnd) {
 }
 
 /// Register the window class; Windows answers repeats harmlessly.
+///
+/// The name buffer is kept for the process lifetime: `RegisterClassExW`
+/// stores the pointer it is handed, so a local buffer would leave the class
+/// table pointing at freed memory.
 fn register_class(instance: Hinstance) {
-    let name = wide(CLASS_NAME);
+    let name = kept_wide(CLASS_NAME);
     let class = WndClassExW {
         size: u32::try_from(std::mem::size_of::<WndClassExW>()).expect("class size fits u32"),
         style: 0,
@@ -216,10 +221,11 @@ fn register_class(instance: Hinstance) {
         // on the desktop's background colour.
         background: 16usize as Hbrush,
         menu_name: std::ptr::null(),
-        class_name: name.as_ptr(),
+        class_name: name,
         icon_small: std::ptr::null_mut(),
     };
-    // SAFETY: the class struct and its wide strings live through the call.
+    // SAFETY: the class struct is a fully initialized local and the name
+    // buffer outlives the registration.
     unsafe {
         RegisterClassExW(&raw const class);
     }
@@ -435,41 +441,9 @@ fn complain(window: Hwnd, text: &str) {
     }
 }
 
-/// UTF-16 encoding for a Rust string, NUL-terminated.
-pub(super) fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(iter::once(0)).collect()
-}
-
-/// Decode a NUL-terminated UTF-16 buffer.
-pub(super) fn wide_to_string(buffer: &[u16]) -> String {
-    let upto = buffer
-        .iter()
-        .position(|unit| *unit == 0)
-        .unwrap_or(buffer.len());
-    String::from_utf16_lossy(&buffer[..upto])
-}
-
-/// This module's instance handle for window plumbing.
-fn module_handle() -> Hinstance {
-    // SAFETY: null resolves this executable.
-    unsafe { GetModuleHandleW(std::ptr::null()) }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{CLASS_NAME, TITLE, wide, wide_to_string};
-
-    #[test]
-    fn wide_strings_round_trip() {
-        for text in ["", "ctrl+shift+x", "Settings — screencapture", "平面"] {
-            assert_eq!(wide_to_string(&wide(text)), text);
-        }
-    }
-
-    #[test]
-    fn wide_terminates() {
-        assert_eq!(wide("x").last(), Some(&0));
-    }
+    use super::{CLASS_NAME, TITLE};
 
     #[test]
     fn constants_stay_recognizable() {

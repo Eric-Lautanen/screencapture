@@ -10,12 +10,12 @@ use std::thread_local;
 use crate::capture::Region;
 use crate::guard::{EscapeWatch, MouseCapture, ScreenDc};
 use crate::winapi::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DrawFocusRect, GetModuleHandleW,
-    GetSystemMetrics, Hwnd, Lparam, Lresult, Point, PostQuitMessage, PumpEnd, Rect,
-    RegisterClassExW, SELECTION_IDLE_LIMIT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW, SetForegroundWindow, ShowWindow,
-    UnregisterClassW, VK_ESCAPE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WndClassExW, Wparam, pump_until,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DrawFocusRect, GetSystemMetrics, Hwnd, Lparam,
+    Lresult, Point, PostQuitMessage, PumpEnd, Rect, RegisterClassExW, SELECTION_IDLE_LIMIT,
+    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW,
+    SetForegroundWindow, ShowWindow, UnregisterClassW, VK_ESCAPE, WM_KEYDOWN, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WndClassExW, Wparam,
+    kept_wide, module_handle, pump_until, wide,
 };
 
 mod ffi;
@@ -24,7 +24,7 @@ use ffi::cross_cursor;
 /// Window title for the overlay surface.
 const WINDOW_NAME: &str = "Screencapture region select";
 
-/// Class name for the overlay window (leaked to the OS).
+/// Class name for the overlay window (kept for the OS).
 const CLASS_NAME: &str = "ScreencaptureSelect";
 
 /// Drags narrower than this on either axis count as accidental clicks.
@@ -103,16 +103,6 @@ thread_local! {
     static SESSION: RefCell<Session> = RefCell::new(Session::fresh());
 }
 
-/// Text as UTF-16 with a trailing nul.
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
-/// Leak a UTF-16 buffer so the OS can retain the class name indefinitely.
-fn wide_static(text: &str) -> *const u16 {
-    Box::leak(wide(text).into_boxed_slice()).as_ptr()
-}
-
 /// The virtual desktop origin (covers monitors left of and above primary).
 fn virtual_screen_origin() -> Point {
     // SAFETY: read-only system metrics with no side effects.
@@ -132,8 +122,8 @@ fn virtual_screen_origin() -> Point {
 pub fn draw() -> io::Result<Outcome> {
     SESSION.with_borrow_mut(|state| *state = Session::fresh());
 
-    let class_name = wide_static(CLASS_NAME);
-    let instance = unsafe { GetModuleHandleW(std::ptr::null()) };
+    let class_name = kept_wide(CLASS_NAME);
+    let instance = module_handle();
     let class = WndClassExW {
         size: u32::try_from(std::mem::size_of::<WndClassExW>()).expect("class struct fits u32"),
         style: 0,

@@ -4,6 +4,15 @@
 //! the capture is committed, before encoding, and plays through `PlaySound`
 //! on a worker thread, so the capture path never waits on the audio device;
 //! other platforms stay silent.
+//!
+//! Playback walks every route Windows offers instead of trusting one: the
+//! in-memory image, then the same bytes as a file, then the stock asterisk.
+//! A machine whose audio stack refuses one route usually takes the next, and
+//! a machine that refuses all three gets a log line naming the cause rather
+//! than a silently quiet capture.
+
+#[cfg(windows)]
+use std::path::{Path, PathBuf};
 
 /// Start the capture chime the instant a capture is committed, unless the
 /// settings mute is on. The returned handle lets a caller that is about to
@@ -16,15 +25,14 @@ pub(crate) fn capture_chime(enabled: bool) -> Option<std::thread::JoinHandle<()>
     }
     let wav = synth::chime();
     Some(std::thread::spawn(move || {
-        // SAFETY: `wav` is owned by this closure and cannot move while the
-        // call runs; synchronous playback only reads the in-memory image.
-        unsafe {
-            PlaySoundW(
-                wav.as_ptr().cast(),
-                std::ptr::null_mut(),
-                SND_MEMORY | SND_NODEFAULT,
-            );
+        if play(&wav) {
+            return;
         }
+        crate::log::note(
+            "chime",
+            "the audio system refused the confirmation chime; captures stay \
+             silent (check the output device and this app's volume in the mixer)",
+        );
     }))
 }
 
@@ -32,6 +40,94 @@ pub(crate) fn capture_chime(enabled: bool) -> Option<std::thread::JoinHandle<()>
 #[cfg(not(windows))]
 pub(crate) fn capture_chime(_enabled: bool) -> Option<std::thread::JoinHandle<()>> {
     None
+}
+
+/// How many audio output devices Windows currently knows about; `None` on
+/// platforms without the chime. Zero explains a silent capture outright.
+#[cfg(windows)]
+#[must_use]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the shared signature answers nothing on platforms without a chime"
+)]
+pub(crate) fn output_devices() -> Option<u32> {
+    // SAFETY: the call takes no arguments and only reads the device count.
+    Some(unsafe { wave_out_num_devs() })
+}
+
+/// Platforms without a chime have no devices to report.
+#[cfg(not(windows))]
+#[must_use]
+pub(crate) fn output_devices() -> Option<u32> {
+    None
+}
+
+/// Play the chime through every route Windows offers, cheapest first.
+#[cfg(windows)]
+fn play(wav: &[u8]) -> bool {
+    play_image(wav) || play_file(wav) || play_alias()
+}
+
+/// The usual route: the WAV image straight from memory.
+#[cfg(windows)]
+fn play_image(wav: &[u8]) -> bool {
+    // SAFETY: `wav` outlives this synchronous call, and an in-memory image
+    // takes no module handle.
+    unsafe {
+        PlaySoundW(
+            wav.as_ptr().cast(),
+            std::ptr::null_mut(),
+            SND_MEMORY | SND_NODEFAULT,
+        ) != 0
+    }
+}
+
+/// Second route: the same bytes as a file, for audio stacks that refuse
+/// `SND_MEMORY` images but play the identical file. Only reached when the
+/// memory route failed, so the write costs nothing on a healthy machine,
+/// and the file is removed again before this returns.
+#[cfg(windows)]
+fn play_file(wav: &[u8]) -> bool {
+    let Some(path) = write_chime_file(wav) else {
+        return false;
+    };
+    let file = crate::winapi::wide(&path.to_string_lossy());
+    // SAFETY: `file` outlives this synchronous call.
+    let played = unsafe {
+        PlaySoundW(
+            file.as_ptr(),
+            std::ptr::null_mut(),
+            SND_FILENAME | SND_NODEFAULT,
+        ) != 0
+    };
+    let _ = std::fs::remove_file(&path);
+    played
+}
+
+/// Last route: the stock asterisk. Without `SND_NODEFAULT`, a machine that
+/// has no asterisk mapped still answers with the default system sound, so
+/// this succeeds wherever the machine can make any sound at all.
+#[cfg(windows)]
+fn play_alias() -> bool {
+    let alias = crate::winapi::wide("SystemAsterisk");
+    // SAFETY: `alias` outlives this synchronous call.
+    unsafe { PlaySoundW(alias.as_ptr(), std::ptr::null_mut(), SND_ALIAS) != 0 }
+}
+
+/// Write the chime to a stable temporary file; `None` when the temp folder
+/// is unusable (the caller still has the alias route).
+#[cfg(windows)]
+fn write_chime_file(wav: &[u8]) -> Option<PathBuf> {
+    let path = chime_path(&std::env::temp_dir());
+    std::fs::write(&path, wav).ok()?;
+    Some(path)
+}
+
+/// Where the file route parks the chime. Fixed name so repeated captures
+/// reuse (and overwrite) one file instead of littering the temp folder.
+#[cfg(windows)]
+fn chime_path(directory: &Path) -> PathBuf {
+    directory.join("screencapture-chime.wav")
 }
 
 /// `SND_MEMORY` (mmsystem.h): the name argument points at a WAV image
@@ -42,6 +138,12 @@ const SND_MEMORY: u32 = 0x0004;
 /// the system sound when the image is refused.
 #[cfg(windows)]
 const SND_NODEFAULT: u32 = 0x0002;
+/// `SND_FILENAME` (mmsystem.h): the name argument is a WAV file path.
+#[cfg(windows)]
+const SND_FILENAME: u32 = 0x0002_0000;
+/// `SND_ALIAS` (mmsystem.h): the name argument is a registry sound alias.
+#[cfg(windows)]
+const SND_ALIAS: u32 = 0x0001_0000;
 
 #[cfg(windows)]
 #[link(name = "winmm")]
@@ -49,6 +151,11 @@ unsafe extern "system" {
     /// Synchronous by default: the call returns when the sound ends, which
     /// is exactly what the dedicated playback thread wants.
     fn PlaySoundW(sound: *const u16, module: *mut std::ffi::c_void, flags: u32) -> i32;
+    /// Output devices the wave mapper can reach; zero means silence is
+    /// the only possible outcome, whatever route playback takes. The
+    /// export is spelled with a lowercase `w` in mmsystem.h.
+    #[link_name = "waveOutGetNumDevs"]
+    fn wave_out_num_devs() -> u32;
 }
 
 /// The waveform itself: quiet, contained, and testable without an audio
@@ -196,6 +303,39 @@ mod tests {
             super::capture_chime(false).is_none(),
             "a muted capture must not start an audio thread"
         );
+    }
+
+    /// The file route is the fallback for audio stacks that refuse the
+    /// in-memory image, so it must hand over exactly the same bytes.
+    #[cfg(windows)]
+    #[test]
+    fn the_file_route_writes_the_chime_byte_for_byte() {
+        let wav = chime();
+        let path = super::write_chime_file(&wav).expect("the temp folder takes the chime");
+        let written = std::fs::read(&path).expect("the written chime is readable");
+        assert_eq!(written, wav);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Repeated captures overwrite one file instead of filling the temp
+    /// folder with a chime per shot.
+    #[cfg(windows)]
+    #[test]
+    fn the_file_route_reuses_one_name() {
+        let folder = std::env::temp_dir();
+        let path = super::chime_path(&folder);
+        assert_eq!(path, super::chime_path(&folder));
+        assert!(
+            path.to_string_lossy().ends_with("screencapture-chime.wav"),
+            "{path:?} must name the chime file"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn the_device_count_answers_without_a_device() {
+        // Silence is diagnosable: a zero here is the whole answer.
+        assert!(super::output_devices().is_some());
     }
 
     #[test]

@@ -22,8 +22,9 @@ pub fn set(enable: bool) -> io::Result<()> {
 mod native {
     use std::ffi::c_void;
     use std::io;
-    use std::os::windows::ffi::OsStrExt as _;
     use std::path::PathBuf;
+
+    use crate::winapi::wide;
 
     type Hkey = *mut c_void;
     type Status = i32;
@@ -68,13 +69,6 @@ mod native {
         ) -> Status;
         fn RegDeleteValueW(key: Hkey, value_name: *const u16) -> Status;
         fn RegCloseKey(key: Hkey) -> Status;
-    }
-
-    fn wide(text: &str) -> Vec<u16> {
-        std::ffi::OsStr::new(text)
-            .encode_wide()
-            .chain(std::iter::once(0))
-            .collect()
     }
 
     fn run_key() -> Hkey {

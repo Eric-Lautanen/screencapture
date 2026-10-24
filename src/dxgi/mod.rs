@@ -14,7 +14,6 @@
 //! the recording pauses on its last frame meanwhile and only stops when
 //! the service never comes back.
 
-use std::ffi::c_void;
 use std::io;
 use std::time::Duration;
 
@@ -221,8 +220,18 @@ impl Duplicator {
                     .context
                     .lock(&self.staging)
                     .map_err(|hr| report("staging lock", hr))?;
-                self.absorb(mapped);
-                self.context.unlock(&self.staging);
+                let rows = self.height as usize;
+                let width_row = self.width as usize * 4;
+                // SAFETY: `staging` was created with this duplicator's
+                // height, so exactly `rows` rows are mapped.
+                let source = unsafe { mapped.bytes(rows) };
+                flatten(
+                    rows,
+                    width_row,
+                    mapped.row_pitch(),
+                    source,
+                    &mut self.scratch,
+                );
                 Ok(Some(info))
             }
             Ok((None, _)) => Ok(None),
@@ -330,29 +339,20 @@ impl Duplicator {
             // instead of painting over its own previous composite.
             return;
         };
+        let rows = self.height as usize;
+        let width_row = self.width as usize * 4;
+        // SAFETY: `staging` was created with this duplicator's height, so
+        // exactly `rows` rows are mapped.
+        let source = unsafe { mapped.bytes(rows) };
         restore(
-            self.height as usize,
-            self.width as usize * 4,
-            mapped.row_pitch as usize,
-            mapped.data,
+            rows,
+            width_row,
+            mapped.row_pitch(),
+            source,
             area,
             &mut self.scratch,
         );
-        self.context.unlock(&self.staging);
         self.painted = None;
-    }
-
-    /// Flatten the locked staging rows into the scratch frame, so every
-    /// frame lent out stays a plain `width * 4` BGRA layout.
-    fn absorb(&mut self, mapped: crate::dxgi::structs::Mapped) {
-        let width_row = self.width as usize * 4;
-        flatten(
-            self.height as usize,
-            width_row,
-            mapped.row_pitch as usize,
-            mapped.data,
-            &mut self.scratch,
-        );
     }
 }
 
@@ -397,26 +397,26 @@ fn fetch_shape(cache: &mut Option<Shape>, session: &Com<DuplicationVt>, budget: 
 
 /// Copy `pitch`-spaced BGRA rows onto tight `width_row` rows, zero-padding
 /// whatever the driver left beyond the row so lent frames stay stable.
-fn flatten(rows: usize, width_row: usize, pitch: usize, data: *mut c_void, output: &mut [u8]) {
+///
+/// Pure byte work over slices: the one raw-pointer step (mapped memory to
+/// a slice) lives in [`crate::dxgi::com::Locked::bytes`], so the arithmetic
+/// here is safe and testable on plain buffers.
+fn flatten(rows: usize, width_row: usize, pitch: usize, source: &[u8], output: &mut [u8]) {
     output.fill(0);
-    if data.is_null() {
-        return;
-    }
-    // SAFETY: `data` points at `pitch * rows` bytes the driver mapped for
-    // us until `unlock`; the bounds here follow the API contract.
-    let source =
-        unsafe { std::slice::from_raw_parts(data.cast::<u8>(), pitch.saturating_mul(rows)) };
-    if pitch == width_row {
-        output.copy_from_slice(&source[..width_row * rows]);
-        return;
-    }
     for row in 0..rows {
-        let begin = row * pitch;
-        let end = begin + width_row;
-        if end > source.len() {
+        let (Some(begin), Some(target)) = (row.checked_mul(pitch), row.checked_mul(width_row))
+        else {
+            break;
+        };
+        let (Some(end), Some(target_end)) =
+            (begin.checked_add(width_row), target.checked_add(width_row))
+        else {
+            break;
+        };
+        if end > source.len() || target_end > output.len() {
             break;
         }
-        output[row * width_row..row * width_row + width_row].copy_from_slice(&source[begin..end]);
+        output[target..target_end].copy_from_slice(&source[begin..end]);
     }
 }
 
@@ -428,7 +428,7 @@ fn restore(
     rows: usize,
     width_row: usize,
     pitch: usize,
-    data: *mut c_void,
+    source: &[u8],
     area: Rect,
     output: &mut [u8],
 ) {
@@ -437,22 +437,28 @@ fn restore(
     let right = usize::try_from(area.right.max(0)).unwrap_or(0).min(pixels);
     let top = usize::try_from(area.top.max(0)).unwrap_or(0).min(rows);
     let bottom = usize::try_from(area.bottom.max(0)).unwrap_or(0).min(rows);
-    if data.is_null() || left >= right || top >= bottom {
+    if left >= right || top >= bottom {
         return;
     }
-    // SAFETY: `data` points at `pitch * rows` bytes the driver mapped for
-    // us until `unlock`; the bounds here follow the API contract.
-    let source =
-        unsafe { std::slice::from_raw_parts(data.cast::<u8>(), pitch.saturating_mul(rows)) };
+    let column = left * 4;
     let span = (right - left) * 4;
     for row in top..bottom {
-        let begin = row * pitch + left * 4;
-        let end = begin + span;
-        let target = row * width_row + left * 4;
-        if end > source.len() || target + span > output.len() {
+        let (Some(begin), Some(target)) = (
+            row.checked_mul(pitch)
+                .and_then(|base| base.checked_add(column)),
+            row.checked_mul(width_row)
+                .and_then(|base| base.checked_add(column)),
+        ) else {
+            break;
+        };
+        let (Some(end), Some(target_end)) = (begin.checked_add(span), target.checked_add(span))
+        else {
+            break;
+        };
+        if end > source.len() || target_end > output.len() {
             break;
         }
-        output[target..target + span].copy_from_slice(&source[begin..end]);
+        output[target..target_end].copy_from_slice(&source[begin..end]);
     }
 }
 
@@ -529,8 +535,7 @@ mod tests {
         source[0..4].copy_from_slice(&[10, 20, 30, 255]);
         source[16..20].copy_from_slice(&[70, 80, 90, 255]);
         let mut output = vec![1u8; 16];
-        let data = source.as_mut_ptr().cast::<std::ffi::c_void>();
-        flatten(rows, width_row, 16, data, &mut output);
+        flatten(rows, width_row, 16, &source, &mut output);
         assert_eq!(
             output,
             [10, 20, 30, 255, 0, 0, 0, 0, 70, 80, 90, 255, 0, 0, 0, 0]
@@ -558,8 +563,7 @@ mod tests {
             right: 2,
             bottom: 2,
         };
-        let data = source.as_mut_ptr().cast::<std::ffi::c_void>();
-        restore(rows, width_row, 16, data, area, &mut output);
+        restore(rows, width_row, 16, &source, area, &mut output);
         assert_eq!(
             output,
             [
@@ -573,9 +577,8 @@ mod tests {
     /// nothing.
     #[test]
     fn restore_ignores_nonsense_rectangles() {
-        let mut source = vec![9u8; 32];
+        let source = vec![9u8; 32];
         let mut output = vec![0xAAu8; 16];
-        let data = source.as_mut_ptr().cast::<std::ffi::c_void>();
         for area in [
             Rect {
                 left: 5,
@@ -591,14 +594,14 @@ mod tests {
             },
             Rect::default(),
         ] {
-            restore(2, 8, 16, data, area, &mut output);
+            restore(2, 8, 16, &source, area, &mut output);
         }
         assert_eq!(output, vec![0xAA; 16]);
         restore(
             2,
             8,
             16,
-            std::ptr::null_mut(),
+            &[],
             Rect {
                 left: 0,
                 top: 0,
@@ -608,5 +611,21 @@ mod tests {
             &mut output,
         );
         assert_eq!(output, vec![0xAA; 16]);
+    }
+
+    /// A mapping shorter than the declared frame (a driver that trimmed
+    /// its staging rows) copies what exists and leaves the rest black
+    /// instead of reading past the buffer.
+    #[test]
+    fn flatten_stops_at_a_short_mapping() {
+        let source = vec![0x11u8; 8];
+        let mut output = vec![0xAAu8; 16];
+        flatten(2, 8, 8, &source, &mut output);
+        assert_eq!(
+            output,
+            [
+                0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0, 0, 0, 0, 0, 0, 0, 0
+            ]
+        );
     }
 }
