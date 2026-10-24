@@ -226,22 +226,22 @@ pub fn hex(bytes: &[u8]) -> String {
     text
 }
 
-/// Ïƒâ‚€ (FIPS 180-4 formula 4.3).
+/// σ₀ (FIPS 180-4 formula 4.3).
 fn sigma_small_0(word: u32) -> u32 {
     word.rotate_right(7) ^ word.rotate_right(18) ^ (word >> 3)
 }
 
-/// Ïƒâ‚.
+/// σ₁.
 fn sigma_small_1(word: u32) -> u32 {
     word.rotate_right(17) ^ word.rotate_right(19) ^ (word >> 10)
 }
 
-/// Î£â‚€.
+/// Σ₀.
 fn sigma_big_0(word: u32) -> u32 {
     word.rotate_right(2) ^ word.rotate_right(13) ^ word.rotate_right(22)
 }
 
-/// Î£â‚.
+/// Σ₁.
 fn sigma_big_1(word: u32) -> u32 {
     word.rotate_right(6) ^ word.rotate_right(11) ^ word.rotate_right(25)
 }
