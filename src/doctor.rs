@@ -135,7 +135,7 @@ fn photo_text(
     depth: crate::settings::StillDepth,
     quality: crate::settings::StillQuality,
 ) -> String {
-    if quality == crate::settings::StillQuality::Lossless {
+    if quality == crate::settings::StillQuality::Png {
         format!("{}, {depth}-bit", quality.label())
     } else {
         // A JPEG has no depth of its own: the encoder always writes 8-bit,
@@ -521,15 +521,24 @@ mod tests {
     #[test]
     fn a_still_reports_the_form_it_will_be_written_as() {
         assert_eq!(
-            photo_text(StillDepth::Eight, StillQuality::Lossless),
+            photo_text(StillDepth::Eight, StillQuality::Png),
             "Lossless — PNG, 8-bit"
         );
         assert_eq!(
-            photo_text(StillDepth::Sixteen, StillQuality::Lossless),
+            photo_text(StillDepth::Sixteen, StillQuality::Png),
             "Lossless — PNG, 16-bit"
         );
-        // A JPEG is 8-bit whatever the PNG depth says, and the report says
-        // so rather than repeating a depth the file does not have.
+        // Only the PNG has a depth to report. The other lossless forms and
+        // the JPEG steps are 8-bit whatever the setting says, and the report
+        // says so rather than repeating a depth the file does not have.
+        assert_eq!(
+            photo_text(StillDepth::Sixteen, StillQuality::Webp),
+            "Lossless — WebP, 8-bit"
+        );
+        assert_eq!(
+            photo_text(StillDepth::Sixteen, StillQuality::Bmp),
+            "Lossless — BMP, 8-bit"
+        );
         assert_eq!(
             photo_text(StillDepth::Sixteen, StillQuality::Compact),
             "Compact — JPEG 70, 8-bit"

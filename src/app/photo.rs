@@ -145,7 +145,7 @@ fn attach_clipboard(
     frame: &[u8],
     quality: StillQuality,
 ) -> Option<io::Result<()>> {
-    let png = if quality == StillQuality::Lossless {
+    let png = if quality == StillQuality::Png {
         std::fs::read(path).ok()
     } else {
         None

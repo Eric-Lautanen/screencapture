@@ -1477,6 +1477,29 @@ Plan of record, in build order. Every session ends with
   `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`, 246 tests green.
 - [x] Version 0.2.0: a new setting and a changed frame are a minor release.
 
+## Session 40 - Two more lossless still forms (done)
+
+- [x] `[photo] quality` gained `webp` and `bmp`. WebP is libwebp's lossless
+  mode (`-lossless 1 -quality 100`, where quality is compression effort), so
+  the pixels are unchanged and the file is usually a third of the PNG's;
+  BMP is the encoder's own uncompressed 32-bit form, for a consumer that
+  wants the raw bitmap. Both are 8-bit, so `depth` stays the PNG's.
+- [x] The bundled engine ships both: `-encoders` lists `libwebp`,
+  `libwebp_anim`, and `bmp`; the WebP encoder also accepts BGRA directly.
+- [x] Measured on one 1920x1200 desktop take through `--photo`: PNG 177 KB,
+  lossless WebP 50 KB, BMP 9.2 MB, with `ffprobe` reporting `webp` and `bmp`
+  at 1920x1200. (JPEG 95 on a 1280x720 take was 131 KB against a 225 KB
+  PNG.)
+- [x] The dropdown lists all six steps, and `--check` names what a take will
+  write ("Lossless — WebP, 8-bit", "Lossless — BMP, 8-bit").
+- [x] Tests: the WebP arm must name `-lossless 1` (without it libwebp writes
+  a lossy file and the label lies), the BMP arm must carry no compression or
+  conversion argument, every choice round-trips through the settings file
+  and keeps its extension (the three JPEG steps share `.jpg`), and `--check`
+  prints the right form for each.
+- [x] Gates: fmt, pedantic clippy `-D warnings` on native plus
+  `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`, 248 tests green.
+
 ## Deferred backlog
 
 - numbered display names via `EnumDisplayDevices`; mac multi-display
