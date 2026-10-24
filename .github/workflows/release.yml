@@ -163,9 +163,10 @@ jobs:
               $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash.ToLowerInvariant()
               "$hash  $(Split-Path -Leaf $file)"
           }
-          [System.IO.File]::WriteAllLines(
+          # LF endings: sha256sum -c on other platforms reads the file verbatim.
+          [System.IO.File]::WriteAllText(
               (Join-Path $PWD 'dist/SHA256SUMS.txt'),
-              $lines,
+              (($lines -join "`n") + "`n"),
               [System.Text.Encoding]::ASCII
           )
           Get-Content -LiteralPath dist/SHA256SUMS.txt
