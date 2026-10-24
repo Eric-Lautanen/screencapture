@@ -8,6 +8,7 @@
 use crate::dxgi::structs::{
     DuplDesc, FrameInfo, Guid, Mapped, OutputDesc, PointerShapeInfo, Tex2dDesc,
 };
+use crate::pin_layout;
 use std::ffi::c_void;
 
 // ---------------------------------------------------------------------------
@@ -82,9 +83,27 @@ macro_rules! interfaces {
                     self.unknown.intact() $( && self.$slot as usize != 0 )*
                 }
             }
+
+            // Layout pin: the `IUnknown` prefix must stay at slot 0, and
+            // the whole table is one 8-byte fn pointer per slot after it
+            // (every slot type here is a plain function pointer, so that
+            // arithmetic is exact rather than approximate).
+            const _: () = {
+                assert!(
+                    ::core::mem::offset_of!($name, unknown) == 0,
+                    ::core::stringify!($name)
+                );
+                assert!(
+                    ::core::mem::size_of::<$name>()
+                        == 24 + 8usize * (0usize $( + { let _ = stringify!($slot); 1usize } )*),
+                    ::core::stringify!($name)
+                );
+            };
         )*
     };
 }
+
+pin_layout!(UnknownVt, 24; query = 0, reference = 8, release = 16);
 
 interfaces! {
     (

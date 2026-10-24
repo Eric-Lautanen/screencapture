@@ -18,6 +18,8 @@ use std::ffi::c_void;
 use std::io;
 use std::time::Duration;
 
+use crate::winapi::Rect;
+
 use crate::capture::Region;
 use crate::dxgi::abi::{ContextVt, DeviceVt, DuplicationVt, Output1Vt, TextureVt};
 use crate::dxgi::com::Com;
@@ -63,6 +65,10 @@ pub struct Duplicator {
     pose: Pose,
     /// Latest pointer bitmap the driver handed over, if any.
     cursor_shape: Option<Shape>,
+    /// Frame rectangle the last composite painted the pointer into, so a
+    /// quiet tick can put the desktop pixels back under it; `None` when
+    /// nothing was drawn last tick.
+    painted: Option<Rect>,
     /// Consecutive busy rebuild attempts; a runaway duplication service
     /// stops the recording with a message instead of spinning forever.
     busy_spins: u32,
@@ -101,6 +107,7 @@ impl Duplicator {
                 visible: false,
             },
             cursor_shape: None,
+            painted: None,
             busy_spins: 0,
         };
         duplicator.reconnect()?;
@@ -110,7 +117,11 @@ impl Duplicator {
             .map_err(|hr| report("staging texture", hr))?;
         surface(&staging)?;
         duplicator.staging = staging;
-        duplicator.scratch = vec![0; region.width as usize * region.height as usize * 4];
+        let bytes = (region.width as usize)
+            .checked_mul(region.height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| io::Error::other("capture region is oversized"))?;
+        duplicator.scratch = vec![0; bytes];
         // First paint best effort; blank beats stalling the opener when the
         // desktop has been quiet since duplication began.
         let _ = duplicator.refresh(FIRST_PAINT_WAIT);
@@ -144,9 +155,15 @@ impl Duplicator {
     fn refresh(&mut self, wait: u32) -> io::Result<()> {
         let fresh = self.pull(wait)?;
         if self.draw_cursor {
-            // A quiet screen reports nothing, yet the pointer still
-            // moves: re-anchor it from the live desktop cursor.
             if fresh.is_none() {
+                // The compositor had nothing new, so `scratch` still holds
+                // the previous frame *with* the pointer composited in:
+                // drawing again on top of that would darken semi-alpha
+                // shapes and XOR-invert monochrome ones tick after tick.
+                // Put the desktop back under the old pose first, then
+                // re-anchor the pointer from the live cursor (it may have
+                // moved on a screen that reports nothing).
+                self.restore_pointer();
                 self.follow_desktop();
             }
             self.paint_pointer();
@@ -168,9 +185,18 @@ impl Duplicator {
         };
         match outcome {
             Ok((Some(resource), info)) => {
-                let texture = resource
-                    .query_to::<TextureVt>(&ID3D_TEXTURE2D)
-                    .map_err(|hr| report("texture", hr))?;
+                let texture = match resource.query_to::<TextureVt>(&ID3D_TEXTURE2D) {
+                    Ok(texture) => texture,
+                    Err(hr) => {
+                        // The acquired frame transaction is still open; giving
+                        // it back keeps the next `AcquireNextFrame` usable
+                        // instead of forcing a reconnect for one cast error.
+                        if let Some(session) = self.duplication.as_ref() {
+                            let _ = session.release_frame();
+                        }
+                        return Err(report("texture", hr));
+                    }
+                };
                 self.context.clone_resource(&self.staging, &texture);
                 if let Some(session) = self.duplication.as_ref() {
                     if self.draw_cursor {
@@ -269,19 +295,10 @@ impl Duplicator {
     /// Re-anchor the pointer from the live desktop cursor; used on quiet
     /// screens, where duplication reports nothing but the pointer moves.
     fn follow_desktop(&mut self) {
-        let mut state = CursorState {
-            size: u32::try_from(std::mem::size_of::<CursorState>()).unwrap_or(0),
-            flags: 0,
-            cursor: std::ptr::null_mut(),
-            position: crate::winapi::Point::default(),
-        };
-        let shown = unsafe { GetCursorInfo(&raw mut state) } != 0
-            && state.flags & CURSOR_SHOWING != 0
-            && state.flags & CURSOR_SUPPRESSED == 0;
-        if shown {
+        if let Some((x, y)) = cursor::desktop_cursor_position() {
             self.pose = Pose {
-                left: state.position.x - self.origin.0,
-                top: state.position.y - self.origin.1,
+                left: x - self.origin.0,
+                top: y - self.origin.1,
                 visible: true,
             };
         } else {
@@ -289,12 +306,40 @@ impl Duplicator {
         }
     }
 
-    /// Composite the tracked pointer onto the current scratch frame.
+    /// Composite the tracked pointer onto the current scratch frame and
+    /// remember the frame rectangle it touched.
     fn paint_pointer(&mut self) {
-        let Some(shape) = self.cursor_shape.as_ref() else {
+        self.painted = match self.cursor_shape.as_ref() {
+            Some(shape) => {
+                cursor::apply(&mut self.scratch, self.width, self.height, self.pose, shape)
+            }
+            None => None,
+        };
+    }
+
+    /// Put the pristine desktop pixels back where the last composite
+    /// painted the pointer. The staging texture still holds the desktop
+    /// image the frame was flattened from, so the repair is a row copy of
+    /// the pointer's own rectangle.
+    fn restore_pointer(&mut self) {
+        let Some(area) = self.painted else {
             return;
         };
-        cursor::apply(&mut self.scratch, self.width, self.height, self.pose, shape);
+        let Ok(mapped) = self.context.lock(&self.staging) else {
+            // Keep the rectangle: a later quiet tick retries the repair
+            // instead of painting over its own previous composite.
+            return;
+        };
+        restore(
+            self.height as usize,
+            self.width as usize * 4,
+            mapped.row_pitch as usize,
+            mapped.data,
+            area,
+            &mut self.scratch,
+        );
+        self.context.unlock(&self.staging);
+        self.painted = None;
     }
 
     /// Flatten the locked staging rows into the scratch frame, so every
@@ -375,9 +420,47 @@ fn flatten(rows: usize, width_row: usize, pitch: usize, data: *mut c_void, outpu
     }
 }
 
-/// Whether duplication should ever carry this plan (audio of the policy):
-/// one whole unrotated output. Pointer drawing is not a disqualifier; the
-/// pointer is composited in software from the duplication pointer stream.
+/// Put the desktop pixels inside `area` back into `output` from the locked
+/// staging rows: the undo of one pointer composite. The rectangle comes
+/// from [`cursor::apply`], so it is already clipped to the frame; the
+/// bounds here only keep a nonsensical rectangle from touching anything.
+fn restore(
+    rows: usize,
+    width_row: usize,
+    pitch: usize,
+    data: *mut c_void,
+    area: Rect,
+    output: &mut [u8],
+) {
+    let pixels = width_row / 4;
+    let left = usize::try_from(area.left.max(0)).unwrap_or(0).min(pixels);
+    let right = usize::try_from(area.right.max(0)).unwrap_or(0).min(pixels);
+    let top = usize::try_from(area.top.max(0)).unwrap_or(0).min(rows);
+    let bottom = usize::try_from(area.bottom.max(0)).unwrap_or(0).min(rows);
+    if data.is_null() || left >= right || top >= bottom {
+        return;
+    }
+    // SAFETY: `data` points at `pitch * rows` bytes the driver mapped for
+    // us until `unlock`; the bounds here follow the API contract.
+    let source =
+        unsafe { std::slice::from_raw_parts(data.cast::<u8>(), pitch.saturating_mul(rows)) };
+    let span = (right - left) * 4;
+    for row in top..bottom {
+        let begin = row * pitch + left * 4;
+        let end = begin + span;
+        let target = row * width_row + left * 4;
+        if end > source.len() || target + span > output.len() {
+            break;
+        }
+        output[target..target + span].copy_from_slice(&source[begin..end]);
+    }
+}
+
+/// Whether the region is a candidate for a duplication attempt (any non-empty
+/// region; `open` and `pick_output` then check whether it matches one whole
+/// unrotated BGRA output and fall back to GDI when it does not). Pointer
+/// drawing is not a disqualifier; the pointer is composited in software from
+/// the duplication pointer stream.
 #[must_use]
 pub fn eligible(region: Region) -> bool {
     region.is_sane()
@@ -420,35 +503,11 @@ enum Retake {
     Dead(io::Error),
 }
 
-// ---------------------------------------------------------------------------
-// Live desktop cursor look-up (`user32`): duplication only reports pointer
-// moves alongside acquired frames, so quiet screens re-anchor the pointer
-// from the shell's own cursor state.
-// ---------------------------------------------------------------------------
-
-/// `CURSORINFO`.
-#[repr(C)]
-struct CursorState {
-    size: u32,
-    flags: u32,
-    cursor: *mut c_void,
-    position: crate::winapi::Point,
-}
-
-/// `CURSOR_SHOWING`: the cursor is being drawn.
-const CURSOR_SHOWING: u32 = 1;
-/// `CURSOR_SUPPRESSED`: the shell hides it (tablet mode, touch input).
-const CURSOR_SUPPRESSED: u32 = 2;
-
-#[link(name = "user32")]
-unsafe extern "system" {
-    fn GetCursorInfo(state: *mut CursorState) -> i32;
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{eligible, flatten};
+    use super::{eligible, flatten, restore};
     use crate::capture::Region;
+    use crate::winapi::Rect;
 
     #[test]
     fn whole_outputs_stay_eligible() {
@@ -476,5 +535,78 @@ mod tests {
             output,
             [10, 20, 30, 255, 0, 0, 0, 0, 70, 80, 90, 255, 0, 0, 0, 0]
         );
+    }
+
+    /// The pointer composite is undone by copying its rectangle back from
+    /// the staging image; pixels outside the rectangle keep whatever the
+    /// painted frame held.
+    #[test]
+    fn restore_puts_the_desktop_back_under_the_pointer() {
+        let width_row = 8;
+        let rows = 2;
+        // Padded staging rows: two 2-pixel rows of desktop pixels.
+        let mut source = vec![0u8; 32];
+        source[0..4].copy_from_slice(&[10, 20, 30, 255]);
+        source[4..8].copy_from_slice(&[11, 21, 31, 255]);
+        source[16..20].copy_from_slice(&[70, 80, 90, 255]);
+        source[20..24].copy_from_slice(&[71, 81, 91, 255]);
+        // The frame as the pointer composite left it.
+        let mut output = vec![0xAAu8; 16];
+        let area = Rect {
+            left: 1,
+            top: 0,
+            right: 2,
+            bottom: 2,
+        };
+        let data = source.as_mut_ptr().cast::<std::ffi::c_void>();
+        restore(rows, width_row, 16, data, area, &mut output);
+        assert_eq!(
+            output,
+            [
+                0xAA, 0xAA, 0xAA, 0xAA, 11, 21, 31, 255, // first row, column 1
+                0xAA, 0xAA, 0xAA, 0xAA, 71, 81, 91, 255, // second row, column 1
+            ]
+        );
+    }
+
+    /// A rectangle entirely outside the frame, or an empty one, touches
+    /// nothing.
+    #[test]
+    fn restore_ignores_nonsense_rectangles() {
+        let mut source = vec![9u8; 32];
+        let mut output = vec![0xAAu8; 16];
+        let data = source.as_mut_ptr().cast::<std::ffi::c_void>();
+        for area in [
+            Rect {
+                left: 5,
+                top: 0,
+                right: 2,
+                bottom: 2,
+            },
+            Rect {
+                left: -4,
+                top: -4,
+                right: -1,
+                bottom: -1,
+            },
+            Rect::default(),
+        ] {
+            restore(2, 8, 16, data, area, &mut output);
+        }
+        assert_eq!(output, vec![0xAA; 16]);
+        restore(
+            2,
+            8,
+            16,
+            std::ptr::null_mut(),
+            Rect {
+                left: 0,
+                top: 0,
+                right: 2,
+                bottom: 2,
+            },
+            &mut output,
+        );
+        assert_eq!(output, vec![0xAA; 16]);
     }
 }

@@ -17,6 +17,48 @@
 //! The pointer image is drawn with its top-left at the pose the API
 //! reports; parts outside the frame simply do not exist.
 
+use std::ffi::c_void;
+
+use crate::pin_layout;
+use crate::winapi::Rect;
+
+/// `CURSORINFO` (winuser.h).
+#[repr(C)]
+struct CursorState {
+    size: u32,
+    flags: u32,
+    cursor: *mut c_void,
+    position: crate::winapi::Point,
+}
+
+pin_layout!(CursorState, 24; size = 0, flags = 4, cursor = 8,
+    position = 16);
+
+const CURSOR_SHOWING: u32 = 1;
+const CURSOR_SUPPRESSED: u32 = 2;
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn GetCursorInfo(state: *mut CursorState) -> i32;
+}
+
+/// Live desktop cursor coordinates when the shell is currently showing the
+/// pointer; `None` when hidden or suppressed.
+#[must_use]
+pub(super) fn desktop_cursor_position() -> Option<(i32, i32)> {
+    let mut state = CursorState {
+        size: u32::try_from(std::mem::size_of::<CursorState>()).unwrap_or(0),
+        flags: 0,
+        cursor: std::ptr::null_mut(),
+        position: crate::winapi::Point::default(),
+    };
+    // SAFETY: `state` is a local initialized struct with `size` populated.
+    let shown = unsafe { GetCursorInfo(&raw mut state) } != 0
+        && state.flags & CURSOR_SHOWING != 0
+        && state.flags & CURSOR_SUPPRESSED == 0;
+    shown.then_some((state.position.x, state.position.y))
+}
+
 /// Where the pointer is this tick, in the frame's own coordinates.
 #[derive(Clone, Copy, Debug)]
 pub struct Pose {
@@ -67,12 +109,14 @@ impl Shape {
 
 /// Draw the pointer onto the frame when it intersects it.
 ///
-/// Returns false when the pose hides the pointer, the shape is malformed,
-/// or the shape sits entirely outside the frame — every case keeps the
-/// frame a valid image, just possibly without the pointer drawn.
-pub fn apply(frame: &mut [u8], width: u32, height: u32, pose: Pose, shape: &Shape) -> bool {
+/// Answers the frame rectangle that was composited, or `None` when the pose
+/// hides the pointer, the shape is malformed, or the shape sits entirely
+/// outside the frame — every case keeps the frame a valid image, just
+/// possibly without the pointer drawn. The rectangle lets the caller undo
+/// its own composite when the compositor has nothing new to offer.
+pub fn apply(frame: &mut [u8], width: u32, height: u32, pose: Pose, shape: &Shape) -> Option<Rect> {
     if !pose.visible || width == 0 || height == 0 || !shape.coherent() {
-        return false;
+        return None;
     }
     // Clipping window: the frame pixels this tick actually draws, and where
     // inside the bitmap they come from.
@@ -81,7 +125,7 @@ pub fn apply(frame: &mut [u8], width: u32, height: u32, pose: Pose, shape: &Shap
     let last_x = (i64::from(pose.left) + i64::from(shape.width)).min(i64::from(width));
     let last_y = (i64::from(pose.top) + i64::from(shape.height)).min(i64::from(height));
     if i64::from(first_x) >= last_x || i64::from(first_y) >= last_y {
-        return false;
+        return None;
     }
     let skip_x = u32::try_from(first_x - pose.left).unwrap_or(0);
     let skip_y = u32::try_from(first_y - pose.top).unwrap_or(0);
@@ -102,7 +146,12 @@ pub fn apply(frame: &mut [u8], width: u32, height: u32, pose: Pose, shape: &Shap
             }
         }
     }
-    true
+    Some(Rect {
+        left: first_x,
+        top: first_y,
+        right: i32::try_from(last_x).unwrap_or(i32::MAX),
+        bottom: i32::try_from(last_y).unwrap_or(i32::MAX),
+    })
 }
 
 /// One pixel's verdict: the BGRA quad to paint, or `None` to leave the
@@ -217,7 +266,7 @@ mod tests {
             top: 1,
             visible: true,
         };
-        assert!(apply(&mut frame, 4, 4, pose, &shape));
+        assert!(apply(&mut frame, 4, 4, pose, &shape).is_some());
         let pixel = |x: usize, y: usize| &frame[y * 16 + x * 4..y * 16 + x * 4 + 4];
         assert_eq!(pixel(1, 1), &[0, 0, 0xFF, 0xFF]);
         // r = (255*128 + 64*127 + 127) / 255 = 160.
@@ -249,7 +298,7 @@ mod tests {
             top: 0,
             visible: true,
         };
-        assert!(apply(&mut dark, 4, 4, pose, &shape));
+        assert!(apply(&mut dark, 4, 4, pose, &shape).is_some());
         let pixel = |x: usize, y: usize| &dark[y * 16 + x * 4..y * 16 + x * 4 + 4];
         // Black screen: (1,0) AND=1 XOR=1 keeps then inverts — white.
         assert_eq!(pixel(1, 0), &[0xFF, 0xFF, 0xFF, 0xFF]);
@@ -261,7 +310,7 @@ mod tests {
         // On a white screen: column 1 inverts white into black, column 2
         // still paints white (the screen was discarded), column 0 black.
         let mut bright = vec![0xFF_u8; 64];
-        assert!(apply(&mut bright, 4, 4, pose, &shape));
+        assert!(apply(&mut bright, 4, 4, pose, &shape).is_some());
         assert_eq!(&bright[4..8], &[0, 0, 0, 0xFF]);
         assert_eq!(&bright[8..12], &[0xFF, 0xFF, 0xFF, 0xFF]);
         assert_eq!(&bright[0..4], &[0, 0, 0, 0xFF]);
@@ -286,7 +335,7 @@ mod tests {
             top: 0,
             visible: true,
         };
-        assert!(apply(&mut frame, 4, 1, pose, &shape));
+        assert!(apply(&mut frame, 4, 1, pose, &shape).is_some());
         let pixel = |x: usize| &frame[x * 4..x * 4 + 4];
         assert_eq!(pixel(0), &[0xFF, 0, 0, 0xFF]);
         assert_eq!(pixel(1), &[0x10, 0x10, 0x1F, 0xFF]);
@@ -315,7 +364,9 @@ mod tests {
             top: 0,
             visible: true,
         };
-        assert!(apply(&mut frame, 4, 4, edge, &shape));
+        let area = apply(&mut frame, 4, 4, edge, &shape).expect("the visible part paints");
+        // The answer is exactly the clipped rectangle that was composited.
+        assert_eq!((area.left, area.top, area.right, area.bottom), (3, 0, 4, 2),);
         // Only frame column 3 got the blue replacement, on both rows.
         assert_eq!(&frame[12..16], &[9, 0, 0, 0xFF]);
         assert_eq!(&frame[28..32], &[9, 0, 0, 0xFF]);
@@ -327,7 +378,7 @@ mod tests {
             top: 0,
             visible: true,
         };
-        assert!(!apply(&mut clean, 4, 4, outside, &shape));
+        assert!(apply(&mut clean, 4, 4, outside, &shape).is_none());
         assert_eq!(clean, vec![0; 64]);
     }
 
@@ -347,12 +398,12 @@ mod tests {
             height: 2,
             pitch: 8,
         };
-        assert!(!apply(&mut frame, 4, 4, blank, &shape));
+        assert!(apply(&mut frame, 4, 4, blank, &shape).is_none());
         let shown = Pose {
             left: 0,
             top: 0,
             visible: true,
         };
-        assert!(!apply(&mut frame, 4, 4, shown, &shape));
+        assert!(apply(&mut frame, 4, 4, shown, &shape).is_none());
     }
 }
