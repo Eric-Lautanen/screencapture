@@ -176,3 +176,67 @@ impl Probe {
             .unwrap_or(0))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Binary, discover};
+    use std::fs;
+    use std::path::PathBuf;
+
+    /// A scratch file standing in for a configured engine.
+    fn scratch_engine(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "screencapture-engine-{}-{name}",
+            std::process::id()
+        ));
+        fs::write(&path, b"").expect("scratch engine");
+        path
+    }
+
+    #[test]
+    fn a_configured_engine_that_exists_is_used() {
+        let engine = scratch_engine("configured");
+        let found = discover(Some(&engine)).expect("the configured engine");
+        assert_eq!(found.path, engine);
+        let _ = fs::remove_file(&engine);
+    }
+
+    /// A stale `[engine] path` must not stop the bundled engine from being
+    /// found — and must never fall through to a bare name on Windows, where
+    /// `Command` would search the working directory and `PATH` and could
+    /// launch a stray `ffmpeg.exe` instead of the shipped one.
+    #[test]
+    fn a_missing_configured_engine_falls_through_to_a_real_file() {
+        let missing = std::env::temp_dir().join("screencapture-engine-that-is-not-there");
+        let _ = fs::remove_file(&missing);
+        let Some(found) = discover(Some(&missing)) else {
+            return; // this layout ships no engine: nothing to fall through to
+        };
+        assert_ne!(found.path, missing, "a missing path is not an engine");
+        if cfg!(windows) {
+            assert!(
+                found.path.is_absolute(),
+                "Windows must never fall back to a bare name: {}",
+                found.path.display()
+            );
+        }
+    }
+
+    /// `ffprobe` is looked for beside whichever engine was found, so a
+    /// custom `[engine] path` keeps its own toolchain instead of silently
+    /// probing with an unrelated binary.
+    #[test]
+    fn the_probe_is_looked_for_beside_the_engine() {
+        let engine = Binary {
+            path: PathBuf::from("somewhere/ffmpeg"),
+        };
+        let probe = engine.probe();
+        assert_eq!(probe.path.parent(), engine.path.parent());
+        let name = probe
+            .path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        assert!(name.starts_with("ffprobe"), "{name}");
+    }
+}

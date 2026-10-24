@@ -315,8 +315,18 @@ impl Drop for Screen {
 mod tests {
     use super::stride_for;
 
+    /// One row of the copied bitmap is four bytes per pixel with no
+    /// padding: a stride that disagrees hands BGRA rows to `FFmpeg`
+    /// sideways, which reads as a skew no encoder setting can fix.
     #[test]
     fn stride_is_bgra_row_bytes() {
-        assert_eq!(stride_for(1920), 7680);
+        for (width, stride) in [(1, 4), (3, 12), (1920, 7680), (3840, 15360)] {
+            assert_eq!(stride_for(width), stride, "{width} px across");
+        }
+        // Every usable width still describes a whole row.
+        for width in [1_u32, 2, 5, 586, 1918, 3840] {
+            assert_eq!(stride_for(width) % 4, 0, "{width} px across");
+            assert!(stride_for(width) >= usize::try_from(width).unwrap_or(0));
+        }
     }
 }

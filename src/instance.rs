@@ -120,6 +120,20 @@ mod native {
 mod tests {
     use super::{Acquire, acquire};
 
+    /// The guard exists so a second launch — hotkey-spawned, or a stray
+    /// double click — never stacks a second tray icon or recorder: the
+    /// first acquire owns the tray, the next one is told it is taken.
+    #[cfg(windows)]
+    #[test]
+    fn a_second_instance_is_told_the_tray_is_taken() {
+        let first = acquire().expect("the guard mutex");
+        if first != Acquire::Owner {
+            return; // a real instance is running on this desktop
+        }
+        assert_eq!(acquire().expect("the guard mutex"), Acquire::AlreadyRunning);
+    }
+
+    #[cfg(not(windows))]
     #[test]
     fn the_lock_reinstalls_after_release() -> std::io::Result<()> {
         // One acquire per test binary process: the second call from a
