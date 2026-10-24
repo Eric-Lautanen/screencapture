@@ -17,6 +17,14 @@ screencapture is lightweight, std-only Rust. Keep it that way.
 - Prefer small modules, explicit types, and native platform code over new
   machinery.
 
+## Commits
+
+- Keep one logical change per commit. Stage the files that belong to it by
+  path (`git add <paths>`), and leave unrelated or other agents' edits for
+  their own commit.
+- Never bulk-stage or bulk-commit the tree (`git add -A`, `git add .`,
+  `git commit -a`). Split the work into focused commits instead.
+
 ## Attribution
 
 The maintainer uses an AI coding harness. It is a tool, not a contributor.
