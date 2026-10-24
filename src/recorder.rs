@@ -462,7 +462,10 @@ fn pick_source(region: &Region, plan: &Plan) -> io::Result<Source> {
             match Duplicator::open(*region, plan.cursor) {
                 Ok(duplication) => return Ok(Source::Duplication(duplication)),
                 Err(reason) => {
-                    eprintln!("capture: desktop duplication unavailable ({reason}); using GDI");
+                    crate::log::note(
+                        "capture",
+                        &format!("desktop duplication unavailable ({reason}); using GDI"),
+                    );
                 }
             }
         }

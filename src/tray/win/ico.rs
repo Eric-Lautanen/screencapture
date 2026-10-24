@@ -43,7 +43,10 @@ pub(super) unsafe fn app_or_fallback() -> Hicon {
     if let Some(icon) = app_icon() {
         return icon;
     }
-    eprintln!("warn  tray: icon resource unusable; using the system icon");
+    crate::log::note(
+        "warn",
+        "tray: icon resource unusable; using the system icon",
+    );
     // SAFETY: null instance resolves a shared system resource.
     unsafe { LoadIconW(std::ptr::null_mut(), IDI_APPLICATION as *const u16) }
 }
