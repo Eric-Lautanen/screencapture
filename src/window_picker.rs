@@ -21,6 +21,7 @@ use crate::pin_layout;
 use std::cell::{Cell, RefCell};
 use std::ffi::c_void;
 use std::thread_local;
+use std::time::Duration;
 
 use crate::capture::Region;
 use crate::guard::{EscapeWatch, Hook};
@@ -121,6 +122,15 @@ impl Drop for Live {
 /// Windows refused the overlay's hooks; the caller answers its
 /// cursor-under fallback instead.
 pub fn pick() -> std::io::Result<Option<Pick>> {
+    pick_within(SELECTION_IDLE_LIMIT)
+}
+
+/// [`pick`] with an explicit idle budget.
+///
+/// The suite drives real synthetic input through this session, and a short
+/// budget is what turns a lost injection into a failing test instead of a
+/// two-minute stall: two minutes is the pause a user may legitimately take.
+fn pick_within(budget: Duration) -> std::io::Result<Option<Pick>> {
     // The tray pumps messages from inside its own handler, so a menu or a
     // dialog still on the stack can dispatch a second capture request
     // into a re-entrant pick. That one answers "no selection": letting it
@@ -148,7 +158,7 @@ pub fn pick() -> std::io::Result<Option<Pick>> {
         track.cursor = Crosshair::show(cursor);
         Ok(())
     })?;
-    pump();
+    pump(budget);
     let answer = TRACK.with_borrow_mut(|track| {
         teardown(track);
         track.picked
@@ -169,10 +179,8 @@ fn teardown(track: &mut Track) {
 /// A session that receives nothing — input aimed at a higher-integrity
 /// window never reaches a low-level hook — ends at the idle limit instead
 /// of hanging the tray with no way to cancel.
-fn pump() {
-    let end = pump_until(SELECTION_IDLE_LIMIT, || {
-        TRACK.with_borrow(|track| track.done)
-    });
+fn pump(budget: Duration) {
+    let end = pump_until(budget, || TRACK.with_borrow(|track| track.done));
     if end == PumpEnd::Idle {
         abandon();
         crate::log::note("warn", "selection cancelled after sitting idle");
@@ -507,19 +515,452 @@ fn region_from_rect(rect: Rect) -> Region {
 #[cfg(test)]
 mod tests {
     use std::ffi::c_void;
+    use std::sync::Mutex;
+    use std::sync::PoisonError;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread::sleep;
+    use std::time::Duration;
 
     use super::{
-        Action, DRAG_THRESHOLD_PX, Hover, Input, Pick, Region, TRACK, Track, WM_LBUTTONDOWN,
+        Action, DRAG_THRESHOLD_PX, Hover, Input, Pick, Rect, Region, TRACK, Track, WM_LBUTTONDOWN,
         WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, abandon, beyond_threshold, confirm_click,
-        confirm_drag, consumed, drag_geometry, step,
+        confirm_drag, consumed, drag_geometry, pick_within, region_from_rect, step,
     };
+    use crate::overlay::{WS_EX_NOACTIVATE, WS_VISIBLE};
     use crate::screen::win::window_bounds;
+    use crate::screen::window_region;
+    use crate::winapi::{
+        CreateWindowExW, DefWindowProcW, DestroyWindow, GA_ROOT, GetAncestor, GetCursorPos,
+        GetSystemMetrics, GetWindowRect, Hwnd, Point, RegisterClassExW, SM_CXVIRTUALSCREEN,
+        SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        WS_POPUP, WindowFromPoint, WndClassExW, kept_wide, module_handle, wide,
+    };
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
         /// The console host window this test process usually owns; a
         /// headless runner answers null and the test steps aside.
         fn GetConsoleWindow() -> *mut c_void;
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        /// Injects pointer events as if the hardware had produced them, so
+        /// the real hook procedure receives them.
+        fn SendInput(count: u32, inputs: *const InjectedInput, size: i32) -> u32;
+        /// Parks the pointer without synthesizing any event.
+        fn SetCursorPos(x: i32, y: i32) -> i32;
+    }
+
+    /// `INPUT_MOUSE` and the `MOUSEEVENTF_*` flags (winuser.h).
+    const INPUT_MOUSE: u32 = 0;
+    const MOUSEEVENTF_MOVE: u32 = 0x0001;
+    const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
+    const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
+    const MOUSEEVENTF_ABSOLUTE: u32 = 0x8000;
+    const MOUSEEVENTF_VIRTUALDESK: u32 = 0x4000;
+
+    /// `MOUSEINPUT` (winuser.h): one pointer event payload.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct MouseInput {
+        dx: i32,
+        dy: i32,
+        mouse_data: u32,
+        flags: u32,
+        time: u32,
+        extra: usize,
+    }
+
+    /// `INPUT` (winuser.h) for the mouse arm of its union; named for its
+    /// one use here so it cannot be confused with the picker's `Input`.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    struct InjectedInput {
+        kind: u32,
+        padding: u32,
+        mouse: MouseInput,
+    }
+
+    // The desktop reads both structures by size; a wrong one injects
+    // nothing (or lands somewhere else entirely).
+    const _: () = assert!(std::mem::size_of::<MouseInput>() == 32);
+    const _: () = assert!(std::mem::size_of::<InjectedInput>() == 40);
+
+    /// Synthetic input owns the pointer and every hook on the desktop, so
+    /// sessions that use it run one at a time.
+    static DESKTOP: Mutex<()> = Mutex::new(());
+    /// Set once the desktop accepted a synthetic event.
+    static INJECTED: AtomicBool = AtomicBool::new(false);
+    /// How long an injected session may idle: long enough for hook
+    /// installation and a click, short enough to fail rather than hang.
+    const INJECTED_IDLE: Duration = Duration::from_secs(5);
+    /// Time the hooks have to install before the pointer starts moving.
+    const HOOK_SETTLE: Duration = Duration::from_millis(250);
+    /// A real click on the desktop can end a session early, so a scenario
+    /// runs until it resolves. A deterministic mistake resolves the same
+    /// wrong way every time, so retries cannot hide one.
+    const ATTEMPTS: usize = 3;
+
+    /// Hand the desktop one pointer event; `false` when it refused it (no
+    /// interactive desktop to drive). Motion is optional: without
+    /// [`MOUSEEVENTF_MOVE`] the event lands wherever the pointer already
+    /// is and synthesizes no movement at all.
+    fn send(flags: u32, point: Point) -> bool {
+        let (dx, dy) = normalized(point);
+        let event = InjectedInput {
+            kind: INPUT_MOUSE,
+            padding: 0,
+            mouse: MouseInput {
+                dx,
+                dy,
+                mouse_data: 0,
+                flags: flags | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
+                time: 0,
+                extra: 0,
+            },
+        };
+        let size = i32::try_from(std::mem::size_of::<InjectedInput>()).unwrap_or(0);
+        // SAFETY: one fully initialized INPUT described by its own size.
+        let sent = unsafe { SendInput(1, &raw const event, size) } == 1;
+        if sent {
+            INJECTED.store(true, Ordering::SeqCst);
+        }
+        sent
+    }
+
+    fn move_to(point: Point) -> bool {
+        send(MOUSEEVENTF_MOVE, point)
+    }
+
+    fn press_at(point: Point) -> bool {
+        send(MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTDOWN, point)
+    }
+
+    fn release_at(point: Point) -> bool {
+        send(MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTUP, point)
+    }
+
+    fn press_here() -> bool {
+        send(MOUSEEVENTF_LEFTDOWN, Point::default())
+    }
+
+    fn release_here() -> bool {
+        send(MOUSEEVENTF_LEFTUP, Point::default())
+    }
+
+    /// Desktop coordinates as the `0..=65535` absolute range the flags ask
+    /// for, across the whole virtual desktop.
+    fn normalized(point: Point) -> (i32, i32) {
+        // SAFETY: four parameterless queries about the display layout.
+        let (left, top, width, height) = unsafe {
+            (
+                GetSystemMetrics(SM_XVIRTUALSCREEN),
+                GetSystemMetrics(SM_YVIRTUALSCREEN),
+                GetSystemMetrics(SM_CXVIRTUALSCREEN) - 1,
+                GetSystemMetrics(SM_CYVIRTUALSCREEN) - 1,
+            )
+        };
+        (
+            proportion(point.x, left, width),
+            proportion(point.y, top, height),
+        )
+    }
+
+    /// One axis of the absolute range; `extent` is the last addressable
+    /// pixel, so the two extremes map to `0` and `65535`.
+    fn proportion(value: i32, origin: i32, extent: i32) -> i32 {
+        if extent <= 0 {
+            return 0;
+        }
+        let scaled = i64::from(value - origin) * 65535 / i64::from(extent);
+        i32::try_from(scaled).unwrap_or(0)
+    }
+
+    /// A topmost window the test owns: something known to click, with a
+    /// frame the recorded region can be compared against.
+    struct Target {
+        window: Hwnd,
+        /// The window as plain bits, the way a pick answers it.
+        handle: usize,
+        /// What `GetWindowRect` answered when it was created.
+        rect: Rect,
+    }
+
+    impl Target {
+        fn show(class: &'static str, x: i32, y: i32, width: i32, height: i32) -> Option<Self> {
+            let instance = module_handle();
+            let name = kept_wide(class);
+            let definition = WndClassExW {
+                size: u32::try_from(std::mem::size_of::<WndClassExW>()).ok()?,
+                style: 0,
+                wnd_proc: DefWindowProcW,
+                cls_extra: 0,
+                wnd_extra: 0,
+                instance,
+                icon: std::ptr::null_mut(),
+                cursor: std::ptr::null_mut(),
+                background: std::ptr::null_mut(),
+                menu_name: std::ptr::null(),
+                class_name: name,
+                icon_small: std::ptr::null_mut(),
+            };
+            // SAFETY: the class struct is a fully initialized local and the
+            // kept name outlives the process.
+            unsafe { RegisterClassExW(&raw const definition) };
+            let title = wide(class);
+            // SAFETY: strings and handles outlive the call; the window is
+            // owned by this thread and destroyed in `Drop`.
+            let window = unsafe {
+                CreateWindowExW(
+                    WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                    name,
+                    title.as_ptr(),
+                    WS_POPUP | WS_VISIBLE,
+                    x,
+                    y,
+                    width,
+                    height,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    instance,
+                    std::ptr::null_mut(),
+                )
+            };
+            if window.is_null() {
+                return None;
+            }
+            let mut rect = Rect::default();
+            // SAFETY: `rect` is a live local; `window` was created above.
+            let measured = unsafe { GetWindowRect(window, &raw mut rect) } != 0
+                && rect.right > rect.left
+                && rect.bottom > rect.top;
+            if !measured {
+                // SAFETY: the window this function created.
+                unsafe { DestroyWindow(window) };
+                return None;
+            }
+            Some(Self {
+                window,
+                handle: window as usize,
+                rect,
+            })
+        }
+
+        fn center(&self) -> Point {
+            Point {
+                x: i32::midpoint(self.rect.left, self.rect.right),
+                y: i32::midpoint(self.rect.top, self.rect.bottom),
+            }
+        }
+
+        /// The region a capture of this window saves.
+        fn frame(&self) -> Region {
+            region_from_rect(window_bounds(self.window).expect("the target has bounds"))
+        }
+
+        /// The region the picker answers for this window.
+        fn recorded(&self) -> Region {
+            window_region(Some(self.handle)).expect("the target is recordable")
+        }
+    }
+
+    impl Drop for Target {
+        fn drop(&mut self) {
+            // SAFETY: the window this guard created on this thread.
+            unsafe { DestroyWindow(self.window) };
+        }
+    }
+
+    /// Put the pointer back where the user left it.
+    struct PointerGuard(Point);
+
+    impl PointerGuard {
+        fn take() -> Self {
+            let mut point = Point::default();
+            // SAFETY: writes only the local point.
+            unsafe { GetCursorPos(&raw mut point) };
+            Self(point)
+        }
+    }
+
+    impl Drop for PointerGuard {
+        fn drop(&mut self) {
+            // SAFETY: the session that owned the pointer has ended.
+            unsafe { SetCursorPos(self.0.x, self.0.y) };
+        }
+    }
+
+    /// One real pick session, driven by `inject` from another thread
+    /// because the session thread is busy pumping its own messages.
+    fn pick_with(inject: impl Fn() + Send + Copy + 'static) -> Option<Pick> {
+        let injector = std::thread::spawn(move || {
+            // The hooks install before the pump starts; let that happen
+            // instead of racing `SetWindowsHookEx`.
+            sleep(HOOK_SETTLE);
+            inject();
+        });
+        let answer = pick_within(INJECTED_IDLE).expect("the picker installs its hooks");
+        let _ = injector.join();
+        answer
+    }
+
+    /// The root window under `point`, as the picker resolves it.
+    fn root_at(point: Point) -> usize {
+        // SAFETY: point lookup and handle walk; the window is inspected
+        // only.
+        unsafe { GetAncestor(WindowFromPoint(point), GA_ROOT) as usize }
+    }
+    /// Whether both points still name the windows this test owns.
+    fn quiet(points: &[(Point, usize)]) -> bool {
+        points
+            .iter()
+            .all(|(point, handle)| root_at(*point) == *handle)
+    }
+
+    /// Whether the pointer actually reached `point`: a session without an
+    /// interactive desktop takes injected events and delivers none.
+    fn cursor_at(point: Point) -> bool {
+        let mut at = Point::default();
+        // SAFETY: writes only the local point.
+        let found = unsafe { GetCursorPos(&raw mut at) } != 0;
+        found && (at.x, at.y) == (point.x, point.y)
+    }
+
+    /// The exact regression, end to end: the session starts with the
+    /// pointer over one window (the tray, in the report) and the click
+    /// lands on another. Only the clicked window may be recorded.
+    #[test]
+    fn injected_input_records_the_window_under_the_click() {
+        let _desktop = DESKTOP.lock().unwrap_or_else(PoisonError::into_inner);
+        let _pointer = PointerGuard::take();
+        let Some(decoy) = Target::show("screencapture.test.decoy", 40, 40, 240, 180) else {
+            return; // no desktop to drive
+        };
+        let Some(target) = Target::show("screencapture.test.target", 420, 140, 420, 320) else {
+            return;
+        };
+        let parked = decoy.center();
+        let clicked = target.center();
+        if !quiet(&[(parked, decoy.handle), (clicked, target.handle)]) {
+            eprintln!("skipping: another window covers the test target");
+            return;
+        }
+        // Park the pointer on the decoy and hold the button there: the
+        // session starts with the decoy highlighted, the way a pick begun
+        // over the tray highlights the taskbar, and its press predates the
+        // hooks.
+        INJECTED.store(false, Ordering::SeqCst);
+        let mut answer = None;
+        for _ in 0..ATTEMPTS {
+            // SAFETY: no session is live between attempts.
+            unsafe { SetCursorPos(parked.x, parked.y) };
+            press_here();
+            answer = pick_with(move || {
+                // Relocate without motion, then release: this is the event
+                // burst a slow hook callback loses. The picker sees a
+                // release with no press and no move behind it.
+                // SAFETY: the session owns the pointer while it runs.
+                unsafe { SetCursorPos(clicked.x, clicked.y) };
+                sleep(Duration::from_millis(80));
+                release_here();
+            });
+            if matches!(answer, Some(Pick::Window(handle)) if handle == target.handle) {
+                break;
+            }
+        }
+        if !cursor_at(clicked) || (answer.is_none() && !INJECTED.load(Ordering::SeqCst)) {
+            eprintln!("skipping: this desktop does not take synthetic input");
+            return;
+        }
+        assert_eq!(
+            answer,
+            Some(Pick::Window(target.handle)),
+            "the click answers the window under it, not the highlight from session start"
+        );
+        assert_eq!(
+            target.recorded(),
+            target.frame(),
+            "the recorded region is the frame the pick answered"
+        );
+        assert_ne!(
+            target.recorded(),
+            decoy.frame(),
+            "and it is not the window the session started on"
+        );
+    }
+
+    /// A real drag through the same hooks answers the rectangle it drew, so
+    /// the press, motion and release path stays wired to the state machine.
+    #[test]
+    fn injected_input_records_the_dragged_rectangle() {
+        let _desktop = DESKTOP.lock().unwrap_or_else(PoisonError::into_inner);
+        let _pointer = PointerGuard::take();
+        let Some(target) = Target::show("screencapture.test.drag", 300, 200, 520, 380) else {
+            return;
+        };
+        let from = Point {
+            x: target.rect.left + 40,
+            y: target.rect.top + 40,
+        };
+        let to = Point {
+            x: target.rect.left + 300,
+            y: target.rect.top + 260,
+        };
+        if !quiet(&[(from, target.handle), (to, target.handle)]) {
+            eprintln!("skipping: another window covers the test target");
+            return;
+        }
+        INJECTED.store(false, Ordering::SeqCst);
+        let mut answer = None;
+        for _ in 0..ATTEMPTS {
+            answer = pick_with(move || {
+                move_to(from);
+                sleep(Duration::from_millis(80));
+                press_at(from);
+                // Walk to the far corner: the marquee follows real motion.
+                for step_count in 1..=4 {
+                    move_to(Point {
+                        x: from.x + (to.x - from.x) * step_count / 4,
+                        y: from.y + (to.y - from.y) * step_count / 4,
+                    });
+                    sleep(Duration::from_millis(40));
+                }
+                move_to(to);
+                sleep(Duration::from_millis(60));
+                release_at(to);
+            });
+            if matches!(answer, Some(Pick::Region(_))) {
+                break;
+            }
+        }
+        if !cursor_at(to) || (answer.is_none() && !INJECTED.load(Ordering::SeqCst)) {
+            eprintln!("skipping: this desktop does not take synthetic input");
+            return;
+        }
+        let Some(Pick::Region(region)) = answer else {
+            panic!("expected a dragged region, got {answer:?}");
+        };
+        let expected = Region {
+            x: from.x.min(to.x),
+            y: from.y.min(to.y),
+            width: u32::try_from((to.x - from.x).abs()).unwrap_or(0),
+            height: u32::try_from((to.y - from.y).abs()).unwrap_or(0),
+        };
+        // Absolute pointer input is quantized to 0..=65535, so an edge can
+        // land a pixel away from the point that was asked for.
+        assert!(
+            (region.x - expected.x).abs() <= 2
+                && (region.y - expected.y).abs() <= 2
+                && region.width.abs_diff(expected.width) <= 2
+                && region.height.abs_diff(expected.height) <= 2,
+            "dragged {region:?}, expected about {expected:?}"
+        );
+        assert_eq!(
+            target.recorded(),
+            target.frame(),
+            "a click on the same window still records its frame"
+        );
     }
 
     /// A window at a known frame, as the hook resolves it.
