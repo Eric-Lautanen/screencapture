@@ -210,13 +210,28 @@ impl Document {
 
     /// Write the rendered document to `path`, creating parent directories.
     ///
+    /// The text lands in a sibling temporary file that is then renamed
+    /// over `path`, so a crash or a full disk mid-write cannot leave a
+    /// truncated settings file behind — the previous file survives intact.
+    ///
     /// # Errors
     /// Propagates filesystem errors from directory creation or writing.
     pub fn persist(&self, path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(path, self.to_text())
+        let mut temporary = path.as_os_str().to_owned();
+        temporary.push(".tmp");
+        let temporary = Path::new(&temporary);
+        if let Err(error) = fs::write(temporary, self.to_text()) {
+            let _ = fs::remove_file(temporary);
+            return Err(error);
+        }
+        if let Err(error) = fs::rename(temporary, path) {
+            let _ = fs::remove_file(temporary);
+            return Err(error);
+        }
+        Ok(())
     }
 }
 
@@ -305,5 +320,24 @@ mod tests {
         let reparsed =
             Document::from_text(&original.to_text()).expect("rendered text must reparse");
         assert_eq!(original, reparsed);
+    }
+
+    /// Persisting goes through a temporary sibling, so the settings file is
+    /// replaced whole; no `.tmp` is left behind on either path.
+    #[test]
+    fn persist_replaces_the_file_without_leaving_a_temporary() {
+        let directory =
+            std::env::temp_dir().join(format!("screencapture-config-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("temp dir");
+        let path = directory.join("settings.ini");
+        std::fs::write(&path, "old").expect("seed the old file");
+        let mut document = Document::from_text("[a]\none = 1\n").expect("must parse");
+        document.set("a", "two", Value::Int(2));
+        document.persist(&path).expect("persist");
+        let text = std::fs::read_to_string(&path).expect("read back");
+        assert!(text.contains("two = 2"), "{text}");
+        assert!(!directory.join("settings.ini.tmp").exists());
+        let _ = std::fs::remove_dir_all(&directory);
     }
 }

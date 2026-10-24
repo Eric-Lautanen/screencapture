@@ -16,11 +16,12 @@ screencapture - 4K screen recorder and still-image capture
 
 USAGE:
     screencapture              start the tray application
+    screencapture --settings   open the settings window, then exit
     screencapture --record S   record for S seconds, then exit
     screencapture --record S --mode full | region | window
     screencapture --display N  capture display N (1-based) in full mode
     screencapture --rect X,Y,W,H  capture one rectangle (region records, photos)
-    screencapture --photo      take one still photo, then exit
+    screencapture --photo [--mode ...]  take one still photo, then exit
     screencapture --check      diagnose install path, settings, and engine
     screencapture --init       write the default settings file if missing
     screencapture --config P   use a specific settings file
@@ -39,6 +40,8 @@ enum Command {
     Check,
     /// Ensure the default settings file exists.
     InitConfig,
+    /// Open the settings window once, then exit.
+    Settings,
     /// Record for a fixed number of seconds, then exit.
     Record { seconds: u32 },
     /// Take one still photo, then exit.
@@ -114,11 +117,14 @@ fn parse(args: &[String]) -> Result<Invocation, String> {
             }
             "--check" => invocation.command = Command::Check,
             "--init" => invocation.command = Command::InitConfig,
+            "--settings" => invocation.command = Command::Settings,
             "--photo" => invocation.command = Command::Photo,
             "--record" => {
                 let raw = items.next().map_or("3", String::as_str);
                 match raw.parse::<u32>() {
-                    Ok(seconds) if seconds > 0 => invocation.command = Command::Record { seconds },
+                    Ok(seconds) if (1..=3600).contains(&seconds) => {
+                        invocation.command = Command::Record { seconds };
+                    }
                     _ => return Err("--record requires a duration in seconds (1-3600)".into()),
                 }
             }
@@ -168,6 +174,40 @@ fn parse_rect(value: &str) -> Result<Region, String> {
     })
 }
 
+/// Print the command list and succeed. The tray is a Windows surface, so a
+/// bare invocation on macOS or Linux starts here instead of at an error.
+pub(crate) fn help_exit() -> ExitCode {
+    let _ = stdout().lock().write_all(HELP.as_bytes());
+    ExitCode::SUCCESS
+}
+
+fn dispatch(invocation: &Invocation) -> ExitCode {
+    match invocation.command {
+        Command::Version => {
+            println!("{IDENTITY}");
+            ExitCode::SUCCESS
+        }
+        Command::Help => help_exit(),
+        Command::Check => doctor::check(invocation.config.as_deref()),
+        Command::InitConfig => doctor::init_config(invocation.config.as_deref()),
+        Command::Settings => app::open_settings_window(invocation.config.as_deref()),
+        Command::Record { seconds } => app::demo::record_demo(
+            invocation.config.as_deref(),
+            seconds,
+            invocation.mode,
+            invocation.display,
+            invocation.rect,
+        ),
+        Command::Photo => app::demo::photo_demo(
+            invocation.config.as_deref(),
+            invocation.mode,
+            invocation.display,
+            invocation.rect,
+        ),
+        Command::Run => app::run(invocation.config.as_deref()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_rect;
@@ -189,32 +229,13 @@ mod tests {
         assert!(parse_rect("1,2,0,4").is_err());
         assert!(parse_rect("1,2,7681,4").is_err());
     }
-}
 
-fn dispatch(invocation: &Invocation) -> ExitCode {
-    match invocation.command {
-        Command::Version => {
-            println!("{IDENTITY}");
-            ExitCode::SUCCESS
-        }
-        Command::Help => {
-            let _ = stdout().lock().write_all(HELP.as_bytes());
-            ExitCode::SUCCESS
-        }
-        Command::Check => doctor::check(invocation.config.as_deref()),
-        Command::InitConfig => doctor::init_config(invocation.config.as_deref()),
-        Command::Record { seconds } => app::demo::record_demo(
-            invocation.config.as_deref(),
-            seconds,
-            invocation.mode,
-            invocation.display,
-            invocation.rect,
-        ),
-        Command::Photo => app::demo::photo_demo(
-            invocation.config.as_deref(),
-            invocation.display,
-            invocation.rect,
-        ),
-        Command::Run => app::run(invocation.config.as_deref()),
+    #[test]
+    fn record_duration_stays_inside_the_documented_range() {
+        let args = |value: &str| vec!["--record".to_owned(), value.to_owned()];
+        assert!(super::parse(&args("1")).is_ok());
+        assert!(super::parse(&args("3600")).is_ok());
+        assert!(super::parse(&args("0")).is_err());
+        assert!(super::parse(&args("3601")).is_err());
     }
 }

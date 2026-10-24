@@ -1,5 +1,5 @@
-//! Global hotkeys: OS bindings registered on the tray window; modifier
-//! data comes from the settings-derived hotkey choices handled here.
+//! Global hotkeys: OS bindings registered on the tray window, mapped
+//! directly from the settings-derived hotkey combos.
 
 use crate::settings::Hotkey;
 
@@ -10,6 +10,8 @@ pub enum Role {
     Record,
     /// Take a still photo.
     Photo,
+    /// Mute or unmute the capture chimes.
+    Chimes,
 }
 
 /// One OS-level hotkey binding.
@@ -27,60 +29,92 @@ pub struct Binding {
 
 pub const MOD_ALT: u32 = 0x0001;
 pub const MOD_CONTROL: u32 = 0x0002;
+pub const MOD_SHIFT: u32 = 0x0004;
+pub const MOD_WIN: u32 = 0x0008;
 pub const MOD_NOREPEAT: u32 = 0x4000;
 
-pub const VK_1: u32 = 0x0031;
-pub const VK_2: u32 = 0x0032;
-
-/// Modifier flag of the parenthesized "ctrl" part of `ctrl+alt+1`.
+/// The `MOD_*` flags of a combo's control/alt/shift/win parts.
 #[must_use]
-fn settings_modifiers(hotkey: Hotkey) -> u32 {
-    match hotkey {
-        // Every supported hotkey is ctrl+alt today.
-        Hotkey::Record | Hotkey::Photo => MOD_CONTROL | MOD_ALT,
+pub(crate) fn combo_modifiers(combo: Hotkey) -> u32 {
+    let mut flags = 0;
+    if combo.control {
+        flags |= MOD_CONTROL;
     }
-}
-
-/// Virtual-key code of the "1"/"2" part of the settings hotkey.
-#[must_use]
-fn settings_key(hotkey: Hotkey) -> u32 {
-    match hotkey {
-        Hotkey::Record => VK_1,
-        Hotkey::Photo => VK_2,
+    if combo.alt {
+        flags |= MOD_ALT;
     }
+    if combo.shift {
+        flags |= MOD_SHIFT;
+    }
+    if combo.windows {
+        flags |= MOD_WIN;
+    }
+    flags
 }
 
 /// Build the current set of bindings from the settings view.
 #[must_use]
-pub fn bindings(hotkeys: (Hotkey, Hotkey)) -> Vec<Binding> {
-    let (record, photo) = hotkeys;
+pub fn bindings(record: Hotkey, photo: Hotkey, chimes: Hotkey) -> Vec<Binding> {
     vec![
         Binding {
             id: 1,
             role: Role::Record,
-            modifiers: settings_modifiers(record) | MOD_NOREPEAT,
-            key: settings_key(record),
+            modifiers: combo_modifiers(record) | MOD_NOREPEAT,
+            key: record.key,
         },
         Binding {
             id: 2,
             role: Role::Photo,
-            modifiers: settings_modifiers(photo) | MOD_NOREPEAT,
-            key: settings_key(photo),
+            modifiers: combo_modifiers(photo) | MOD_NOREPEAT,
+            key: photo.key,
+        },
+        Binding {
+            id: 3,
+            role: Role::Chimes,
+            modifiers: combo_modifiers(chimes) | MOD_NOREPEAT,
+            key: chimes.key,
         },
     ]
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Role, VK_1, bindings};
+    use super::{MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, Role, bindings, combo_modifiers};
     use crate::settings::Hotkey;
 
     #[test]
-    fn bindings_match_settings_roles() {
-        let set = bindings((Hotkey::Record, Hotkey::Photo));
-        assert_eq!(set.len(), 2);
+    fn defaults_map_to_rebindable_bindings() {
+        let set = bindings(Hotkey::RECORD, Hotkey::PHOTO, Hotkey::CHIMES);
+        assert_eq!(set.len(), 3);
         assert_eq!(set[0].role, Role::Record);
-        assert_eq!(set[0].key, VK_1);
+        assert_eq!(set[0].key, Hotkey::RECORD.key);
+        assert_eq!(
+            set[0].modifiers & (MOD_CONTROL | MOD_SHIFT),
+            MOD_CONTROL | MOD_SHIFT
+        );
         assert_eq!(set[1].role, Role::Photo);
+        assert_eq!(set[1].key, Hotkey::PHOTO.key);
+        assert_eq!(set[2].role, Role::Chimes);
+        assert_eq!(set[2].key, Hotkey::CHIMES.key);
+    }
+
+    #[test]
+    fn custom_combos_carry_their_flags() {
+        let custom = Hotkey::parse("win+ctrl+f2").expect("parses");
+        let set = bindings(custom, Hotkey::PHOTO, Hotkey::CHIMES);
+        assert_eq!(set[0].key, custom.key);
+        assert_eq!(
+            set[0].modifiers & (MOD_WIN | MOD_CONTROL),
+            MOD_WIN | MOD_CONTROL
+        );
+        assert_eq!(set[1].modifiers & MOD_WIN, 0);
+    }
+
+    #[test]
+    fn bare_modifier_flags_stay_available() {
+        assert_eq!(
+            combo_modifiers(Hotkey::parse("alt+f1").expect("parses")),
+            MOD_ALT
+        );
     }
 }
