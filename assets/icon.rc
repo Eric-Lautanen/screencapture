@@ -2,3 +2,6 @@
 // desktop shortcuts, Explorer, and task dialogs show it with no sidecar
 // file. Resource id 1 is the DEFAULT_ICON slot Windows picks up.
 1 ICON "icon.ico"
+// RT_MANIFEST (24), id 1: common controls v6 and per-monitor DPI, so
+// dialogs use the modern themed controls instead of the Win95 look.
+1 24 "app.manifest"

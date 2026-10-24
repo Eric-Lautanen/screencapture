@@ -11,6 +11,7 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=assets/icon.rc");
     println!("cargo:rerun-if-changed=assets/icon.ico");
+    println!("cargo:rerun-if-changed=assets/app.manifest");
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let script = manifest.join("assets/icon.rc");
     let output = PathBuf::from(env::var("OUT_DIR").unwrap()).join("icon.coff.o");
