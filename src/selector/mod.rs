@@ -8,18 +8,18 @@ use std::io;
 use std::thread_local;
 
 use crate::capture::Region;
+use crate::guard::{EscapeWatch, MouseCapture, ScreenDc};
 use crate::winapi::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, DrawFocusRect,
-    GETMESSAGE_QUIT, GetMessageW, GetModuleHandleW, GetSystemMetrics, Hdc, Hwnd, Lparam, Lresult,
-    Msg, Point, PostQuitMessage, Rect, RegisterClassExW, ReleaseCapture, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW, SetCapture,
-    SetForegroundWindow, ShowWindow, TranslateMessage, UnregisterClassW, VK_ESCAPE, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
-    WndClassExW, Wparam,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DrawFocusRect, GetModuleHandleW,
+    GetSystemMetrics, Hwnd, Lparam, Lresult, Point, PostQuitMessage, PumpEnd, Rect,
+    RegisterClassExW, SELECTION_IDLE_LIMIT, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_SHOW, SetForegroundWindow, ShowWindow,
+    UnregisterClassW, VK_ESCAPE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP, WndClassExW, Wparam, pump_until,
 };
 
 mod ffi;
-use ffi::{client_dc, cross_cursor, release_client_dc};
+use ffi::cross_cursor;
 
 /// Window title for the overlay surface.
 const WINDOW_NAME: &str = "Screencapture region select";
@@ -49,6 +49,8 @@ struct Session {
     drawn: Rect,
     /// Set when the user aborts with Escape.
     cancelled: bool,
+    /// Live mouse capture for the drag; dropped with the session.
+    capture: Option<MouseCapture>,
 }
 
 impl Session {
@@ -58,6 +60,7 @@ impl Session {
             head: None,
             drawn: Rect::default(),
             cancelled: false,
+            capture: None,
         }
     }
 
@@ -184,8 +187,18 @@ pub fn draw() -> io::Result<Outcome> {
     // SAFETY: showing and foregrounding our own window.
     unsafe {
         ShowWindow(window, SW_SHOW);
+        // Taking the foreground is the polite case, not the guaranteed
+        // one: Windows refuses it for a process that is not the current
+        // foreground process, and the window then never sees WM_KEYDOWN
+        // (see `EscapeWatch`). The attempt stays because a focused
+        // overlay also swallows stray keys from the app below.
         SetForegroundWindow(window);
     }
+
+    // Watch Escape through a low-level hook for the whole drag, so the
+    // cancel works whether or not the foreground call above succeeded.
+    // SAFETY: the pump below runs on this thread with our own instance.
+    let _escape = unsafe { EscapeWatch::install(escape, instance) };
 
     pump_messages();
 
@@ -197,6 +210,16 @@ pub fn draw() -> io::Result<Outcome> {
     Ok(outcome)
 }
 
+/// The Escape watch's answer: remember the cancel and end the pump.
+fn escape() {
+    SESSION.with_borrow_mut(|state| {
+        state.capture = None;
+        state.cancelled = true;
+    });
+    // SAFETY: the pump this watch was installed for runs on this thread.
+    unsafe { PostQuitMessage(0) }
+}
+
 /// Crosshair cursor or, if that resource is refused, the default arrow.
 fn load_cursor() -> *mut std::ffi::c_void {
     // SAFETY: null instance resolves a shared stock cursor resource.
@@ -204,23 +227,15 @@ fn load_cursor() -> *mut std::ffi::c_void {
 }
 
 /// Local message loop until the drag's final mouse-up or Escape quits.
+/// A session that sees no input at all cancels at the idle limit, so an
+/// overlay that never wins the foreground cannot hang the tray.
 fn pump_messages() {
-    let mut message = Msg {
-        hwnd: std::ptr::null_mut(),
-        message: 0,
-        w_param: 0,
-        l_param: 0,
-        time: 0,
-        point: Point { x: 0, y: 0 },
-    };
-    loop {
-        // SAFETY: `message` is a local struct owned by this loop.
-        let received = unsafe { GetMessageW(&raw mut message, std::ptr::null_mut(), 0, 0) };
-        if received == GETMESSAGE_QUIT || received < 0 {
-            return;
-        }
-        let _ = unsafe { TranslateMessage(&raw const message) };
-        unsafe { DispatchMessageW(&raw const message) };
+    let end = pump_until(SELECTION_IDLE_LIMIT, || {
+        SESSION.with_borrow(|state| state.cancelled)
+    });
+    if end == PumpEnd::Idle {
+        SESSION.with_borrow_mut(|state| state.cancelled = true);
+        crate::log::note("warn", "selection cancelled after sitting idle");
     }
 }
 
@@ -238,18 +253,17 @@ fn client_point(l_param: Lparam) -> Point {
 /// call toggles its rectangle, so exactly two calls make a clean repaint.
 fn repaint(window: Hwnd, state: &mut Session) {
     let next = state.marquee();
-    // SAFETY: the DC is borrowed, used, and released on this thread.
-    let dc: Hdc = unsafe { client_dc(window) };
+    let Some(dc) = ScreenDc::borrow(window) else {
+        return; // best-effort: the marquee repaint simply skips a turn
+    };
     if !state.drawn.is_empty() {
-        // SAFETY: erase pass; `dc` is live for the borrow.
-        unsafe { DrawFocusRect(dc, &raw const state.drawn) };
+        // SAFETY: the guard releases the borrowed DC on drop.
+        unsafe { DrawFocusRect(dc.dc(), &raw const state.drawn) };
     }
     if !next.is_empty() {
-        // SAFETY: redraw pass onto the same live DC.
-        unsafe { DrawFocusRect(dc, &raw const next) };
+        // SAFETY: the guard releases the borrowed DC on drop.
+        unsafe { DrawFocusRect(dc.dc(), &raw const next) };
     }
-    // SAFETY: pairs with `client_dc` above.
-    unsafe { release_client_dc(window, dc) };
     state.drawn = next;
 }
 
@@ -263,14 +277,16 @@ unsafe extern "system" fn on_message(
     match message {
         WM_LBUTTONDOWN => {
             let point = client_point(l_param);
-            // SAFETY: capturing motion for our own popup window.
-            unsafe { SetCapture(window) };
             SESSION.with_borrow_mut(|state| {
                 state.from = point;
                 state.head = Some(point);
                 state.drawn = Rect::default();
                 state.cancelled = false;
             });
+            // SAFETY: capturing motion for our own popup window; the
+            // guard releases on drop when the drag ends un-captured.
+            let capture = unsafe { MouseCapture::capture(window) };
+            SESSION.with_borrow_mut(|state| state.capture = capture);
             0
         }
         WM_MOUSEMOVE => {
@@ -283,17 +299,46 @@ unsafe extern "system" fn on_message(
             0
         }
         WM_LBUTTONUP => {
-            // SAFETY: releasing a capture our window owns.
-            unsafe { ReleaseCapture() };
+            SESSION.with_borrow_mut(|state| state.capture = None);
             unsafe { PostQuitMessage(0) };
             0
         }
+        // The fallback for a session where Windows refused the watch
+        // above: a focused overlay still cancels on its own key.
         WM_KEYDOWN if w_param == VK_ESCAPE => {
-            SESSION.with_borrow_mut(|state| state.cancelled = true);
-            unsafe { PostQuitMessage(0) };
+            escape();
             0
         }
         // SAFETY: pass-through to the default window procedure.
         _ => unsafe { DefWindowProcW(window, message, w_param, l_param) },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Outcome, SESSION, Session, escape};
+    use crate::winapi::Point;
+
+    /// Start a fresh session mid-drag and answer its outcome.
+    fn dragging() -> Outcome {
+        SESSION.with_borrow_mut(|state| {
+            *state = Session::fresh();
+            state.from = Point { x: 0, y: 0 };
+            state.head = Some(Point { x: 320, y: 200 });
+        });
+        SESSION.with_borrow(Session::outcome)
+    }
+
+    #[test]
+    fn escape_turns_a_live_drag_into_a_cancel() {
+        // The marquee alone is a usable rectangle; the keypress, not the
+        // geometry, decides. Losing that made Escape look ignored on a
+        // drag the user had already started.
+        assert!(matches!(dragging(), Outcome::Region(_)));
+        escape();
+        SESSION.with_borrow(|state| {
+            assert!(state.cancelled);
+            assert_eq!(state.outcome(), Outcome::Cancelled);
+        });
     }
 }
