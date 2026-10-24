@@ -10,6 +10,7 @@ and the same capture pipeline headless on macOS and Linux.</p>
 
 <p>
   <a href="https://github.com/Eric-Lautanen/screencapture/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/Eric-Lautanen/screencapture/actions/workflows/ci.yml/badge.svg?branch=main"></a>
+  <a href="https://github.com/Eric-Lautanen/screencapture/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/Eric-Lautanen/screencapture?display_name=tag"></a>
   <img alt="Windows 10/11" src="https://img.shields.io/badge/Windows%2010%202004%2B%20%7C%2011-0078D6?logo=windows&logoColor=white">
   <img alt="CLI on macOS and Linux" src="https://img.shields.io/badge/CLI-macOS%20%7C%20Linux-lightgrey?logo=linux&logoColor=white">
   <img alt="Rust 2024" src="https://img.shields.io/badge/Rust-2024%20edition-000000?logo=rust&logoColor=white">
@@ -48,28 +49,42 @@ and the same capture pipeline headless on macOS and Linux.</p>
   window through a 720p profile becomes 1152×720, with no black bars.
 - **Paste without the file hunt.** Every still is saved as a PNG and placed on the
   Windows clipboard as a bitmap plus the finished PNG — one `Ctrl+V` away.
-- **Honest hardware acceleration.** AMF, QSV, NVENC, and Media Foundation are
-  probed with their real encoder arguments and fall back to x264 with a notice
-  when the machine cannot run them.
+- **H.264 first.** The bundled engine's x264 is the default; AMF, QSV, NVENC,
+  and Media Foundation are probed with their real encoder arguments and fall
+  back to x264 with a notice when the machine cannot run them. If x264 itself
+  is missing, another H.264 unit takes over; x265 is only the last resort.
 - **No Rust dependencies.** Every Win32, DXGI, CoreGraphics, and X11 call is a
   hand-written FFI declaration. The binary is just the app and its engine.
 
-## Quick start
+## Install
 
-### Windows
+### Windows installer
 
-Requires Rust 1.85+ (edition 2024). Put the engine beside the app first:
+Download the latest [`screencapture-setup.exe`](https://github.com/Eric-Lautanen/screencapture/releases/latest)
+and run it on Windows 10 2004+ or Windows 11. The installer includes the app,
+the FFmpeg engine, the license text, and Start Menu shortcuts. The build is
+unsigned, so SmartScreen may ask for confirmation.
+
+### Windows from source
+
+Requires Rust 1.85+ (edition 2024). Windows PowerShell 5.1 ships with supported
+Windows versions and is all the fetch script needs. Fetch the pinned engine,
+then build:
 
 ```bat
-:: vendor\ffmpeg\ffmpeg.exe and ffprobe.exe (see "Engine" below)
+scripts\fetch-ffmpeg.cmd
 cargo build --release
 .\target\release\screencapture.exe --check
 .\target\release\screencapture.exe
 ```
 
-The tray appears next to the clock. `--settings` opens the Settings window
-directly, and `installer\` contains the NSIS script that packages the exe, the
-engine, and the license text into a setup program.
+The fetch script uses built-in PowerShell and .NET, so curl is not required.
+It verifies the archive size and SHA-256 before extracting `ffmpeg.exe`,
+`ffprobe.exe`, and the license into `vendor\ffmpeg\`. `installer\` builds the
+NSIS setup program once the release binary and engine are in place.
+
+The tray appears next to the clock; `--settings` opens the Settings window
+directly.
 
 ### macOS / Linux
 
@@ -266,11 +281,16 @@ date, and admins cannot bypass the rules.
 
 ## Engine
 
-`vendor/ffmpeg/ffmpeg.exe` is BtbN's `ffmpeg-n9.0-latest-win64-gpl-9.0` static
-build (`ffmpeg version n9.0.2-28-g669f5ab083-20261018`), shipped with
-`ffprobe.exe` and its license text. The binaries are not committed; place them
-in `vendor/ffmpeg/` before building. `--check` records their SHA-256 and reports
-a mismatch if the engine changes.
+The Windows engine is BtbN's `ffmpeg-n9.0.2-28-g669f5ab083-win64-gpl-9.0.zip`
+from the pinned [`autobuild-2026-10-18-13-01`](https://github.com/BtbN/FFmpeg-Builds/releases/tag/autobuild-2026-10-18-13-01)
+release (`ffmpeg version n9.0.2-28-g669f5ab083-20261018`), shipped with
+`ffprobe.exe` and its license text. The archive SHA-256 is
+`a38198cc130ed3fa02097d0baebcea9c1b8a9d9d3d1d8161d691d1f03709158b`.
+
+[`scripts/fetch-ffmpeg.ps1`](scripts/fetch-ffmpeg.ps1) downloads that exact
+archive with PowerShell and .NET, checks its byte count and SHA-256, and
+installs only the engine, probe, and license. The binaries are not committed;
+`--check` records their SHA-256 and reports a mismatch if the engine changes.
 
 On macOS and Linux the app uses the system FFmpeg instead.
 

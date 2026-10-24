@@ -14,9 +14,10 @@ uninstall entries.
    works). 3.13's `DefaultLangCode` era aside, no extra plugins needed.
 2. The bundled engine unpacked at `vendor/ffmpeg/`
    (`ffmpeg.exe`, `ffprobe.exe`, `ffmpeg.LICENSE.txt`, `engine.sha256`).
-   The record is written automatically by
-   `target\release\screencapture.exe --check` the first time the engine
-   is in place.
+   Run `scripts\fetch-ffmpeg.cmd` from the repository root to download and
+   verify the pinned build with built-in PowerShell and .NET; no curl is
+   needed. The integrity record is written by
+   `target\release\screencapture.exe --check` after the engine is in place.
 3. `docs\FFMPEG-LICENSE.md` records the GPL engine decision and the
    upstream source URL (kept in the payload for the license/source
    offer); `LICENSE` (Apache-2.0, the app's own license) ships next to
@@ -27,7 +28,9 @@ uninstall entries.
 The script defines `ROOT` itself (overridable):
 
 ```powershell
+scripts\fetch-ffmpeg.cmd
 cargo build --release
+.\target\release\screencapture.exe --check
 & <nsis>\bin\makensis.exe "/DROOT=$PWD" installer\nsis\screencapture.nsi
 ```
 

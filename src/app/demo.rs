@@ -98,7 +98,7 @@ fn demo_recording(
         }
     }?;
     let binary = super::engine(loaded)?;
-    let codec = super::effective_codec(&binary, loaded);
+    let codec = super::effective_codec(&binary, loaded)?;
     let plan = Plan {
         origin: (region.x, region.y),
         size: (region.width, region.height),

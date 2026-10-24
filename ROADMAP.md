@@ -1083,7 +1083,32 @@ Plan of record, in build order. Every session ends with
 - [x] The workflow is read-only (`contents: read`), cancels superseded runs per
   ref, caches cargo artifacts, and can be dispatched by hand.
 - [x] README development gates now match the workflow (`--locked`, `--all`),
-  link to the workflow, and report the current 133-test suite.
+  link to the workflow, and no longer hand-maintain a test count.
+
+## Session 29 - Reproducible engine fetch and the v0.1.0 release
+
+- [x] `scripts/fetch-ffmpeg.ps1`: Windows PowerShell 5.1 plus .NET only (no
+  curl, tar, or 7-Zip), pinned to the BtbN GPL archive by URL, byte count, and
+  SHA-256. It retries a failed transfer, downloads to a temporary `.part`,
+  verifies before extracting, stages only `ffmpeg.exe`, `ffprobe.exe`, and the
+  license, and invalidates the old integrity record for the next `--check`.
+  `scripts/fetch-ffmpeg.cmd` is the double-click/`cmd.exe` shim.
+- [x] CI parses the PowerShell script on the Windows runner, and both the
+  `.ps1` and `.cmd` paths were exercised against a clean destination.
+- [x] Release metadata: the exe carries version/company/description resources,
+  the installer carries matching version keys, and `FFMPEG-LICENSE.md` now
+  installs under `docs\` where the README and uninstaller expect it.
+- [x] Codec fallback is H.264 first: the requested encoder, then software
+  x264, then each hardware H.264 unit, and only then CPU x265. An engine with
+  no usable encoder refuses the recording with a clear error before capture;
+  `--check` prints the fallback that will be used. Unit-tested and live-smoked
+  with an unavailable NVENC choice (warn + h264 MP4).
+- [x] Release verification: `--check` clean from the released payload,
+  `--record` produced a 1280x720 H.264 MP4 (31 frames), `--photo` wrote and
+  clipboard-copied a PNG, fmt/pedantic clippy passed native and four cross
+  targets, and all 134 tests passed.
+- [x] Tag `v0.1.0` and publish the unsigned `screencapture-setup.exe` plus its
+  SHA-256 checksum.
 
 ## Deferred backlog
 
