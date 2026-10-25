@@ -84,8 +84,8 @@ pub(super) fn populate(settings: &Settings, window: Hwnd) {
     folders_group(settings, window);
 
     // The button row, right-aligned with the bands' own right edge.
-    push_button(window, super::BTN_SAVE, "Save", 552, 580);
-    push_button(window, super::BTN_CANCEL, "Cancel", 636, 580);
+    push_button(window, super::BTN_SAVE, "Save", 552, 560);
+    push_button(window, super::BTN_CANCEL, "Cancel", 636, 560);
     settle_children();
 }
 
@@ -158,10 +158,11 @@ fn recording_group(settings: &Settings, window: Hwnd) {
 
 /// `Still photo`: what a still is encoded as, then the PNG's depth.
 ///
-/// Quality comes first because it is the choice most users change; depth
-/// only means something for the lossless PNG above it.
+/// Quality comes first because it is the choice most users change; the depth
+/// row is labelled for the only choice that has one, and the dialog greys it
+/// out for every other quality.
 fn still_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 132, COL_W, 100, "Still photo");
+    group(window, COL_L, 132, COL_W, 80, "Still photo");
     let quality_index = StillQuality::CHOICES
         .iter()
         .position(|quality| *quality == settings.photo_quality)
@@ -186,7 +187,7 @@ fn still_group(settings: &Settings, window: Hwnd) {
     combo_row(
         window,
         COMBO_DEPTH,
-        "Photo depth",
+        "PNG depth",
         COL_L,
         176,
         &["8-bit".to_owned(), "16-bit".to_owned()],
@@ -412,27 +413,27 @@ fn device_row(
 /// `Hotkeys`: the three free combos, seeded with their canonical forms,
 /// under Still photo so the right column holds the audio sheet alone.
 fn hotkeys_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 244, COL_W, 138, "Hotkeys");
+    group(window, COL_L, 224, COL_W, 138, "Hotkeys");
     hotkey_row(
         window,
         EDIT_RECORD,
         "Record hotkey",
         &settings.hotkey.to_combo(),
-        262,
+        242,
     );
     hotkey_row(
         window,
         EDIT_PHOTO,
         "Photo hotkey",
         &settings.photo.to_combo(),
-        294,
+        274,
     );
     hotkey_row(
         window,
         EDIT_CHIMES,
         "Chime hotkey",
         &settings.chime_hotkey.to_combo(),
-        326,
+        306,
     );
     let Some(status) = create_child(
         window,
@@ -441,7 +442,7 @@ fn hotkeys_group(settings: &Settings, window: Hwnd) {
         SS_LEFT | WS_CHILD | WS_VISIBLE,
         Place {
             x: COL_L + INNER,
-            y: 358,
+            y: 338,
             width: WIDE_W,
             height: 16,
         },
@@ -455,13 +456,13 @@ fn hotkeys_group(settings: &Settings, window: Hwnd) {
 
 /// `Application`: startup and the capture chime, side by side.
 fn application_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 394, BAND_W, 60, "Application");
+    group(window, COL_L, 374, BAND_W, 60, "Application");
     checkbox(
         window,
         CHECK_AUTOSTART,
         "Start screencapture when Windows starts",
         BAND_LABEL,
-        416,
+        396,
         settings.autostart,
         300,
     );
@@ -470,7 +471,7 @@ fn application_group(settings: &Settings, window: Hwnd) {
         CHECK_CHIMES,
         "Play capture chimes",
         360,
-        416,
+        396,
         settings.chimes,
         250,
     );
@@ -478,14 +479,14 @@ fn application_group(settings: &Settings, window: Hwnd) {
 
 /// `Folders`: both destinations, each with a native Browse button.
 fn folders_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 462, BAND_W, 92, "Folders");
-    label(window, "Videos folder", BAND_LABEL, 486, BAND_LABEL_W);
+    group(window, COL_L, 442, BAND_W, 92, "Folders");
+    label(window, "Videos folder", BAND_LABEL, 466, BAND_LABEL_W);
     edit_box(
         window,
         EDIT_VIDEOS,
         &settings.video_dir.to_string_lossy(),
         BAND_RIGHT,
-        482,
+        462,
         BAND_EDIT_W,
     );
     push_button(
@@ -493,15 +494,15 @@ fn folders_group(settings: &Settings, window: Hwnd) {
         super::BTN_BROWSE_VIDEOS,
         "Browse…",
         BAND_BUTTON_X,
-        480,
+        460,
     );
-    label(window, "Images folder", BAND_LABEL, 518, BAND_LABEL_W);
+    label(window, "Images folder", BAND_LABEL, 498, BAND_LABEL_W);
     edit_box(
         window,
         EDIT_IMAGES,
         &settings.image_dir.to_string_lossy(),
         BAND_RIGHT,
-        514,
+        494,
         BAND_EDIT_W,
     );
     push_button(
@@ -509,7 +510,7 @@ fn folders_group(settings: &Settings, window: Hwnd) {
         super::BTN_BROWSE_IMAGES,
         "Browse…",
         BAND_BUTTON_X,
-        512,
+        492,
     );
 }
 

@@ -21,7 +21,7 @@ use super::ffi::{
 /// laptop at its native scale instead of shrinking the text.
 pub(super) const CLIENT_W: i32 = 728;
 /// See [`CLIENT_W`].
-pub(super) const CLIENT_H: i32 = 624;
+pub(super) const CLIENT_H: i32 = 604;
 
 /// Smallest layout percent the dialog shrinks to: below this the labels
 /// stop being readable, so a display that still cannot fit the dialog
@@ -271,11 +271,11 @@ mod tests {
     fn the_layout_shrinks_to_the_available_height() {
         use super::{CLIENT_H, CLIENT_W, percent_that_fits};
 
-        assert_eq!(percent_that_fits(CLIENT_H, 900), 144);
+        assert_eq!(percent_that_fits(CLIENT_H, 900), 149);
         // A 768-high display minus a taskbar and the frame leaves ~690.
-        assert_eq!(percent_that_fits(CLIENT_H, 690), 110);
+        assert_eq!(percent_that_fits(CLIENT_H, 690), 114);
         // A 600-high netbook cannot show the design at 100%.
-        assert_eq!(percent_that_fits(CLIENT_H, 540), 86);
+        assert_eq!(percent_that_fits(CLIENT_H, 540), 89);
         assert_eq!(percent_that_fits(CLIENT_W, 780), 107);
     }
 
@@ -299,9 +299,9 @@ mod tests {
 
         // 1366x768 at 125%: 728-high work area, 39-pixel caption. The
         // height is the limit, so the sheet loses a little of its scale.
-        assert_eq!(fit_percent(1366, 728, 16, 39, 125), 108);
+        assert_eq!(fit_percent(1366, 728, 16, 39, 125), 112);
         // 1024x600 at 125%: the height only fits shrunk.
-        assert_eq!(fit_percent(1024, 560, 16, 39, 125), 81);
+        assert_eq!(fit_percent(1024, 560, 16, 39, 125), 84);
         // 1920x1080 at 150%: nothing to trim either way.
         assert_eq!(fit_percent(1920, 1032, 16, 39, 150), 150);
         // 2560x1440 at 100%: nothing to do.
@@ -310,7 +310,7 @@ mod tests {
         assert_eq!(fit_percent(1280, 680, 16, 39, 100), 100);
         // A tiny display shrinks by its height; an absurdly small one is
         // clipped at the readable floor rather than drawn unreadably.
-        assert_eq!(fit_percent(800, 520, 16, 39, 100), 75);
+        assert_eq!(fit_percent(800, 520, 16, 39, 100), 77);
         assert_eq!(fit_percent(640, 320, 16, 39, 100), 55);
     }
 

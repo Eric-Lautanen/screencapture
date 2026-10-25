@@ -1497,8 +1497,14 @@ Plan of record, in build order. Every session ends with
   conversion argument, every choice round-trips through the settings file
   and keeps its extension (the three JPEG steps share `.jpg`), and `--check`
   prints the right form for each.
+- [x] The depth row is labelled "PNG depth" and greys out for every quality
+  that has no depth — WebP, BMP, and the three JPEG steps are always 8-bit.
+  `CBN_SELCHANGE` on the quality combo re-enables it the moment PNG is
+  picked, so the row never invites a setting that would be discarded. The
+  still-photo group lost the 20 px the extra row had left as empty space
+  under it, and the sheet is 604 design pixels tall.
 - [x] Gates: fmt, pedantic clippy `-D warnings` on native plus
-  `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`, 248 tests green.
+  `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`, 249 tests green.
 
 ## Deferred backlog
 

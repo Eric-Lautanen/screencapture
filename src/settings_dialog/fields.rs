@@ -82,24 +82,29 @@ pub(super) fn browse_folder(window: Hwnd, target: i32, title: &str) {
     }
 }
 
-/// The chosen index of a combo, `0` when the handle refused.
-pub(super) fn combo_choice(id: i32) -> usize {
+/// The live handle of a combo, or `None` when it was not created.
+pub(super) fn combo_handle(id: i32) -> Option<Hwnd> {
     DIALOG.with_borrow(|dialog| {
         dialog
             .combos
             .iter()
             .find(|(slot, _)| *slot == id)
-            .and_then(|(_, handle)| {
-                // SAFETY: live combobox handle from the dialog itself.
-                let picked = unsafe { SendMessageW(*handle, CB_GETCURSEL, 0, 0) };
-                if picked < 0 {
-                    None
-                } else {
-                    usize::try_from(picked).ok()
-                }
-            })
-            .unwrap_or(0)
+            .map(|(_, handle)| *handle)
     })
+}
+
+/// The chosen index of a combo, `0` when the handle refused.
+pub(super) fn combo_choice(id: i32) -> usize {
+    let Some(handle) = combo_handle(id) else {
+        return 0;
+    };
+    // SAFETY: live combobox handle from the dialog itself.
+    let picked = unsafe { SendMessageW(handle, CB_GETCURSEL, 0, 0) };
+    if picked < 0 {
+        0
+    } else {
+        usize::try_from(picked).unwrap_or(0)
+    }
 }
 
 /// The text of an edit field, trimmed.

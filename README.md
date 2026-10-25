@@ -217,7 +217,8 @@ still open, rather than after the take it would have lost.
 
 A still is a lossless PNG unless you ask for something else. The **Photo
 quality** row in Settings offers six steps: `lossless` (PNG, the default, and
-the only one the PNG depth applies to), `webp` (lossless WebP — the same
+the only one the PNG depth applies to — Settings greys that row out for
+every other quality), `webp` (lossless WebP — the same
 pixels, usually a third of the size), `bmp` (uncompressed 32-bit, for whatever
 wants the raw bitmap), `high` (JPEG 95), `standard` (JPEG 85), and `compact`
 (JPEG 70). The JPEG steps keep full 4:4:4 colour instead of subsampling it, so
