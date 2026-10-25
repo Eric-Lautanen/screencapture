@@ -1,7 +1,7 @@
 //! Still-photo capture: grab one frame from the target region, encode it in
 //! the images directory at the configured quality (a lossless PNG by
-//! default, or a JPEG step), and hand it to the system clipboard when the
-//! platform provides a bridge.
+//! default, a lossless WebP or BMP, or a JPEG step), and hand it to the
+//! system clipboard when the platform provides a bridge.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -97,7 +97,7 @@ fn open_target(selection: super::Selection, cursor: bool) -> io::Result<Target> 
 
 /// A finished photo: where the still landed and how the clipboard took it.
 pub(super) struct Photo {
-    /// The written still (PNG or JPEG, per the quality setting).
+    /// The written still (PNG, WebP, BMP, or JPEG, per the quality setting).
     pub(super) path: PathBuf,
     /// The clipboard answer, or `None` on a platform without a clipboard
     /// bridge (where the file is the whole result).
@@ -145,7 +145,7 @@ fn attach_clipboard(
     frame: &[u8],
     quality: StillQuality,
 ) -> Option<io::Result<()>> {
-    let png = if quality == StillQuality::Lossless {
+    let png = if quality == StillQuality::Png {
         std::fs::read(path).ok()
     } else {
         None

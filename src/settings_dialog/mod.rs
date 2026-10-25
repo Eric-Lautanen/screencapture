@@ -1,8 +1,8 @@
 //! The tray Settings window: Win32 controls over the typed settings view,
 //! so every capture option lives in one place — recording profile and
 //! codec, cursor, the audio devices, sources and levels, the still's
-//! quality and PNG depth, autostart, capture chimes, the record/photo/chime
-//! hotkeys (free
+//! quality and its PNG depth (greyed when the quality does not use one),
+//! autostart, capture chimes, the record/photo/chime hotkeys (free
 //! modifier+key text, validated before accept), and the destination
 //! folders, which each get their own field plus a native folder browse and
 //! are created and write-tested on Save, so a folder that cannot hold a take
@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::io;
 use std::path::Path;
 
-use crate::settings::{AudioDevices, Endpoint, Hotkey, Settings};
+use crate::settings::{AudioDevices, Endpoint, Hotkey, Settings, StillQuality};
 use crate::winapi::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, Hbrush,
     Hinstance, Hwnd, Msg, Point, PostQuitMessage, RegisterClassExW, SW_SHOW, SetForegroundWindow,
@@ -34,11 +34,13 @@ mod keycapture;
 mod rows;
 
 use self::ffi::{
-    BN_CLICKED, IsDialogMessageW, MB_ICONERROR_OK, MessageBoxW, SendMessageW, SetBkMode,
-    SetTextColor, SetWindowTextW, TBM_GETPOS, TRANSPARENT, WS_CAPTION, WS_CLIPCHILDREN,
-    WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_SYSMENU, WS_VISIBLE,
+    BN_CLICKED, CBN_SELCHANGE, EnableWindow, IsDialogMessageW, MB_ICONERROR_OK, MessageBoxW,
+    SendMessageW, SetBkMode, SetTextColor, SetWindowTextW, TBM_GETPOS, TRANSPARENT, WS_CAPTION,
+    WS_CLIPCHILDREN, WS_EX_CONTROLPARENT, WS_EX_DLGMODALFRAME, WS_SYSMENU, WS_VISIBLE,
 };
-use self::fields::{browse_folder, check_state, combo_choice, edit_text, ensure_folder};
+use self::fields::{
+    browse_folder, check_state, combo_choice, combo_handle, edit_text, ensure_folder,
+};
 use self::frame::{
     dpi_scale, drop_font, drop_icon, fit_scale, install_title_icon, ui_font, window_frame,
 };
@@ -76,8 +78,15 @@ const BTN_CANCEL: i32 = 2;
 
 /// The window class this module registers.
 const CLASS_NAME: &str = "screencapture.settings.window";
-/// The dialog caption.
-const TITLE: &str = "Settings — screencapture";
+/// The dialog caption, carrying the version so a screenshot of the sheet
+/// names the build it came from. Compile-time text: no allocation and no
+/// version string to keep in step with the manifest by hand.
+const TITLE: &str = concat!("Settings — screencapture ", env!("CARGO_PKG_VERSION"));
+
+/// `COLORREF` for secondary text (`COLOR_GRAYTEXT`, 109/109/109): the hint
+/// lines and the idle hotkey note, so they sit behind the captions instead
+/// of competing with them.
+const HINT_TEXT: u32 = 0x006D_6D6D;
 
 /// The values a Save submits, keyed to the settings schema.
 pub struct Answers {
@@ -95,7 +104,8 @@ pub struct Answers {
     pub levels: crate::audio::Levels,
     /// Whether the app launches at login.
     pub autostart: bool,
-    /// New photo depth (`8` or `16`; the PNG's pixel depth).
+    /// New photo depth (`8` or `16`; the PNG's pixel depth, ignored by
+    /// every other still quality).
     pub depth: String,
     /// New still quality (`lossless`, `high`, `standard`, or `compact`).
     pub quality: String,
@@ -134,6 +144,12 @@ struct Dialog {
     hotkey_status: Option<Hwnd>,
     /// Whether that label currently reports a conflict (painted red).
     hotkey_warning: bool,
+    /// The depth row's caption, greyed with its combo when the chosen
+    /// quality has no depth: one dead control beside a live-looking label
+    /// read as if only half the row were disabled.
+    depth_caption: Option<Hwnd>,
+    /// Secondary notes inside the groups, painted in [`HINT_TEXT`].
+    hints: Vec<Hwnd>,
     /// The dialog-wide `Segoe UI` font, created in `run` and deleted with
     /// it (children get it via `WM_SETFONT` in `rows`).
     font: Option<*mut c_void>,
@@ -176,6 +192,8 @@ pub fn run(settings: &Settings) -> io::Result<Option<Answers>> {
     DIALOG.with_borrow_mut(|dialog| dialog.font = ui_font(scale));
     DIALOG.with_borrow_mut(|dialog| dialog.icon = install_title_icon(window, instance));
     populate(settings, window);
+    // The depth row starts greyed when the saved quality is not the PNG.
+    sync_depth_state();
     // SAFETY: `window` is the dialog created above.
     unsafe {
         ShowWindow(window, SW_SHOW);
@@ -291,26 +309,40 @@ unsafe extern "system" fn procedure(
 ) -> isize {
     match message {
         ffi::WM_CTLCOLORSTATIC => {
+            let handle = lparam as Hwnd;
             let status = DIALOG.with_borrow(|dialog| dialog.hotkey_status);
-            if status == Some(lparam as Hwnd) {
-                let warning = DIALOG.with_borrow(|dialog| dialog.hotkey_warning);
-                // SAFETY: `wparam` is the control DC; colours are scalars.
-                unsafe {
-                    SetTextColor(
-                        wparam as crate::winapi::Hdc,
-                        if warning { 0x0000_00C0 } else { 0x0000_0000 },
-                    );
-                    SetBkMode(wparam as crate::winapi::Hdc, TRANSPARENT);
+            let is_hint = DIALOG.with_borrow(|dialog| dialog.hints.contains(&handle));
+            let warning = DIALOG.with_borrow(|dialog| dialog.hotkey_warning);
+            // The hotkey note is grey until it reports a conflict; the
+            // group hints are grey always.
+            let colour = if status == Some(handle) {
+                if warning {
+                    Some(0x0000_00C0)
+                } else {
+                    Some(HINT_TEXT)
                 }
-                return 16isize; // COLOR_BTNFACE brush: no white box
+            } else if is_hint {
+                Some(HINT_TEXT)
+            } else {
+                None
+            };
+            let Some(colour) = colour else {
+                return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+            };
+            // SAFETY: `wparam` is the control DC; colours are scalars.
+            unsafe {
+                SetTextColor(wparam as crate::winapi::Hdc, colour);
+                SetBkMode(wparam as crate::winapi::Hdc, TRANSPARENT);
             }
-            unsafe { DefWindowProcW(window, message, wparam, lparam) }
+            16isize // COLOR_BTNFACE brush: no white box
         }
         ffi::WM_COMMAND => {
             let id = i32::try_from(wparam & 0xffff).unwrap_or(0);
             let code = u16::try_from((wparam >> 16) & 0xffff).unwrap_or(0);
             if code == BN_CLICKED {
                 on_click(window, id);
+            } else if code == CBN_SELCHANGE && id == COMBO_QUALITY {
+                sync_depth_state();
             }
             0
         }
@@ -435,6 +467,32 @@ fn save(window: Hwnd) {
     // SAFETY: the pump loop below owns the quit sentinel.
     unsafe {
         PostQuitMessage(0);
+    }
+}
+
+/// Whether the still's depth means anything for `quality`: only the PNG has
+/// a pixel depth to choose. WebP, BMP, and the JPEG steps are always 8-bit,
+/// so their depth row is disabled rather than left looking active.
+fn depth_applies(quality: StillQuality) -> bool {
+    quality == StillQuality::Png
+}
+
+/// Enable or grey the depth row — caption and combo together — for the
+/// quality now selected, and keep it in step when the user changes quality
+/// without saving.
+fn sync_depth_state() {
+    let quality = StillQuality::CHOICES
+        .get(combo_choice(COMBO_QUALITY))
+        .copied()
+        .unwrap_or_default();
+    let enabled = i32::from(depth_applies(quality));
+    let caption = DIALOG.with_borrow(|dialog| dialog.depth_caption);
+    for handle in [combo_handle(COMBO_DEPTH), caption].into_iter().flatten() {
+        // SAFETY: live child controls of this dialog; enabling only changes
+        // their input state.
+        unsafe {
+            EnableWindow(handle, enabled);
+        }
     }
 }
 
@@ -564,8 +622,9 @@ mod tests {
         CHECK_CURSOR, CHECK_MIC, CHECK_SYSTEM_AUDIO, CLASS_NAME, COMBO_AUDIO_QUALITY, COMBO_CODEC,
         COMBO_DEPTH, COMBO_MIC_DEVICE, COMBO_PROFILE, COMBO_QUALITY, COMBO_SYSTEM_DEVICE,
         EDIT_CHIMES, EDIT_IMAGES, EDIT_PHOTO, EDIT_RECORD, EDIT_VIDEOS, SLIDER_MIC_LEVEL,
-        SLIDER_SYSTEM_LEVEL, TITLE,
+        SLIDER_SYSTEM_LEVEL, TITLE, depth_applies,
     };
+    use crate::settings::StillQuality;
 
     /// Every control needs its own id: `GetDlgItem` answers the first window
     /// that claims one, so a duplicate would quietly read or write a
@@ -618,11 +677,29 @@ mod tests {
         assert_eq!(BTN_CANCEL, 2, "IDCANCEL");
     }
 
+    /// Only the PNG has a depth to choose: WebP, BMP, and the JPEG steps are
+    /// always 8-bit, so the row is greyed for them. Walking the real choices
+    /// keeps this true if a quality is added or reordered.
+    #[test]
+    fn only_the_png_quality_has_a_depth_to_choose() {
+        for quality in StillQuality::CHOICES {
+            assert_eq!(
+                depth_applies(quality),
+                quality == StillQuality::Png,
+                "{quality:?}"
+            );
+        }
+    }
+
     /// The class name is how the tray, the capture probe, and the asset
-    /// scripts find this window.
+    /// scripts find this window; the caption carries the version so a
+    /// screenshot names the build it came from.
     #[test]
     fn the_window_is_findable_by_its_class() {
         assert!(CLASS_NAME.starts_with("screencapture."));
-        assert!(TITLE.contains("screencapture"));
+        assert_eq!(
+            TITLE,
+            concat!("Settings — screencapture ", env!("CARGO_PKG_VERSION"))
+        );
     }
 }

@@ -20,7 +20,7 @@ fn builtin_template_round_trips_through_defaults() {
     assert!(settings.autostart);
     assert!(!settings.cursor);
     assert_eq!(settings.photo_depth, StillDepth::Eight);
-    assert_eq!(settings.photo_quality, StillQuality::Lossless);
+    assert_eq!(settings.photo_quality, StillQuality::Png);
     assert!(settings.chimes, "captures are audible by default");
     assert!(!settings.audio.mic, "the microphone starts muted");
     assert!(settings.audio.system, "system sound is on by default");
@@ -59,8 +59,11 @@ fn display_choice_parses_primary_and_numbers() {
 #[test]
 fn still_quality_parses_and_survives_the_file() {
     for (text, quality) in [
-        ("lossless", StillQuality::Lossless),
-        ("PNG", StillQuality::Lossless),
+        ("lossless", StillQuality::Png),
+        ("PNG", StillQuality::Png),
+        ("webp", StillQuality::Webp),
+        ("lossless-webp", StillQuality::Webp),
+        ("BMP", StillQuality::Bmp),
         ("high", StillQuality::High),
         ("Standard", StillQuality::Standard),
         ("compact", StillQuality::Compact),
@@ -80,21 +83,25 @@ fn still_quality_parses_and_survives_the_file() {
         assert_eq!(settings.photo_quality, quality, "{text}");
         assert_eq!(problems.len(), 0, "{text}");
     }
-    assert_eq!(StillQuality::Lossless.extension(), "png");
+    assert_eq!(StillQuality::Png.extension(), "png");
+    assert_eq!(StillQuality::Webp.extension(), "webp");
+    assert_eq!(StillQuality::Bmp.extension(), "bmp");
     assert_eq!(StillQuality::High.extension(), "jpg");
     assert_eq!(StillQuality::Standard.extension(), "jpg");
     assert_eq!(StillQuality::Compact.extension(), "jpg");
     assert_eq!(StillQuality::High.jpeg_qscale(), Some("2"));
     assert_eq!(StillQuality::Standard.jpeg_qscale(), Some("4"));
     assert_eq!(StillQuality::Compact.jpeg_qscale(), Some("7"));
-    assert_eq!(StillQuality::Lossless.jpeg_qscale(), None);
+    assert_eq!(StillQuality::Png.jpeg_qscale(), None);
+    assert_eq!(StillQuality::Webp.jpeg_qscale(), None);
+    assert_eq!(StillQuality::Bmp.jpeg_qscale(), None);
 }
 
 #[test]
 fn an_unknown_still_quality_falls_back_to_lossless() {
     let document = Document::from_text("[photo]\nquality = enormous\n").expect("sample must parse");
     let (settings, problems) = read_document(&document);
-    assert_eq!(settings.photo_quality, StillQuality::Lossless);
+    assert_eq!(settings.photo_quality, StillQuality::Png);
     assert_eq!(problems.len(), 1);
     assert!(problems[0].contains("photo quality"), "{problems:?}");
 }

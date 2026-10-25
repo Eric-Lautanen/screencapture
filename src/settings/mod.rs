@@ -50,13 +50,21 @@ impl std::fmt::Display for StillDepth {
     }
 }
 
-/// How a still is encoded: the lossless PNG that keeps every captured
-/// pixel, or a JPEG at one of three quality steps for a much smaller file.
+/// How a still is encoded: one of two lossless forms that keep every
+/// captured pixel, or a JPEG at one of three quality steps for a much
+/// smaller file.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum StillQuality {
-    /// Lossless PNG; `[photo] depth` picks its pixel depth.
+    /// Lossless PNG (`lossless` in the file); `[photo] depth` picks its
+    /// pixel depth.
     #[default]
-    Lossless,
+    Png,
+    /// Lossless WebP: the same pixels, usually a third of the PNG's size on
+    /// screen content, and 8-bit only.
+    Webp,
+    /// Uncompressed 32-bit BMP: every pixel verbatim, for a program (or a
+    /// person) that wants the raw bitmap rather than a codec.
+    Bmp,
     /// JPEG 95: indistinguishable from the PNG on screen, a fraction of
     /// its size.
     High,
@@ -68,13 +76,22 @@ pub enum StillQuality {
 
 impl StillQuality {
     /// Every choice, in the order Settings lists them.
-    pub const CHOICES: [Self; 4] = [Self::Lossless, Self::High, Self::Standard, Self::Compact];
+    pub const CHOICES: [Self; 6] = [
+        Self::Png,
+        Self::Webp,
+        Self::Bmp,
+        Self::High,
+        Self::Standard,
+        Self::Compact,
+    ];
 
     /// Parse a settings value (case-insensitive).
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
         match text.trim().to_ascii_lowercase().as_str() {
-            "lossless" | "png" => Some(Self::Lossless),
+            "lossless" | "png" => Some(Self::Png),
+            "webp" | "lossless-webp" => Some(Self::Webp),
+            "bmp" | "bitmap" => Some(Self::Bmp),
             "high" | "jpeg-high" | "95" => Some(Self::High),
             "standard" | "jpeg-standard" | "85" => Some(Self::Standard),
             "compact" | "jpeg-compact" | "70" => Some(Self::Compact),
@@ -86,19 +103,21 @@ impl StillQuality {
     #[must_use]
     pub fn extension(self) -> &'static str {
         match self {
-            Self::Lossless => "png",
+            Self::Png => "png",
+            Self::Webp => "webp",
+            Self::Bmp => "bmp",
             Self::High | Self::Standard | Self::Compact => "jpg",
         }
     }
 
     /// The `-q:v` scale ffmpeg's MJPEG encoder takes for this step (lower is
-    /// better), or `None` for the PNG. The encoder's own scale is not the
-    /// percentage users pick, so the two are mapped here rather than
+    /// better), or `None` for the lossless forms. The encoder's own scale is
+    /// not the percentage users pick, so the two are mapped here rather than
     /// guessed at the call site.
     #[must_use]
     pub fn jpeg_qscale(self) -> Option<&'static str> {
         match self {
-            Self::Lossless => None,
+            Self::Png | Self::Webp | Self::Bmp => None,
             Self::High => Some("2"),
             Self::Standard => Some("4"),
             Self::Compact => Some("7"),
@@ -109,7 +128,9 @@ impl StillQuality {
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
-            Self::Lossless => "Lossless — PNG",
+            Self::Png => "Lossless — PNG",
+            Self::Webp => "Lossless — WebP",
+            Self::Bmp => "Lossless — BMP",
             Self::High => "High — JPEG 95",
             Self::Standard => "Standard — JPEG 85",
             Self::Compact => "Compact — JPEG 70",
@@ -120,7 +141,9 @@ impl StillQuality {
 impl std::fmt::Display for StillQuality {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Lossless => write!(formatter, "lossless"),
+            Self::Png => write!(formatter, "lossless"),
+            Self::Webp => write!(formatter, "webp"),
+            Self::Bmp => write!(formatter, "bmp"),
             Self::High => write!(formatter, "high"),
             Self::Standard => write!(formatter, "standard"),
             Self::Compact => write!(formatter, "compact"),
@@ -412,9 +435,9 @@ fn template(videos: &Path, images: &Path) -> String {
             "chimes = true\n",
             "\n",
             "[photo]\n",
-            "# quality: lossless (PNG, the default, and the only lossless\n",
-            "# choice), high (JPEG 95), standard (JPEG 85), or compact\n",
-            "# (JPEG 70). A JPEG still is always 8-bit.\n",
+            "# quality: lossless (PNG, the default), webp (lossless WebP),\n",
+            "# bmp (uncompressed), high (JPEG 95), standard (JPEG 85), or\n",
+            "# compact (JPEG 70). WebP, BMP, and JPEG stills are 8-bit.\n",
             "quality = lossless\n",
             "# depth: 8 (default) or 16 (48-bit RGB PNG; both capture\n",
             "# routes today are 8-bit, so 16 is future-proofing). A JPEG\n",
@@ -604,12 +627,12 @@ fn still_settings(document: &Document, problems: &mut Vec<String>) -> (StillDept
             .join(", ");
         problems.push(format!(
             "invalid photo quality; using {} (choices: {choices})",
-            StillQuality::Lossless
+            StillQuality::Png
         ));
     }
     (
         depth.unwrap_or(StillDepth::Eight),
-        quality.unwrap_or(StillQuality::Lossless),
+        quality.unwrap_or(StillQuality::Png),
     )
 }
 

@@ -35,7 +35,9 @@ and the same capture pipeline headless on macOS and Linux.</p>
     <td align="center" valign="top">
       <img src="assets/settings-window.png" width="440" alt="The screencapture Settings window" />
       <br />
-      <sub><strong>Settings</strong> — profile, codec, still quality, audio devices and levels, chimes, hotkeys, and folders.</sub>
+      <sub><strong>Settings</strong> — profile, codec, still quality and PNG
+        depth, audio devices and levels, chimes, hotkeys, and folders; the
+        title shows the running version.</sub>
     </td>
     <td align="center" valign="top">
       <img src="assets/tray-menu.png" width="200" alt="The screencapture tray menu" />
@@ -57,8 +59,8 @@ and the same capture pipeline headless on macOS and Linux.</p>
   16:10 window recorded through the 720p profile comes out 1152×720 with no
   black bars, and a screen smaller than the profile keeps its own pixels
   instead of being stretched.
-- **You can paste straight away.** Every still is saved (a lossless PNG by
-  default, or a JPEG at the quality you pick) and put on the Windows
+- **You can paste straight away.** Every still is saved at the quality you
+  pick — lossless PNG, WebP, or BMP, or a JPEG step — and put on the Windows
   clipboard as a bitmap, so it is one `Ctrl+V` away.
 - **It hears the room too.** A recording carries system sound and your
   microphone, mixed into one 48 kHz AAC stereo track at speech, standard, or
@@ -89,7 +91,7 @@ step left that asks for administrator approval.
 
 ### Windows from source
 
-Requires Rust 1.85+ (edition 2024). Windows PowerShell 5.1 ships with supported
+Requires Rust 1.89+ (edition 2024). Windows PowerShell 5.1 ships with supported
 Windows versions and is all the fetch script needs. Fetch the pinned engine,
 then build:
 
@@ -216,13 +218,16 @@ a read-only drive, or accepts no new files is refused while the field is
 still open, rather than after the take it would have lost.
 
 A still is a lossless PNG unless you ask for something else. The **Photo
-quality** row in Settings offers four steps: `lossless` (the default, and the
-only lossless one — `photo depth` picks its 8- or 16-bit pixel form), `high`
-(JPEG 95), `standard` (JPEG 85), and `compact` (JPEG 70). The JPEG steps keep
-full 4:4:4 colour instead of subsampling it, so coloured text on a dialog
-still reads cleanly, and they cut a typical desktop still to about half the
-PNG's size or less. A JPEG still is always 8-bit and still goes to the
-clipboard as a bitmap; the PNG file flavour is offered for the lossless one.
+quality** row in Settings offers six steps: `lossless` (PNG, the default, and
+the only one the PNG depth applies to — Settings greys that row, caption and
+all, for every other quality), `webp` (lossless WebP — the same
+pixels, usually a third of the size), `bmp` (uncompressed 32-bit, for whatever
+wants the raw bitmap), `high` (JPEG 95), `standard` (JPEG 85), and `compact`
+(JPEG 70). The JPEG steps keep full 4:4:4 colour instead of subsampling it, so
+coloured text on a dialog still reads cleanly. On one 1920x1200 desktop take
+here, the PNG was 177 KB, the lossless WebP 50 KB, and the BMP 9.2 MB. WebP,
+BMP, and JPEG stills are 8-bit and go to the clipboard as a bitmap; the PNG
+file flavour is offered for the PNG.
 
 A still, or a stopped recording, answers with a soft three-note chime on
 Windows. Mute it from the tray menu, with `ctrl+shift+m`, or in Settings.
@@ -322,8 +327,9 @@ display = primary
 chimes = true
 
 [photo]
-# quality: lossless (PNG), high (JPEG 95), standard (JPEG 85), or
-# compact (JPEG 70). A JPEG is always 8-bit, so depth applies to PNG.
+# quality: lossless (PNG), webp (lossless WebP), bmp (uncompressed),
+# high (JPEG 95), standard (JPEG 85), or compact (JPEG 70). WebP, BMP,
+# and JPEG are 8-bit, so depth applies to PNG only.
 quality = lossless
 depth = 8
 
@@ -368,7 +374,7 @@ the accepted values, and `screencapture --check` prints the parsed result.
 | Whole-display recording | ✅ Desktop Duplication | ✅ CoreGraphics | ✅ X11 |
 | Window recording | ✅ own content (Graphics Capture) | ✅ compositor window list | ✅ X client rect |
 | Exact rectangle (`--rect`) | ✅ | ✅ | ✅ |
-| Still photos (PNG or JPEG) | ✅ | ✅ | ✅ |
+| Still photos (PNG, WebP, BMP, or JPEG) | ✅ | ✅ | ✅ |
 | Recording audio (system + mic, 3 quality levels) | ✅ WASAPI loopback and capture | — | — |
 | Clipboard handoff | ✅ | — | — |
 | Capture chimes | ✅ | — | — |
@@ -439,8 +445,9 @@ installed cross targets are kept warning-free.
 request, and starts the release binary there so the platform code loads and
 reports instead of panicking. The Windows installer job also records: it runs
 `--check`, takes a two-second region take, probes it for H.264 and AAC and a
-plausible duration, and checks that the still it saves really starts with a
-PNG signature, all with the bundled engine. `main` is protected: all three
+plausible duration, and writes one still per quality step — PNG, WebP, BMP,
+and JPEG — probing each for its codec at the requested size, all with the
+bundled engine. `main` is protected: all three
 jobs must pass, the branch must be up to date, and admins cannot bypass the
 rules.
 

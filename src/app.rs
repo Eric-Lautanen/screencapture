@@ -101,6 +101,10 @@ pub fn run(config: Option<&Path>) -> ExitCode {
         Ok(Acquire::Owner) => {}
         Ok(Acquire::AlreadyRunning) => {
             log::note("error", "screencapture is already running");
+            // The ring only reaches the log through a flush, and this
+            // process is about to end: without it the reason for the exit
+            // would be dropped, which is how a guard hit looks silent.
+            log::flush_to(&loaded.settings.video_dir);
             return ExitCode::FAILURE;
         }
         Err(error) => {
@@ -108,6 +112,7 @@ pub fn run(config: Option<&Path>) -> ExitCode {
                 "error",
                 &format!("cannot check for a running instance: {error}"),
             );
+            log::flush_to(&loaded.settings.video_dir);
             return ExitCode::FAILURE;
         }
     }

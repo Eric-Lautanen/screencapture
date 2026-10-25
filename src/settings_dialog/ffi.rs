@@ -66,6 +66,8 @@ pub(super) const GWLP_WNDPROC: i32 = -4;
 pub(super) const TRANSPARENT: i32 = 1;
 /// The button notification this window answers.
 pub(super) const BN_CLICKED: u16 = 0;
+/// `CBN_SELCHANGE` (winuser.h): the user picked a different combo entry.
+pub(super) const CBN_SELCHANGE: u16 = 1;
 /// Sets the control's font (`wparam` = font, `lparam` nonzero redraws).
 pub(super) const WM_SETFONT: u32 = 0x0030;
 /// Sets a window icon (`wparam` `0` = small/title, `1` = big).
@@ -147,6 +149,9 @@ unsafe extern "system" {
         lparam: Lparam,
     ) -> Lresult;
     pub(super) fn InvalidateRect(window: Hwnd, rect: *const Rect, erase: Bool) -> Bool;
+    /// Enables or disables a child control's input; a disabled combo is
+    /// greyed, skipped by Tab, and cannot be opened.
+    pub(super) fn EnableWindow(window: Hwnd, enable: Bool) -> Bool;
     pub(super) fn SetTextColor(dc: crate::winapi::Hdc, color: u32) -> u32;
     pub(super) fn SetBkMode(dc: crate::winapi::Hdc, mode: i32) -> i32;
     pub(super) fn MessageBoxW(owner: Hwnd, text: *const u16, caption: *const u16, kind: u32)

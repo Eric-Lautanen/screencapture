@@ -1477,6 +1477,93 @@ Plan of record, in build order. Every session ends with
   `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`, 246 tests green.
 - [x] Version 0.2.0: a new setting and a changed frame are a minor release.
 
+## Session 40 - Two more lossless still forms (done)
+
+- [x] `[photo] quality` gained `webp` and `bmp`. WebP is libwebp's lossless
+  mode (`-lossless 1 -quality 100`, where quality is compression effort), so
+  the pixels are unchanged and the file is usually a third of the PNG's;
+  BMP is the encoder's own uncompressed 32-bit form, for a consumer that
+  wants the raw bitmap. Both are 8-bit, so `depth` stays the PNG's.
+- [x] The bundled engine ships both: `-encoders` lists `libwebp`,
+  `libwebp_anim`, and `bmp`; the WebP encoder also accepts BGRA directly.
+- [x] Measured on one 1920x1200 desktop take through `--photo`: PNG 177 KB,
+  lossless WebP 50 KB, BMP 9.2 MB, with `ffprobe` reporting `webp` and `bmp`
+  at 1920x1200. (JPEG 95 on a 1280x720 take was 131 KB against a 225 KB
+  PNG.)
+- [x] The dropdown lists all six steps, and `--check` names what a take will
+  write ("Lossless — WebP, 8-bit", "Lossless — BMP, 8-bit").
+- [x] Tests: the WebP arm must name `-lossless 1` (without it libwebp writes
+  a lossy file and the label lies), the BMP arm must carry no compression or
+  conversion argument, every choice round-trips through the settings file
+  and keeps its extension (the three JPEG steps share `.jpg`), and `--check`
+  prints the right form for each.
+- [x] The depth row is labelled "PNG depth" and greys out for every quality
+  that has no depth — WebP, BMP, and the three JPEG steps are always 8-bit.
+  `CBN_SELCHANGE` on the quality combo re-enables it the moment PNG is
+  picked, so the row never invites a setting that would be discarded. The
+  still-photo group lost the 20 px the extra row had left as empty space
+  under it, and the sheet is 604 design pixels tall.
+- [x] The Windows CI smoke writes one still per quality step — PNG, WebP,
+  BMP, and JPEG — into a cleared folder, requires exactly the file that step
+  names, and probes each for its codec at 320x200. That is the only check
+  that every encoder the quality list offers really ships in the bundled
+  engine.
+- [x] Gates: fmt, pedantic clippy `-D warnings` on native plus
+  `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`, 249 tests green.
+
+## Session 41 - A versioned, balanced Settings sheet (done)
+
+- [x] The Settings caption carries the build: `Settings — screencapture
+  0.2.0`, from `env!("CARGO_PKG_VERSION")` through `concat!`, so a screenshot
+  of the sheet names the version without a second string to keep in step.
+  `--version`, the installer, and the exe resource already read the same
+  manifest value.
+- [x] The sheet is balanced instead of leaving half a column empty. Recording
+  and Hotkeys stack on the left, Still photo and Audio on the right, and both
+  columns end at 274 and 282 design pixels, just above the bands — the
+  184-pixel stretch of bare background below Audio is gone.
+- [x] The sheet is 524 designed pixels tall instead of 604, and `CLIENT_H`
+  is fitted from the footer's own row (`BUTTON_Y + BUTTON_H +
+  FOOTER_MARGIN`), so the window can never end anywhere but one margin below
+  Save. A 1366x768 laptop at 125% now keeps its full scale (112% before);
+  1024x600 at 125% shrinks to 97% instead of 84%.
+- [x] Every column and band position is a named constant, and the geometry
+  test checks the stacking gaps, that both columns finish above the bands,
+  the bands' order, the footer's alignment with the band edge, and the bottom
+  margin — replacing a stale `470 + 28` literal that no longer named any
+  control.
+- [x] The PNG depth row greys as one unit: the caption's handle is kept and
+  `EnableWindow` runs on caption and combo together, so a disabled row no
+  longer shows a live-looking label. Verified live: switching Photo quality
+  to WebP leaves the combo disabled and its caption grey.
+- [x] The secondary notes ("A chosen device is kept even while it is
+  unplugged." and the idle hotkey line) paint in `COLOR_GRAYTEXT` through
+  `WM_CTLCOLORSTATIC`, with the hotkey conflict still red, so the notes read
+  behind the captions instead of competing with them.
+- [x] The Folders rows fill their band: the path fields are 468 designed
+  pixels (was 300) and the Browse buttons close the band's inner edge, so the
+  band reads as one full-width form and a long destination is readable
+  without scrolling a field.
+- [x] `assets/settings-window.png` recaptured from the real dialog at 100%
+  (734x553, `PrintWindow` so no desktop or shadow leaks in), with the version
+  in the title, the balanced columns, and realistic folder paths.
+- [x] Gates: fmt, pedantic clippy `-D warnings` on native plus
+  `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`, 249 tests green.
+
+## Session 42 - 0.2.1 (done)
+
+- [x] A second bare launch while the tray runs now says so instead of
+  exiting 1 silently: the CLI probes the guard mutex before detaching the
+  console (`OpenMutexW`, no ownership taken), and both guard-failure paths
+  flush the log ring, so the reason reaches stderr and `screencapture.log`.
+- [x] The Windows single-instance test had been compiled out by a
+  `cfg(not(windows))` on its module; it runs again and also checks the
+  probe. 250 tests green.
+- [x] 0.2.1 packages sessions 40-42: the two lossless still forms, the
+  versioned and balanced Settings sheet, one probed still per quality in
+  the Windows CI smoke, and the launch reporting. A patch release: no
+  settings key, capture format, or default changed since 0.2.0.
+
 ## Deferred backlog
 
 - numbered display names via `EnumDisplayDevices`; mac multi-display

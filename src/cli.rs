@@ -67,6 +67,16 @@ pub fn run(args: &[String]) -> ExitCode {
     match parse(args) {
         Ok(invocation) => {
             if matches!(invocation.command, Command::Run) {
+                // Say why a second launch is about to end, while the console
+                // is still attached: the tray detaches it a line later, and
+                // after that the explanation would go nowhere.
+                if crate::instance::running() {
+                    eprintln!(
+                        "screencapture is already running; quit it from its notification-area \
+                         icon first"
+                    );
+                    return ExitCode::FAILURE;
+                }
                 detach_tray_console();
             }
             dispatch(&invocation)

@@ -1,7 +1,7 @@
-//! The settings dialog's control rows: a two-column sheet with Capture,
-//! Recording, and Still photo on the left and Audio and Hotkeys on the
-//! right, full-width Application and Folders bands beneath them, the
-//! control builders, and the getters Save reads back through.
+//! The settings dialog's control rows: a two-column sheet with Recording and
+//! Hotkeys on the left and Still photo and Audio on the right, full-width
+//! Application and Folders bands beneath them, the control builders, and the
+//! getters Save reads back through.
 //!
 //! Every coordinate below is a designed pixel at 96 DPI; `create_child`
 //! scales it with the display.
@@ -60,10 +60,40 @@ const WIDE_W: i32 = COL_W - INNER - 24;
 const BAND_LABEL: i32 = COL_L + INNER;
 const BAND_LABEL_W: i32 = 112;
 const BAND_RIGHT: i32 = BAND_LABEL + BAND_LABEL_W;
-/// Band text-entry width, leaving the Browse button its own column.
-const BAND_EDIT_W: i32 = 300;
-/// Browse buttons sit one control gap past the edits.
-const BAND_BUTTON_X: i32 = BAND_RIGHT + BAND_EDIT_W + 8;
+/// Browse buttons close the bands' inner edge, so the rows read as one
+/// full-width form instead of trailing off after the edits.
+const BAND_BUTTON_X: i32 = COL_L + BAND_W - INNER - BUTTON_W;
+/// Band text-entry width: everything between the caption column and the
+/// button, one control gap short of it, so a long path is readable.
+const BAND_EDIT_W: i32 = BAND_BUTTON_X - BAND_RIGHT - 8;
+
+/// Left column, top to bottom: the video profile and the hotkeys that drive
+/// it.
+const RECORDING_Y: i32 = 12;
+const RECORDING_H: i32 = 112;
+const HOTKEYS_Y: i32 = 136;
+const HOTKEYS_H: i32 = 138;
+/// Right column, top to bottom: the still's form and the audio sheet. The two
+/// columns end within one group gap of each other, so neither side trails off
+/// into a bare stretch of background.
+const STILL_Y: i32 = 12;
+const STILL_H: i32 = 80;
+const AUDIO_Y: i32 = 104;
+const AUDIO_H: i32 = 178;
+/// The two full-width bands beneath the columns, then the footer.
+const APP_Y: i32 = 294;
+const APP_H: i32 = 60;
+const FOLDERS_Y: i32 = 362;
+const FOLDERS_H: i32 = 92;
+pub(super) const BUTTON_Y: i32 = 480;
+const BUTTON_W: i32 = 76;
+pub(super) const BUTTON_H: i32 = 28;
+/// The clear space left below the footer buttons; the client height is
+/// fitted from it, so the sheet cannot grow past its own last row.
+pub(super) const FOOTER_MARGIN: i32 = 16;
+/// Save and Cancel, right-aligned with the bands' own right edge.
+const CANCEL_X: i32 = COL_L + BAND_W - BUTTON_W;
+const SAVE_X: i32 = CANCEL_X - BUTTON_W - 8;
 
 /// On-screen position and size of a child control, in designed pixels.
 #[derive(Clone, Copy)]
@@ -77,15 +107,15 @@ struct Place {
 /// Every child control, seeded from the current settings.
 pub(super) fn populate(settings: &Settings, window: Hwnd) {
     recording_group(settings, window);
+    hotkeys_group(settings, window);
     still_group(settings, window);
     audio_group(settings, window);
-    hotkeys_group(settings, window);
     application_group(settings, window);
     folders_group(settings, window);
 
     // The button row, right-aligned with the bands' own right edge.
-    push_button(window, super::BTN_SAVE, "Save", 552, 580);
-    push_button(window, super::BTN_CANCEL, "Cancel", 636, 580);
+    push_button(window, super::BTN_SAVE, "Save", SAVE_X, BUTTON_Y);
+    push_button(window, super::BTN_CANCEL, "Cancel", CANCEL_X, BUTTON_Y);
     settle_children();
 }
 
@@ -112,7 +142,7 @@ fn settle_children() {
 
 /// `Recording`: profile, codec, and the cursor switch.
 fn recording_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 12, COL_W, 112, "Recording");
+    group(window, COL_L, RECORDING_Y, COL_W, RECORDING_H, "Recording");
     let profile_entries: Vec<String> = Profile::PROFILES
         .iter()
         .map(|profile| format!("{} ({}×{})", profile.label, profile.width, profile.height))
@@ -126,7 +156,7 @@ fn recording_group(settings: &Settings, window: Hwnd) {
         COMBO_PROFILE,
         "Video profile",
         COL_L,
-        28,
+        RECORDING_Y + 16,
         &profile_entries,
         profile_index,
     );
@@ -141,7 +171,7 @@ fn recording_group(settings: &Settings, window: Hwnd) {
         COMBO_CODEC,
         "Video codec",
         COL_L,
-        56,
+        RECORDING_Y + 44,
         &codec_entries,
         codec_index,
     );
@@ -150,7 +180,7 @@ fn recording_group(settings: &Settings, window: Hwnd) {
         CHECK_CURSOR,
         "Include mouse cursor in captures",
         COL_L + INNER,
-        88,
+        RECORDING_Y + 76,
         settings.cursor,
         WIDE_W,
     );
@@ -158,10 +188,11 @@ fn recording_group(settings: &Settings, window: Hwnd) {
 
 /// `Still photo`: what a still is encoded as, then the PNG's depth.
 ///
-/// Quality comes first because it is the choice most users change; depth
-/// only means something for the lossless PNG above it.
+/// Quality comes first because it is the choice most users change; the depth
+/// row is labelled for the only choice that has one, and the dialog greys the
+/// whole row — caption included — for every other quality.
 fn still_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 132, COL_W, 100, "Still photo");
+    group(window, COL_R, STILL_Y, COL_W, STILL_H, "Still photo");
     let quality_index = StillQuality::CHOICES
         .iter()
         .position(|quality| *quality == settings.photo_quality)
@@ -174,8 +205,8 @@ fn still_group(settings: &Settings, window: Hwnd) {
         window,
         COMBO_QUALITY,
         "Photo quality",
-        COL_L,
-        148,
+        COL_R,
+        STILL_Y + 16,
         &quality_entries,
         quality_index,
     );
@@ -183,15 +214,16 @@ fn still_group(settings: &Settings, window: Hwnd) {
         StillDepth::Eight => 0,
         StillDepth::Sixteen => 1,
     };
-    combo_row(
+    let depth_caption = combo_row(
         window,
         COMBO_DEPTH,
-        "Photo depth",
-        COL_L,
-        176,
+        "PNG depth",
+        COL_R,
+        STILL_Y + 44,
         &["8-bit".to_owned(), "16-bit".to_owned()],
         depth_index,
     );
+    DIALOG.with_borrow_mut(|dialog| dialog.depth_caption = depth_caption);
 }
 
 /// `Audio`: which sources recordings carry, which device each one records
@@ -201,13 +233,13 @@ fn still_group(settings: &Settings, window: Hwnd) {
 /// the playback device it means are one line to read — and a source that is
 /// off keeps its device remembered for the next take.
 fn audio_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_R, 12, COL_W, 178, "Audio");
+    group(window, COL_R, AUDIO_Y, COL_W, AUDIO_H, "Audio");
     checkbox(
         window,
         CHECK_SYSTEM_AUDIO,
         "System audio",
         COL_R + INNER,
-        26,
+        AUDIO_Y + 14,
         settings.audio.system,
         CHECK_W,
     );
@@ -217,7 +249,7 @@ fn audio_group(settings: &Settings, window: Hwnd) {
         settings.audio_devices.system.as_ref(),
         crate::audio::devices::PLAYBACK,
         COL_R + PICK_X,
-        22,
+        AUDIO_Y + 10,
         PICK_W,
     );
     checkbox(
@@ -225,7 +257,7 @@ fn audio_group(settings: &Settings, window: Hwnd) {
         CHECK_MIC,
         "Microphone",
         COL_R + INNER,
-        50,
+        AUDIO_Y + 38,
         settings.audio.mic,
         CHECK_W,
     );
@@ -235,7 +267,7 @@ fn audio_group(settings: &Settings, window: Hwnd) {
         settings.audio_devices.mic.as_ref(),
         crate::audio::devices::RECORDING,
         COL_R + PICK_X,
-        46,
+        AUDIO_Y + 34,
         PICK_W,
     );
     let labels: Vec<String> = crate::audio::Quality::CHOICES
@@ -251,7 +283,7 @@ fn audio_group(settings: &Settings, window: Hwnd) {
         COMBO_AUDIO_QUALITY,
         "Quality",
         COL_R,
-        76,
+        AUDIO_Y + 64,
         &labels,
         quality_index,
     );
@@ -260,7 +292,7 @@ fn audio_group(settings: &Settings, window: Hwnd) {
         SLIDER_MIC_LEVEL,
         "Mic level",
         COL_R,
-        104,
+        AUDIO_Y + 92,
         settings.audio_levels.mic_db,
     );
     level_row(
@@ -268,14 +300,14 @@ fn audio_group(settings: &Settings, window: Hwnd) {
         SLIDER_SYSTEM_LEVEL,
         "System level",
         COL_R,
-        130,
+        AUDIO_Y + 118,
         settings.audio_levels.system_db,
     );
-    label(
+    hint(
         window,
         "A chosen device is kept even while it is unplugged.",
         COL_R + INNER,
-        158,
+        AUDIO_Y + 146,
         WIDE_W,
     );
 }
@@ -410,29 +442,29 @@ fn device_row(
 }
 
 /// `Hotkeys`: the three free combos, seeded with their canonical forms,
-/// under Still photo so the right column holds the audio sheet alone.
+/// directly under the recording group they drive.
 fn hotkeys_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 244, COL_W, 138, "Hotkeys");
+    group(window, COL_L, HOTKEYS_Y, COL_W, HOTKEYS_H, "Hotkeys");
     hotkey_row(
         window,
         EDIT_RECORD,
         "Record hotkey",
         &settings.hotkey.to_combo(),
-        262,
+        HOTKEYS_Y + 18,
     );
     hotkey_row(
         window,
         EDIT_PHOTO,
         "Photo hotkey",
         &settings.photo.to_combo(),
-        294,
+        HOTKEYS_Y + 50,
     );
     hotkey_row(
         window,
         EDIT_CHIMES,
         "Chime hotkey",
         &settings.chime_hotkey.to_combo(),
-        326,
+        HOTKEYS_Y + 82,
     );
     let Some(status) = create_child(
         window,
@@ -441,7 +473,7 @@ fn hotkeys_group(settings: &Settings, window: Hwnd) {
         SS_LEFT | WS_CHILD | WS_VISIBLE,
         Place {
             x: COL_L + INNER,
-            y: 358,
+            y: HOTKEYS_Y + 114,
             width: WIDE_W,
             height: 16,
         },
@@ -455,13 +487,13 @@ fn hotkeys_group(settings: &Settings, window: Hwnd) {
 
 /// `Application`: startup and the capture chime, side by side.
 fn application_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 394, BAND_W, 60, "Application");
+    group(window, COL_L, APP_Y, BAND_W, APP_H, "Application");
     checkbox(
         window,
         CHECK_AUTOSTART,
         "Start screencapture when Windows starts",
         BAND_LABEL,
-        416,
+        APP_Y + 22,
         settings.autostart,
         300,
     );
@@ -470,7 +502,7 @@ fn application_group(settings: &Settings, window: Hwnd) {
         CHECK_CHIMES,
         "Play capture chimes",
         360,
-        416,
+        APP_Y + 22,
         settings.chimes,
         250,
     );
@@ -478,14 +510,20 @@ fn application_group(settings: &Settings, window: Hwnd) {
 
 /// `Folders`: both destinations, each with a native Browse button.
 fn folders_group(settings: &Settings, window: Hwnd) {
-    group(window, COL_L, 462, BAND_W, 92, "Folders");
-    label(window, "Videos folder", BAND_LABEL, 486, BAND_LABEL_W);
+    group(window, COL_L, FOLDERS_Y, BAND_W, FOLDERS_H, "Folders");
+    label(
+        window,
+        "Videos folder",
+        BAND_LABEL,
+        FOLDERS_Y + 24,
+        BAND_LABEL_W,
+    );
     edit_box(
         window,
         EDIT_VIDEOS,
         &settings.video_dir.to_string_lossy(),
         BAND_RIGHT,
-        482,
+        FOLDERS_Y + 20,
         BAND_EDIT_W,
     );
     push_button(
@@ -493,15 +531,21 @@ fn folders_group(settings: &Settings, window: Hwnd) {
         super::BTN_BROWSE_VIDEOS,
         "Browse…",
         BAND_BUTTON_X,
-        480,
+        FOLDERS_Y + 18,
     );
-    label(window, "Images folder", BAND_LABEL, 518, BAND_LABEL_W);
+    label(
+        window,
+        "Images folder",
+        BAND_LABEL,
+        FOLDERS_Y + 56,
+        BAND_LABEL_W,
+    );
     edit_box(
         window,
         EDIT_IMAGES,
         &settings.image_dir.to_string_lossy(),
         BAND_RIGHT,
-        514,
+        FOLDERS_Y + 52,
         BAND_EDIT_W,
     );
     push_button(
@@ -509,7 +553,7 @@ fn folders_group(settings: &Settings, window: Hwnd) {
         super::BTN_BROWSE_IMAGES,
         "Browse…",
         BAND_BUTTON_X,
-        512,
+        FOLDERS_Y + 50,
     );
 }
 
@@ -530,6 +574,7 @@ pub(super) fn codec_list() -> Vec<Video> {
 }
 
 /// One caption row + combo row pair inside a column, on the shared edges.
+/// The caption's handle comes back for rows that are greyed as a unit.
 fn combo_row(
     window: Hwnd,
     id: i32,
@@ -538,8 +583,8 @@ fn combo_row(
     y: i32,
     entries: &[String],
     chosen: usize,
-) {
-    label(window, caption, column + INNER, y + 4, LABEL_W);
+) -> Option<Hwnd> {
+    let caption = label(window, caption, column + INNER, y + 4, LABEL_W);
     let Some(handle) = create_child(
         window,
         "COMBOBOX",
@@ -556,7 +601,7 @@ fn combo_row(
         id,
         0,
     ) else {
-        return;
+        return caption;
     };
     for entry in entries {
         let text = wide(entry);
@@ -570,10 +615,11 @@ fn combo_row(
         SendMessageW(handle, CB_SETCURSEL, chosen, 0);
     }
     DIALOG.with_borrow_mut(|dialog| dialog.combos.push((id, handle)));
+    caption
 }
 
 /// One hotkey caption + key-capture field pair, in the left column under
-/// the still-photo group.
+/// the recording group.
 fn hotkey_row(window: Hwnd, id: i32, caption: &str, value: &str, y: i32) {
     label(window, caption, COL_L + INNER, y + 4, LABEL_W);
     edit_box(window, id, value, COL_L + INNER + LABEL_W, y, CONTROL_W);
@@ -604,9 +650,10 @@ fn checkbox(window: Hwnd, id: i32, caption: &str, x: i32, y: i32, on: bool, widt
     DIALOG.with_borrow_mut(|dialog| dialog.checks.push((id, handle)));
 }
 
-/// One caption or hint line at `x`/`y`.
-fn label(window: Hwnd, caption: &str, x: i32, y: i32, width: i32) {
-    let _ = create_child(
+/// One caption line at `x`/`y`; the handle comes back when the caller may
+/// need to grey it with its control.
+fn label(window: Hwnd, caption: &str, x: i32, y: i32, width: i32) -> Option<Hwnd> {
+    create_child(
         window,
         "STATIC",
         caption,
@@ -619,7 +666,16 @@ fn label(window: Hwnd, caption: &str, x: i32, y: i32, width: i32) {
         },
         0,
         0,
-    );
+    )
+}
+
+/// One secondary note under a group's controls, painted in grey so it reads
+/// as a hint rather than another caption.
+fn hint(window: Hwnd, caption: &str, x: i32, y: i32, width: i32) {
+    let Some(handle) = label(window, caption, x, y, width) else {
+        return;
+    };
+    DIALOG.with_borrow_mut(|dialog| dialog.hints.push(handle));
 }
 
 /// One sunken text entry seeded with `value`.
@@ -661,8 +717,8 @@ fn push_button(window: Hwnd, id: i32, caption: &str, x: i32, y: i32) {
         Place {
             x,
             y,
-            width: 76,
-            height: 28,
+            width: BUTTON_W,
+            height: BUTTON_H,
         },
         id,
         0,
@@ -743,8 +799,10 @@ fn create_child(
 #[cfg(test)]
 mod tests {
     use super::{
-        BAND_BUTTON_X, BAND_EDIT_W, BAND_RIGHT, BAND_W, COL_L, COL_R, COL_W, CONTROL_W, LABEL_W,
-        codec_list,
+        APP_H, APP_Y, AUDIO_H, AUDIO_Y, BAND_BUTTON_X, BAND_EDIT_W, BAND_RIGHT, BAND_W, BUTTON_H,
+        BUTTON_W, BUTTON_Y, CANCEL_X, COL_L, COL_R, COL_W, CONTROL_W, FOLDERS_H, FOLDERS_Y,
+        FOOTER_MARGIN, HOTKEYS_H, HOTKEYS_Y, INNER, LABEL_W, RECORDING_H, RECORDING_Y, SAVE_X,
+        STILL_H, STILL_Y, WIDE_W, codec_list,
     };
 
     #[test]
@@ -756,12 +814,12 @@ mod tests {
     }
 
     /// The geometry invariants the design leans on: the columns sit inside
-    /// the dialog with equal margins, the controls stay inside their group,
-    /// and the bands span both columns.
+    /// the dialog with equal margins, each stacks its groups without gaps or
+    /// overlaps, both end above the first band, and the footer closes the
+    /// sheet inside the client edge.
     #[test]
     fn the_grid_stays_inside_its_window() {
         use super::super::frame::{CLIENT_H, CLIENT_W};
-        use super::{INNER, WIDE_W};
 
         const {
             // The right column mirrors the left one's margin.
@@ -772,12 +830,27 @@ mod tests {
             assert!(COL_L + INNER + LABEL_W + CONTROL_W < COL_L + COL_W - 8);
             // A wide checkbox stays inside its group too.
             assert!(COL_L + INNER + WIDE_W < COL_L + COL_W - 8);
-            // The band's Browse button stays inside the band.
-            assert!(BAND_BUTTON_X + 76 < COL_L + BAND_W);
+            // Each column stacks its groups with one gap between them, and
+            // the two columns end close enough together that neither leaves
+            // a bare stretch above the bands.
+            assert!(RECORDING_Y + RECORDING_H + 12 == HOTKEYS_Y);
+            assert!(STILL_Y + STILL_H + 12 == AUDIO_Y);
+            assert!(HOTKEYS_Y + HOTKEYS_H < APP_Y);
+            assert!(AUDIO_Y + AUDIO_H < APP_Y);
+            assert!((HOTKEYS_Y + HOTKEYS_H) - (AUDIO_Y + AUDIO_H) <= 12);
+            // The bands follow each other, and the folders end above the
+            // footer.
+            assert!(APP_Y + APP_H < FOLDERS_Y);
+            assert!(FOLDERS_Y + FOLDERS_H < BUTTON_Y);
+            // Save and Cancel are right-aligned with the band edge and leave
+            // the same margin at the bottom as the columns do at the top.
+            assert!(SAVE_X + BUTTON_W + 8 == CANCEL_X);
+            assert!(CANCEL_X + BUTTON_W == COL_L + BAND_W);
+            assert!(BUTTON_Y + BUTTON_H + FOOTER_MARGIN == CLIENT_H);
+            // The band's Browse button closes the band's inner edge.
+            assert!(BAND_BUTTON_X + BUTTON_W == COL_L + BAND_W - INNER);
             // The edits leave room for the button beside them.
             assert!(BAND_RIGHT + BAND_EDIT_W + 8 == BAND_BUTTON_X);
-            // The button row still fits above the client edge.
-            assert!(470 + 28 < CLIENT_H);
         }
     }
 }

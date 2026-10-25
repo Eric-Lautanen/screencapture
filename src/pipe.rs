@@ -119,6 +119,8 @@ pub fn record_args(
 /// lossless compression arguments. A JPEG choice swaps the codec for MJPEG
 /// at that step's quality, in full-resolution 4:4:4 (`yuvj444p`) because
 /// 4:2:0 makes coloured UI text fringe; `depth` does not apply to it.
+/// Lossless WebP asks libwebp for its lossless mode at full effort; BMP is
+/// the uncompressed 32-bit bitmap the encoder takes straight from BGRA.
 #[must_use]
 pub fn still_args(
     stream: Stream,
@@ -143,6 +145,21 @@ pub fn still_args(
             "-pix_fmt".to_owned(),
             "yuvj444p".to_owned(),
         ]);
+    } else if quality == crate::settings::StillQuality::Webp {
+        args.extend([
+            "-c:v".to_owned(),
+            "libwebp".to_owned(),
+            "-lossless".to_owned(),
+            "1".to_owned(),
+            // In lossless mode libwebp reads this as compression effort.
+            "-quality".to_owned(),
+            "100".to_owned(),
+        ]);
+    } else if quality == crate::settings::StillQuality::Bmp {
+        // Uncompressed 32-bit BMP: BGRA goes in as the encoder's own bgra
+        // input and nothing is compressed — the choice for a consumer that
+        // wants the raw bitmap.
+        args.extend(["-c:v".to_owned(), "bmp".to_owned()]);
     } else {
         if depth == crate::settings::StillDepth::Sixteen {
             args.extend(["-vf".to_owned(), "format=rgb48be".to_owned()]);
@@ -490,7 +507,7 @@ mod tests {
                 fps: 1,
             },
             StillDepth::Eight,
-            StillQuality::Lossless,
+            StillQuality::Png,
             Path::new("out.png"),
         );
         for wanted in [
@@ -516,7 +533,7 @@ mod tests {
                 fps: 1,
             },
             StillDepth::Sixteen,
-            StillQuality::Lossless,
+            StillQuality::Png,
             Path::new("out.png"),
         );
         assert!(args.contains(&"-vf".to_owned()));
@@ -562,6 +579,54 @@ mod tests {
                 "{quality:?}"
             );
             assert!(!args.contains(&"format=rgb48be".to_owned()), "{quality:?}");
+        }
+    }
+
+    /// The lossless WebP arm keeps the pixels but not the PNG container: it
+    /// must ask libwebp for lossless mode, or the encoder silently writes a
+    /// lossy file and the choice stops meaning what it says.
+    #[test]
+    fn a_lossless_webp_still_asks_for_webp_lossless() {
+        let args = still_args(
+            Stream {
+                width: 64,
+                height: 32,
+                fps: 1,
+            },
+            StillDepth::Sixteen,
+            StillQuality::Webp,
+            Path::new("out.webp"),
+        );
+        assert!(args.contains(&"libwebp".to_owned()));
+        let index = args
+            .iter()
+            .position(|arg| arg == "-lossless")
+            .expect("lossless mode is named");
+        assert_eq!(args[index + 1], "1");
+        assert!(args.contains(&"-quality".to_owned()));
+        assert!(!args.contains(&"png".to_owned()));
+        assert!(!args.contains(&"mjpeg".to_owned()));
+        // Depth is the PNG's; libwebp has no 48-bit form.
+        assert!(!args.contains(&"format=rgb48be".to_owned()));
+    }
+
+    /// BMP is the uncompressed choice: the encoder writes the frame as it
+    /// arrives, so no compression or conversion argument belongs in it.
+    #[test]
+    fn a_bmp_still_asks_for_the_uncompressed_encoder() {
+        let args = still_args(
+            Stream {
+                width: 64,
+                height: 32,
+                fps: 1,
+            },
+            StillDepth::Eight,
+            StillQuality::Bmp,
+            Path::new("out.bmp"),
+        );
+        assert!(args.contains(&"bmp".to_owned()));
+        for absent in ["png", "mjpeg", "libwebp", "-compression_level", "-q:v"] {
+            assert!(!args.contains(&absent.to_owned()), "{absent}");
         }
     }
 }
