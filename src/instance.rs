@@ -22,6 +22,13 @@ pub fn acquire() -> io::Result<Acquire> {
     native::acquire()
 }
 
+/// Whether another instance currently owns the tray, without creating the
+/// guard. The CLI asks before the tray detaches its console, so a second
+/// launch can say why it is exiting instead of dying silently.
+pub fn running() -> bool {
+    native::running()
+}
+
 #[cfg(windows)]
 mod native {
     use std::ffi::c_void;
@@ -32,6 +39,8 @@ mod native {
 
     const ERROR_ALREADY_EXISTS: u32 = 183;
     const MUTEX_NAME: &str = "Local\\ScreencaptureInstance";
+    /// Access right for opening an existing named object.
+    const SYNCHRONIZE: u32 = 0x0010_0000;
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -40,6 +49,8 @@ mod native {
             initial_owner: i32,
             name: *const u16,
         ) -> *mut c_void;
+        fn OpenMutexW(access: u32, inherit: i32, name: *const u16) -> *mut c_void;
+        fn CloseHandle(handle: *mut c_void) -> i32;
         fn SetLastError(error: u32);
         fn GetLastError() -> u32;
     }
@@ -73,6 +84,25 @@ mod native {
         } else {
             Acquire::Owner
         })
+    }
+
+    /// Probe for the guard mutex without taking anything: a live instance
+    /// keeps its handle for as long as it runs, so the object exists while
+    /// the tray does and vanishes with it.
+    pub(super) fn running() -> bool {
+        let name: Vec<u16> = std::ffi::OsStr::new(MUTEX_NAME)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `name` is NUL-terminated and outlives the call; the
+        // returned handle is closed once below.
+        let handle = unsafe { OpenMutexW(SYNCHRONIZE, 0, name.as_ptr()) };
+        if handle.is_null() {
+            return false;
+        }
+        // SAFETY: the handle came from `OpenMutexW` and is closed once.
+        unsafe { CloseHandle(handle) };
+        true
     }
 }
 
@@ -113,11 +143,18 @@ mod native {
             Err(TryLockError::Error(problem)) => Err(problem),
         }
     }
+
+    /// There is no tray off Windows, so nothing can be holding it: a bare
+    /// launch prints the command list instead.
+    pub(super) fn running() -> bool {
+        false
+    }
 }
 
 #[cfg(test)]
-#[cfg(not(windows))]
 mod tests {
+    #[cfg(windows)]
+    use super::running;
     use super::{Acquire, acquire};
 
     /// The guard exists so a second launch — hotkey-spawned, or a stray
@@ -131,6 +168,9 @@ mod tests {
             return; // a real instance is running on this desktop
         }
         assert_eq!(acquire().expect("the guard mutex"), Acquire::AlreadyRunning);
+        // The CLI's pre-flight probe answers the same way, without taking
+        // the guard a second time.
+        assert!(running());
     }
 
     #[cfg(not(windows))]
