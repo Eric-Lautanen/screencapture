@@ -1,0 +1,99 @@
+name: Bug report
+description: Something in screencapture did not do what the README says it does.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. The version and the two reports below are what
+        usually narrow a capture problem down: `--check` names the engine,
+        displays, and audio endpoints, and the log names what each take opened.
+        Drag a screenshot or a short clip into any text box if it helps.
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The first line of `screencapture --version`.
+      placeholder: screencapture 0.2.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows 11
+        - Windows 10 2004 or later
+        - macOS
+        - Linux (X11)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The action you used (record, photo, Settings, a hotkey, the tray) and what it did instead.
+      placeholder: A 10-second region recording stopped after one second and wrote no file.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The shortest sequence that shows it. Mention the capture mode, profile, or still quality if they matter.
+      placeholder: |
+        1. Set mode = region
+        2. Press ctrl+shift+x and drag a rectangle
+        3. Release and wait ten seconds
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      placeholder: A ten-second H.264 + AAC MP4 in Videos\Screencapture, and the frame closed on stop.
+    validations:
+      required: true
+
+  - type: textarea
+    id: check
+    attributes:
+      label: "`screencapture --check` output"
+      description: Run it from the copy that failed — the installed exe or `target\release\screencapture.exe`. It prints the version, parsed settings, displays, audio endpoints, and the engine it resolved.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: |
+        The last roughly 40 lines of `%USERPROFILE%\Videos\Screencapture\screencapture.log`
+        (on macOS and Linux, the `screencapture.log` beside your recordings). The
+        `record:`, `photo:`, and `engine:` lines are the useful part; the rest can go.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: A workaround, how often it happens, or a clip of the screen when it fails.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Before posting
+      options:
+        - label: I removed or blurred anything private in the log and attachments — window titles, file paths, device names.
+          required: true
