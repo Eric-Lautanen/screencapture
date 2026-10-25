@@ -18,10 +18,12 @@ use super::ffi::{
 /// The designed client area: the two grouped columns in `rows` side by
 /// side, the full-width bands beneath them, and the button row at the
 /// bottom. Wide and short on purpose: a settings sheet that fits a 1366x768
-/// laptop at its native scale instead of shrinking the text.
+/// laptop at 125% instead of shrinking the text.
 pub(super) const CLIENT_W: i32 = 728;
-/// See [`CLIENT_W`].
-pub(super) const CLIENT_H: i32 = 604;
+/// Fitted from the footer's own row in `rows`, so the window always ends one
+/// margin below the buttons it holds.
+pub(super) const CLIENT_H: i32 =
+    super::rows::BUTTON_Y + super::rows::BUTTON_H + super::rows::FOOTER_MARGIN;
 
 /// Smallest layout percent the dialog shrinks to: below this the labels
 /// stop being readable, so a display that still cannot fit the dialog
@@ -53,8 +55,8 @@ pub(super) fn scaled(value: i32, percent: i32) -> i32 {
 
 /// The layout percent the dialog actually uses: the display's DPI scale,
 /// reduced until the whole window — caption included — fits the work area
-/// (the desktop minus the taskbar). A 1366x768 laptop at 125% would
-/// otherwise draw a 845-pixel client area and put Save below the screen.
+/// (the desktop minus the taskbar). A 1366x768 laptop at 150% would
+/// otherwise draw a 786-pixel client area and put Save below the screen.
 pub(super) fn fit_scale(scale: i32) -> i32 {
     let (_, _, work_w, work_h) = work_area();
     let (chrome_w, chrome_h) = frame_extents();
@@ -271,11 +273,12 @@ mod tests {
     fn the_layout_shrinks_to_the_available_height() {
         use super::{CLIENT_H, CLIENT_W, percent_that_fits};
 
-        assert_eq!(percent_that_fits(CLIENT_H, 900), 149);
-        // A 768-high display minus a taskbar and the frame leaves ~690.
-        assert_eq!(percent_that_fits(CLIENT_H, 690), 114);
-        // A 600-high netbook cannot show the design at 100%.
-        assert_eq!(percent_that_fits(CLIENT_H, 540), 89);
+        assert_eq!(percent_that_fits(CLIENT_H, 900), 171);
+        // A 768-high display minus a taskbar and the frame leaves ~690:
+        // still enough for the sheet at 100% and then some.
+        assert_eq!(percent_that_fits(CLIENT_H, 690), 131);
+        // A 600-high netbook cannot show the design at full scale.
+        assert_eq!(percent_that_fits(CLIENT_H, 540), 103);
         assert_eq!(percent_that_fits(CLIENT_W, 780), 107);
     }
 
@@ -298,10 +301,10 @@ mod tests {
         use super::fit_percent;
 
         // 1366x768 at 125%: 728-high work area, 39-pixel caption. The
-        // height is the limit, so the sheet loses a little of its scale.
-        assert_eq!(fit_percent(1366, 728, 16, 39, 125), 112);
+        // sheet keeps its full scale now that the columns are balanced.
+        assert_eq!(fit_percent(1366, 728, 16, 39, 125), 125);
         // 1024x600 at 125%: the height only fits shrunk.
-        assert_eq!(fit_percent(1024, 560, 16, 39, 125), 84);
+        assert_eq!(fit_percent(1024, 560, 16, 39, 125), 97);
         // 1920x1080 at 150%: nothing to trim either way.
         assert_eq!(fit_percent(1920, 1032, 16, 39, 150), 150);
         // 2560x1440 at 100%: nothing to do.
@@ -310,7 +313,7 @@ mod tests {
         assert_eq!(fit_percent(1280, 680, 16, 39, 100), 100);
         // A tiny display shrinks by its height; an absurdly small one is
         // clipped at the readable floor rather than drawn unreadably.
-        assert_eq!(fit_percent(800, 520, 16, 39, 100), 77);
+        assert_eq!(fit_percent(800, 520, 16, 39, 100), 89);
         assert_eq!(fit_percent(640, 320, 16, 39, 100), 55);
     }
 

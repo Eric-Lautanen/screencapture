@@ -1511,6 +1511,45 @@ Plan of record, in build order. Every session ends with
 - [x] Gates: fmt, pedantic clippy `-D warnings` on native plus
   `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`, 249 tests green.
 
+## Session 41 - A versioned, balanced Settings sheet (done)
+
+- [x] The Settings caption carries the build: `Settings — screencapture
+  0.2.0`, from `env!("CARGO_PKG_VERSION")` through `concat!`, so a screenshot
+  of the sheet names the version without a second string to keep in step.
+  `--version`, the installer, and the exe resource already read the same
+  manifest value.
+- [x] The sheet is balanced instead of leaving half a column empty. Recording
+  and Hotkeys stack on the left, Still photo and Audio on the right, and both
+  columns end at 274 and 282 design pixels, just above the bands — the
+  184-pixel stretch of bare background below Audio is gone.
+- [x] The sheet is 524 designed pixels tall instead of 604, and `CLIENT_H`
+  is fitted from the footer's own row (`BUTTON_Y + BUTTON_H +
+  FOOTER_MARGIN`), so the window can never end anywhere but one margin below
+  Save. A 1366x768 laptop at 125% now keeps its full scale (112% before);
+  1024x600 at 125% shrinks to 97% instead of 84%.
+- [x] Every column and band position is a named constant, and the geometry
+  test checks the stacking gaps, that both columns finish above the bands,
+  the bands' order, the footer's alignment with the band edge, and the bottom
+  margin — replacing a stale `470 + 28` literal that no longer named any
+  control.
+- [x] The PNG depth row greys as one unit: the caption's handle is kept and
+  `EnableWindow` runs on caption and combo together, so a disabled row no
+  longer shows a live-looking label. Verified live: switching Photo quality
+  to WebP leaves the combo disabled and its caption grey.
+- [x] The secondary notes ("A chosen device is kept even while it is
+  unplugged." and the idle hotkey line) paint in `COLOR_GRAYTEXT` through
+  `WM_CTLCOLORSTATIC`, with the hotkey conflict still red, so the notes read
+  behind the captions instead of competing with them.
+- [x] The Folders rows fill their band: the path fields are 468 designed
+  pixels (was 300) and the Browse buttons close the band's inner edge, so the
+  band reads as one full-width form and a long destination is readable
+  without scrolling a field.
+- [x] `assets/settings-window.png` recaptured from the real dialog at 100%
+  (734x553, `PrintWindow` so no desktop or shadow leaks in), with the version
+  in the title, the balanced columns, and realistic folder paths.
+- [x] Gates: fmt, pedantic clippy `-D warnings` on native plus
+  `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`, 249 tests green.
+
 ## Deferred backlog
 
 - numbered display names via `EnumDisplayDevices`; mac multi-display

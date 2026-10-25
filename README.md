@@ -35,7 +35,9 @@ and the same capture pipeline headless on macOS and Linux.</p>
     <td align="center" valign="top">
       <img src="assets/settings-window.png" width="440" alt="The screencapture Settings window" />
       <br />
-      <sub><strong>Settings</strong> — profile, codec, still quality, audio devices and levels, chimes, hotkeys, and folders.</sub>
+      <sub><strong>Settings</strong> — profile, codec, still quality and PNG
+        depth, audio devices and levels, chimes, hotkeys, and folders; the
+        title shows the running version.</sub>
     </td>
     <td align="center" valign="top">
       <img src="assets/tray-menu.png" width="200" alt="The screencapture tray menu" />
@@ -217,8 +219,8 @@ still open, rather than after the take it would have lost.
 
 A still is a lossless PNG unless you ask for something else. The **Photo
 quality** row in Settings offers six steps: `lossless` (PNG, the default, and
-the only one the PNG depth applies to — Settings greys that row out for
-every other quality), `webp` (lossless WebP — the same
+the only one the PNG depth applies to — Settings greys that row, caption and
+all, for every other quality), `webp` (lossless WebP — the same
 pixels, usually a third of the size), `bmp` (uncompressed 32-bit, for whatever
 wants the raw bitmap), `high` (JPEG 95), `standard` (JPEG 85), and `compact`
 (JPEG 70). The JPEG steps keep full 4:4:4 colour instead of subsampling it, so

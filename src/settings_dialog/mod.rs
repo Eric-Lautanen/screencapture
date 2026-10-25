@@ -78,8 +78,15 @@ const BTN_CANCEL: i32 = 2;
 
 /// The window class this module registers.
 const CLASS_NAME: &str = "screencapture.settings.window";
-/// The dialog caption.
-const TITLE: &str = "Settings — screencapture";
+/// The dialog caption, carrying the version so a screenshot of the sheet
+/// names the build it came from. Compile-time text: no allocation and no
+/// version string to keep in step with the manifest by hand.
+const TITLE: &str = concat!("Settings — screencapture ", env!("CARGO_PKG_VERSION"));
+
+/// `COLORREF` for secondary text (`COLOR_GRAYTEXT`, 109/109/109): the hint
+/// lines and the idle hotkey note, so they sit behind the captions instead
+/// of competing with them.
+const HINT_TEXT: u32 = 0x006D_6D6D;
 
 /// The values a Save submits, keyed to the settings schema.
 pub struct Answers {
@@ -137,6 +144,12 @@ struct Dialog {
     hotkey_status: Option<Hwnd>,
     /// Whether that label currently reports a conflict (painted red).
     hotkey_warning: bool,
+    /// The depth row's caption, greyed with its combo when the chosen
+    /// quality has no depth: one dead control beside a live-looking label
+    /// read as if only half the row were disabled.
+    depth_caption: Option<Hwnd>,
+    /// Secondary notes inside the groups, painted in [`HINT_TEXT`].
+    hints: Vec<Hwnd>,
     /// The dialog-wide `Segoe UI` font, created in `run` and deleted with
     /// it (children get it via `WM_SETFONT` in `rows`).
     font: Option<*mut c_void>,
@@ -296,20 +309,32 @@ unsafe extern "system" fn procedure(
 ) -> isize {
     match message {
         ffi::WM_CTLCOLORSTATIC => {
+            let handle = lparam as Hwnd;
             let status = DIALOG.with_borrow(|dialog| dialog.hotkey_status);
-            if status == Some(lparam as Hwnd) {
-                let warning = DIALOG.with_borrow(|dialog| dialog.hotkey_warning);
-                // SAFETY: `wparam` is the control DC; colours are scalars.
-                unsafe {
-                    SetTextColor(
-                        wparam as crate::winapi::Hdc,
-                        if warning { 0x0000_00C0 } else { 0x0000_0000 },
-                    );
-                    SetBkMode(wparam as crate::winapi::Hdc, TRANSPARENT);
+            let is_hint = DIALOG.with_borrow(|dialog| dialog.hints.contains(&handle));
+            let warning = DIALOG.with_borrow(|dialog| dialog.hotkey_warning);
+            // The hotkey note is grey until it reports a conflict; the
+            // group hints are grey always.
+            let colour = if status == Some(handle) {
+                if warning {
+                    Some(0x0000_00C0)
+                } else {
+                    Some(HINT_TEXT)
                 }
-                return 16isize; // COLOR_BTNFACE brush: no white box
+            } else if is_hint {
+                Some(HINT_TEXT)
+            } else {
+                None
+            };
+            let Some(colour) = colour else {
+                return unsafe { DefWindowProcW(window, message, wparam, lparam) };
+            };
+            // SAFETY: `wparam` is the control DC; colours are scalars.
+            unsafe {
+                SetTextColor(wparam as crate::winapi::Hdc, colour);
+                SetBkMode(wparam as crate::winapi::Hdc, TRANSPARENT);
             }
-            unsafe { DefWindowProcW(window, message, wparam, lparam) }
+            16isize // COLOR_BTNFACE brush: no white box
         }
         ffi::WM_COMMAND => {
             let id = i32::try_from(wparam & 0xffff).unwrap_or(0);
@@ -452,20 +477,22 @@ fn depth_applies(quality: StillQuality) -> bool {
     quality == StillQuality::Png
 }
 
-/// Enable or grey the depth row for the quality now selected, and keep it
-/// in step when the user changes quality without saving.
+/// Enable or grey the depth row — caption and combo together — for the
+/// quality now selected, and keep it in step when the user changes quality
+/// without saving.
 fn sync_depth_state() {
     let quality = StillQuality::CHOICES
         .get(combo_choice(COMBO_QUALITY))
         .copied()
         .unwrap_or_default();
-    let Some(handle) = combo_handle(COMBO_DEPTH) else {
-        return;
-    };
-    // SAFETY: a live child control of this dialog; enabling only changes
-    // its input state.
-    unsafe {
-        EnableWindow(handle, i32::from(depth_applies(quality)));
+    let enabled = i32::from(depth_applies(quality));
+    let caption = DIALOG.with_borrow(|dialog| dialog.depth_caption);
+    for handle in [combo_handle(COMBO_DEPTH), caption].into_iter().flatten() {
+        // SAFETY: live child controls of this dialog; enabling only changes
+        // their input state.
+        unsafe {
+            EnableWindow(handle, enabled);
+        }
     }
 }
 
@@ -665,10 +692,14 @@ mod tests {
     }
 
     /// The class name is how the tray, the capture probe, and the asset
-    /// scripts find this window.
+    /// scripts find this window; the caption carries the version so a
+    /// screenshot names the build it came from.
     #[test]
     fn the_window_is_findable_by_its_class() {
         assert!(CLASS_NAME.starts_with("screencapture."));
-        assert!(TITLE.contains("screencapture"));
+        assert_eq!(
+            TITLE,
+            concat!("Settings — screencapture ", env!("CARGO_PKG_VERSION"))
+        );
     }
 }
