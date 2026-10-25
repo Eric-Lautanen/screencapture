@@ -202,16 +202,49 @@ jobs:
           if ($codecs -notcontains 'aac') { throw 'the recording has no AAC audio stream' }
           if ($duration -lt 1.5 -or $duration -gt 4) { throw "the recording is $duration s long" }
 
-          & $app --photo --config $settings --rect 0,0,320,200
-          if ($LASTEXITCODE -ne 0) { throw '--photo failed' }
-          $still = Get-ChildItem -LiteralPath $images -Filter *.png |
-              Sort-Object LastWriteTime | Select-Object -Last 1
-          if ($null -eq $still) { throw 'no still was written' }
-          $bytes = [System.IO.File]::ReadAllBytes($still.FullName)
-          Write-Host "still: $($still.Name), $($bytes.Length) bytes"
-          if ($bytes.Length -lt 1000) { throw "the still is only $($bytes.Length) bytes" }
-          if (-not ($bytes[0] -eq 0x89 -and $bytes[1] -eq 0x50 -and $bytes[2] -eq 0x4E -and $bytes[3] -eq 0x47)) {
-              throw 'the still is not a PNG'
+          # Every still quality must write its own file type, and the
+          # engine must carry the encoder it names: ffprobe reporting the
+          # codec is the check that a still is not just a renamed picture of
+          # another kind. The list is the whole `[photo] quality` surface.
+          $stills = @(
+              @{ quality = 'lossless'; ext = 'png'; codec = 'png' },
+              @{ quality = 'webp'; ext = 'webp'; codec = 'webp' },
+              @{ quality = 'bmp'; ext = 'bmp'; codec = 'bmp' },
+              @{ quality = 'high'; ext = 'jpg'; codec = 'mjpeg' }
+          )
+          foreach ($case in $stills) {
+              $with_photo = $lines + @('', '[photo]', "quality = $($case.quality)")
+              $with_photo | Set-Content -LiteralPath $settings -Encoding ascii
+              Get-ChildItem -LiteralPath $images -File |
+                  ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+
+              & $app --photo --config $settings --rect 0,0,320,200
+              if ($LASTEXITCODE -ne 0) { throw "--photo failed for $($case.quality)" }
+              $written = @(Get-ChildItem -LiteralPath $images -File)
+              if ($written.Count -ne 1) {
+                  throw "$($case.quality) wrote $($written.Count) stills, not one"
+              }
+              $still = $written[0]
+              if ($still.Extension -ne ".$($case.ext)") {
+                  throw "$($case.quality) wrote $($still.Name), not a .$($case.ext)"
+              }
+              if ($still.Length -lt 1000) {
+                  throw "$($still.Name) is only $($still.Length) bytes"
+              }
+
+              $probe = & $ffprobe -v error -show_entries stream=codec_name,width,height `
+                  -of default=noprint_wrappers=1 $still.FullName
+              if ($LASTEXITCODE -ne 0) { throw "ffprobe refused $($still.Name)" }
+              $codec = (@($probe | Where-Object { $_ -like 'codec_name=*' })[0]).Split('=')[1]
+              $width = (@($probe | Where-Object { $_ -like 'width=*' })[0]).Split('=')[1]
+              $height = (@($probe | Where-Object { $_ -like 'height=*' })[0]).Split('=')[1]
+              Write-Host "still: $($still.Name), $([math]::Round($still.Length / 1kb)) KiB, $codec ${width}x${height}"
+              if ($codec -ne $case.codec) {
+                  throw "$($case.quality) encoded $codec, not $($case.codec)"
+              }
+              if ($width -ne '320' -or $height -ne '200') {
+                  throw "$($still.Name) is ${width}x${height}, not 320x200"
+              }
           }
           Write-Host 'capture smoke ok'
           Remove-Item -LiteralPath $root -Recurse -Force

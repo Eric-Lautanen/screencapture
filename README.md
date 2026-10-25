@@ -443,8 +443,9 @@ installed cross targets are kept warning-free.
 request, and starts the release binary there so the platform code loads and
 reports instead of panicking. The Windows installer job also records: it runs
 `--check`, takes a two-second region take, probes it for H.264 and AAC and a
-plausible duration, and checks that the still it saves really starts with a
-PNG signature, all with the bundled engine. `main` is protected: all three
+plausible duration, and writes one still per quality step — PNG, WebP, BMP,
+and JPEG — probing each for its codec at the requested size, all with the
+bundled engine. `main` is protected: all three
 jobs must pass, the branch must be up to date, and admins cannot bypass the
 rules.
 

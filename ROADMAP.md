@@ -1503,6 +1503,11 @@ Plan of record, in build order. Every session ends with
   picked, so the row never invites a setting that would be discarded. The
   still-photo group lost the 20 px the extra row had left as empty space
   under it, and the sheet is 604 design pixels tall.
+- [x] The Windows CI smoke writes one still per quality step — PNG, WebP,
+  BMP, and JPEG — into a cleared folder, requires exactly the file that step
+  names, and probes each for its codec at 320x200. That is the only check
+  that every encoder the quality list offers really ships in the bundled
+  engine.
 - [x] Gates: fmt, pedantic clippy `-D warnings` on native plus
   `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`, 249 tests green.
 
