@@ -1550,6 +1550,20 @@ Plan of record, in build order. Every session ends with
 - [x] Gates: fmt, pedantic clippy `-D warnings` on native plus
   `aarch64-apple-darwin` and `x86_64-unknown-linux-gnu`, 249 tests green.
 
+## Session 42 - 0.2.1 (done)
+
+- [x] A second bare launch while the tray runs now says so instead of
+  exiting 1 silently: the CLI probes the guard mutex before detaching the
+  console (`OpenMutexW`, no ownership taken), and both guard-failure paths
+  flush the log ring, so the reason reaches stderr and `screencapture.log`.
+- [x] The Windows single-instance test had been compiled out by a
+  `cfg(not(windows))` on its module; it runs again and also checks the
+  probe. 250 tests green.
+- [x] 0.2.1 packages sessions 40-42: the two lossless still forms, the
+  versioned and balanced Settings sheet, one probed still per quality in
+  the Windows CI smoke, and the launch reporting. A patch release: no
+  settings key, capture format, or default changed since 0.2.0.
+
 ## Deferred backlog
 
 - numbered display names via `EnumDisplayDevices`; mac multi-display

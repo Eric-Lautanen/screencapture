@@ -91,7 +91,7 @@ step left that asks for administrator approval.
 
 ### Windows from source
 
-Requires Rust 1.85+ (edition 2024). Windows PowerShell 5.1 ships with supported
+Requires Rust 1.89+ (edition 2024). Windows PowerShell 5.1 ships with supported
 Windows versions and is all the fetch script needs. Fetch the pinned engine,
 then build:
 
