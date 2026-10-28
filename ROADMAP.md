@@ -1635,6 +1635,16 @@ Plan of record, in build order. Every session ends with
 - [x] Gates: fmt, pedantic clippy `-D warnings`, 255 tests green (the
   desktop-driving suite included; the cross-target matrix rides the CI).
 
+## Session 44 - 0.2.2 (done)
+
+- [x] 0.2.2 packages session 43: one pointer and one surface in the pick, a
+  window that is asked for the pointer back, a resolved pick that no longer
+  ends the tray behind it, the GUI subsystem with a lent console, and the
+  `[media] chosen` mark that stops a folder picked by hand from being
+  migrated away. A patch release: every key, format, and default that
+  existed in 0.2.1 behaves the same, and `chosen` is an optional key a file
+  written by an older build simply lacks.
+
 ## Deferred backlog
 
 - numbered display names via `EnumDisplayDevices`; mac multi-display
