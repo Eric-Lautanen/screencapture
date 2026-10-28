@@ -302,6 +302,13 @@ screencapture --help                 Print help
 commands run the same pipeline as the tray, so they double as smoke tests.
 Finished recordings are verified with the bundled `ffprobe` on Windows.
 
+The Windows exe is a GUI-subsystem program, so starting the tray never flashes
+a console window, and a command run from a terminal prints into that terminal.
+`cmd.exe` and PowerShell hand the prompt back instead of waiting for a program
+like that, so a script that needs the exit code, or a `--record` that has to
+finish first, should use `start /wait` (or `Start-Process -Wait` in PowerShell);
+Git Bash waits on its own.
+
 ## Configuration
 
 | Platform | Settings file |

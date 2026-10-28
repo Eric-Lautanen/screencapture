@@ -98,8 +98,17 @@ jobs:
           if ($info.FileVersion -ne $version) {
               throw "exe file version [$($info.FileVersion)] does not match $version"
           }
-          & ./target/release/screencapture.exe --version
-          if ($LASTEXITCODE -ne 0) { throw 'release executable refused --version' }
+          # The exe is a GUI-subsystem program — no console window may flash
+          # when the tray starts — and PowerShell hands the prompt back for one
+          # of those rather than waiting, so the exit code comes from the
+          # process object instead of $LASTEXITCODE.
+          $said = Join-Path $env:RUNNER_TEMP 'version.txt'
+          $launch = Start-Process -FilePath (Join-Path $PWD 'target/release/screencapture.exe') `
+              -ArgumentList '--version' -RedirectStandardOutput $said -Wait -PassThru
+          Get-Content -LiteralPath $said | Write-Host
+          if ($launch.ExitCode -ne 0) {
+              throw "release executable refused --version ($($launch.ExitCode))"
+          }
 
       - name: Fetch the pinned FFmpeg engine
         shell: powershell

@@ -184,11 +184,26 @@ jobs:
           )
           $lines | Set-Content -LiteralPath $settings -Encoding ascii
 
-          & $app --check --config $settings
-          if ($LASTEXITCODE -ne 0) { throw '--check failed' }
+          # The exe is a GUI-subsystem program, which is what stops the tray
+          # from flashing a console window when Explorer or the autostart
+          # entry launches it. PowerShell hands the prompt back for a program
+          # like that instead of waiting, leaving $LASTEXITCODE stale, so every
+          # take goes through Start-Process, waits for it, prints what it said,
+          # and reports the exit code of that process.
+          function Invoke-App {
+              param([string[]]$Arguments)
+              $said = Join-Path $env:RUNNER_TEMP 'app-output.txt'
+              if (Test-Path -LiteralPath $said) { Remove-Item -LiteralPath $said -Force }
+              $run = Start-Process -FilePath $app -ArgumentList $Arguments -Wait -PassThru `
+                  -RedirectStandardOutput $said
+              if (Test-Path -LiteralPath $said) { Get-Content -LiteralPath $said | Write-Host }
+              return $run.ExitCode
+          }
 
-          & $app --record 2 --config $settings --rect 0,0,640,360
-          if ($LASTEXITCODE -ne 0) { throw '--record failed' }
+          if ((Invoke-App @('--check', '--config', $settings)) -ne 0) { throw '--check failed' }
+
+          $record = @('--record', '2', '--config', $settings, '--rect', '0,0,640,360')
+          if ((Invoke-App $record) -ne 0) { throw '--record failed' }
           $video = Get-ChildItem -LiteralPath $videos -Filter *.mp4 |
               Sort-Object LastWriteTime | Select-Object -Last 1
           if ($null -eq $video) { throw 'no recording was written' }
@@ -218,8 +233,8 @@ jobs:
               Get-ChildItem -LiteralPath $images -File |
                   ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
 
-              & $app --photo --config $settings --rect 0,0,320,200
-              if ($LASTEXITCODE -ne 0) { throw "--photo failed for $($case.quality)" }
+              $photo = @('--photo', '--config', $settings, '--rect', '0,0,320,200')
+              if ((Invoke-App $photo) -ne 0) { throw "--photo failed for $($case.quality)" }
               $written = @(Get-ChildItem -LiteralPath $images -File)
               if ($written.Count -ne 1) {
                   throw "$($case.quality) wrote $($written.Count) stills, not one"

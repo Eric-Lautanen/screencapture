@@ -6,7 +6,7 @@ use std::process::ExitCode;
 
 use crate::capture::Region;
 use crate::settings::CaptureMode;
-use crate::{app, doctor};
+use crate::{app, console, doctor};
 
 /// Display identity used by version output and diagnostics.
 pub const IDENTITY: &str = concat!("screencapture ", env!("CARGO_PKG_VERSION"));
@@ -67,10 +67,11 @@ pub fn run(args: &[String]) -> ExitCode {
     match parse(args) {
         Ok(invocation) => {
             if matches!(invocation.command, Command::Run) {
-                // Say why a second launch is about to end, while the console
-                // is still attached: the tray detaches it a line later, and
-                // after that the explanation would go nowhere.
+                // Say why a second launch is about to end, while there is
+                // still a terminal to say it in: the tray keeps no console,
+                // and a line later the explanation would go nowhere.
                 if crate::instance::running() {
+                    console::attach();
                     eprintln!(
                         "screencapture is already running; quit it from its notification-area \
                          icon first"
@@ -78,10 +79,15 @@ pub fn run(args: &[String]) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
                 detach_tray_console();
+            } else {
+                // A one-shot command prints a report, so it writes into the
+                // console of the terminal that launched it.
+                console::attach();
             }
             dispatch(&invocation)
         }
         Err(message) => {
+            console::attach();
             eprintln!("error: {message}");
             eprintln!("try: screencapture --help");
             ExitCode::FAILURE
@@ -89,9 +95,11 @@ pub fn run(args: &[String]) -> ExitCode {
     }
 }
 
-/// The binary is a console-subsystem program so `--check` and friends keep
-/// their output; the tray drops that console once it knows it is the tray,
-/// so the installer or Explorer never leaves a terminal window open.
+/// The tray is a notification-area icon, not a terminal program: it hands
+/// back the console that a launch from a terminal lent it, so closing that
+/// window cannot end the tray. Launches from Explorer or the autostart entry
+/// never had one to drop, and the tray keeps the GUI subsystem's silence
+/// either way.
 fn detach_tray_console() {
     #[cfg(windows)]
     crate::winapi::detach_console();
