@@ -1,10 +1,10 @@
-//! Unit tests for the overlay geometry helpers (selection dot outline,
-//! recording frame, and crosshair arms). The control bar's own layout is
-//! pinned in `bar::tests`, beside the code that draws it.
+//! Unit tests for the overlay geometry helpers (selection dot outline and
+//! recording frame). The control bar's own layout is pinned in
+//! `bar::tests`, beside the code that draws it; the pointer a pick shows is
+//! not drawn here at all, and is pinned by the live-session tests in
+//! `window_picker::tests`.
 
-use super::{
-    SELECTION_DOT, Tone, crosshair::crosshair_segments, frame_rects, percent_for, selection_dots,
-};
+use super::{SELECTION_DOT, Tone, frame_rects, percent_for, selection_dots};
 
 /// The pill is aimed at, so its physical size matters more than the logical
 /// one Windows' scale keeps constant. These are real panels: the reference
@@ -244,27 +244,6 @@ fn the_breath_stays_quiet_and_comes_back() {
         assert!(
             (BREATH_LOW..=BREATH_HIGH).contains(&alpha),
             "{alpha} stays inside the readable band"
-        );
-    }
-}
-
-#[test]
-fn crosshair_arms_leave_the_pointer_clear() {
-    let size = 33;
-    let gap = 5;
-    let arms = crosshair_segments(size, gap, 3);
-    assert_eq!(arms.len(), 4);
-    let mid = size / 2;
-    for arm in &arms {
-        assert!(arm.left >= 0 && arm.top >= 0);
-        assert!(arm.right <= size && arm.bottom <= size);
-        assert!(arm.right > arm.left && arm.bottom > arm.top);
-        assert!(
-            arm.right <= mid - gap + 1
-                || arm.left >= mid + gap
-                || arm.bottom <= mid - gap + 1
-                || arm.top >= mid + gap,
-            "crosshair arm covers the pointer gap"
         );
     }
 }

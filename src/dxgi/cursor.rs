@@ -17,46 +17,23 @@
 //! The pointer image is drawn with its top-left at the pose the API
 //! reports; parts outside the frame simply do not exist.
 
-use std::ffi::c_void;
-
-use crate::pin_layout;
-use crate::winapi::Rect;
-
-/// `CURSORINFO` (winuser.h).
-#[repr(C)]
-struct CursorState {
-    size: u32,
-    flags: u32,
-    cursor: *mut c_void,
-    position: crate::winapi::Point,
-}
-
-pin_layout!(CursorState, 24; size = 0, flags = 4, cursor = 8,
-    position = 16);
-
-const CURSOR_SHOWING: u32 = 1;
-const CURSOR_SUPPRESSED: u32 = 2;
-
-#[link(name = "user32")]
-unsafe extern "system" {
-    fn GetCursorInfo(state: *mut CursorState) -> i32;
-}
+use crate::winapi::{CURSOR_SHOWING, CURSOR_SUPPRESSED, CursorInfo, GetCursorInfo, Point, Rect};
 
 /// Live desktop cursor coordinates when the shell is currently showing the
 /// pointer; `None` when hidden or suppressed.
 #[must_use]
 pub(super) fn desktop_cursor_position() -> Option<(i32, i32)> {
-    let mut state = CursorState {
-        size: u32::try_from(std::mem::size_of::<CursorState>()).unwrap_or(0),
+    let mut state = CursorInfo {
+        size: u32::try_from(std::mem::size_of::<CursorInfo>()).unwrap_or(0),
         flags: 0,
         cursor: std::ptr::null_mut(),
-        position: crate::winapi::Point::default(),
+        point: Point::default(),
     };
     // SAFETY: `state` is a local initialized struct with `size` populated.
     let shown = unsafe { GetCursorInfo(&raw mut state) } != 0
         && state.flags & CURSOR_SHOWING != 0
         && state.flags & CURSOR_SUPPRESSED == 0;
-    shown.then_some((state.position.x, state.position.y))
+    shown.then_some((state.point.x, state.point.y))
 }
 
 /// Where the pointer is this tick, in the frame's own coordinates.
