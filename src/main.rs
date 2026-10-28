@@ -1,5 +1,13 @@
 //! `screencapture`: professional 4K screen recording and still-image capture.
 
+// The tray is launched from Explorer, the Start Menu, the installer's finish
+// page and the autostart entry, and Windows creates — and shows — a console
+// window for a console-subsystem program before any of its code runs. Asking
+// for the GUI subsystem is what keeps that terminal from flashing on screen;
+// [`console`] hands a printing command the terminal it was started from. The
+// unit-test harness keeps the console so its own diagnostics stay visible.
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
+
 mod app;
 mod audio;
 mod autostart;
@@ -10,6 +18,7 @@ mod cli;
 mod clipboard;
 mod clock;
 mod config;
+mod console;
 #[cfg(target_os = "macos")]
 mod corefoundation;
 #[cfg(target_os = "macos")]

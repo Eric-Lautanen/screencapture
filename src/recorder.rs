@@ -322,18 +322,40 @@ impl Recorder {
     /// Stop the worker, let the engine finalize the container, and return
     /// the finished file.
     ///
+    /// A take that fails before a single frame reached the engine takes
+    /// its empty container with it: the engine writes the file's header
+    /// before any frame arrives, the file holds nothing but that header,
+    /// and the folder keeps only takes that recorded something. A failure
+    /// after frames were written keeps what was captured.
+    ///
     /// # Errors
     /// Fails when the capture worker or the engine reports an error.
     pub fn stop(mut self) -> io::Result<PathBuf> {
         self.request_stop();
         let output = self.output.clone();
-        match self.join_within(stop_budget(&output)) {
+        let joined = self.join_within(stop_budget(&output));
+        match joined {
             Some(Ok(Ok(()))) => Ok(output),
-            Some(Ok(Err(error))) => Err(error),
-            Some(Err(_)) => Err(io::Error::other("the capture worker stopped unexpectedly")),
+            Some(Ok(Err(error))) => {
+                self.discard_empty(&output);
+                Err(error)
+            }
+            Some(Err(_)) => {
+                self.discard_empty(&output);
+                Err(io::Error::other("the capture worker stopped unexpectedly"))
+            }
             None => Err(io::Error::other(
                 "the capture worker did not stop; the engine is wedged",
             )),
+        }
+    }
+
+    /// Remove `output` when not one frame reached the engine: the worker
+    /// has exited and the engine with it, so the empty container the
+    /// failure leaves behind is this process's to take away.
+    fn discard_empty(&self, output: &Path) {
+        if self.stats().0 == 0 {
+            let _ = std::fs::remove_file(output);
         }
     }
 
@@ -637,7 +659,7 @@ mod tests {
     use crate::encoder::Video;
     use crate::recording::Profile;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -751,6 +773,54 @@ mod tests {
         let dropped = Instant::now();
         drop(recorder);
         assert!(dropped.elapsed() < Duration::from_secs(1));
+    }
+
+    /// A take that fails before its first grab leaves an empty container
+    /// behind — the engine writes the header before any frame arrives — and
+    /// the folder is not the place for that litter.
+    #[test]
+    fn a_failed_take_that_grabbed_nothing_leaves_no_file() {
+        let path = std::env::temp_dir().join(format!(
+            "screencapture-empty-take-{}.mp4",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"ftypisompartial").expect("the partial file is written");
+        let worker = std::thread::spawn(|| -> std::io::Result<()> {
+            Err(std::io::Error::other("BitBlt refused the capture"))
+        });
+        let recorder = Recorder::from_worker(path.clone(), worker);
+        let stopped = recorder.stop();
+        assert!(stopped.is_err(), "the take failed");
+        assert!(!path.exists(), "the empty container is taken away");
+    }
+
+    /// The same failure after frames were written keeps the file: what
+    /// reached the engine is the recording the failure leaves behind.
+    #[test]
+    fn a_failed_take_that_wrote_frames_keeps_the_file() {
+        let path = std::env::temp_dir().join(format!(
+            "screencapture-partial-take-{}.mp4",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"ftypisompartial").expect("the partial file is written");
+        let worker = std::thread::spawn(|| -> std::io::Result<()> {
+            Err(std::io::Error::other("the engine pipe broke mid-take"))
+        });
+        let counters = Arc::new(Counters::default());
+        counters.written.store(12, Ordering::Relaxed);
+        let recorder = Recorder {
+            output: path.clone(),
+            started: Instant::now(),
+            stop: Arc::new(AtomicBool::new(false)),
+            counters,
+            failure: Arc::new(Mutex::new(None)),
+            #[cfg(windows)]
+            live: crate::audio::Live::default(),
+            worker: Some(worker),
+        };
+        assert!(recorder.stop().is_err(), "the take failed");
+        assert!(path.exists(), "the frames that were grabbed survive");
+        let _ = std::fs::remove_file(&path);
     }
 
     /// A picked window must not fall into duplication just because its

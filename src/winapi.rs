@@ -36,6 +36,15 @@ pub const WM_LBUTTONDOWN: u32 = 0x0201;
 pub const WM_LBUTTONUP: u32 = 0x0202;
 pub const WM_RBUTTONDOWN: u32 = 0x0204;
 pub const WM_RBUTTONUP: u32 = 0x0205;
+/// `WM_SETCURSOR` (winuser.h): the message asking a window which pointer to
+/// draw while it is under the mouse.
+const WM_SETCURSOR: u32 = 0x0020;
+/// `HTCLIENT` (winuser.h): the hit test `WM_SETCURSOR` carries for the client
+/// area, which is where an ordinary pointer move lands.
+const HTCLIENT: isize = 1;
+/// `SMTO_ABORTIFHUNG` (winuser.h): give up on a window whose thread is not
+/// pumping instead of blocking the caller.
+const SMTO_ABORTIFHUNG: u32 = 0x0002;
 
 /// `GetMessageW` reports this when the pump should stop.
 pub const GETMESSAGE_QUIT: i32 = 0;
@@ -62,6 +71,9 @@ pub const IDC_CROSS: usize = 32515;
 
 /// Virtual key for the Escape key.
 pub const VK_ESCAPE: usize = 0x1B;
+/// `VK_LBUTTON` (winuser.h): the primary mouse button, for the asynchronous
+/// state call rather than for a message.
+pub const VK_LBUTTON: i32 = 0x01;
 
 /// `GA_ROOT` (winuser.h): the root owner of a window.
 pub const GA_ROOT: u32 = 2;
@@ -175,6 +187,10 @@ unsafe extern "system" {
     pub fn UnregisterClassW(class_name: *const u16, instance: Hinstance) -> Atom;
     pub fn GetModuleHandleW(name: *const u16) -> Hinstance;
     pub fn GetCursorPos(point: *mut Point) -> Bool;
+    pub fn GetCursorInfo(info: *mut CursorInfo) -> Bool;
+    /// The high bit is set while `key` is down; the low bit is rarely useful
+    /// and not read here.
+    pub fn GetAsyncKeyState(key: i32) -> i16;
     pub fn SetForegroundWindow(window: Hwnd) -> Bool;
     pub fn ShowWindow(window: Hwnd, command: i32) -> Bool;
     pub fn DrawFocusRect(dc: Hdc, rect: *const Rect) -> Bool;
@@ -183,6 +199,17 @@ unsafe extern "system" {
     pub fn GetSystemMetrics(index: i32) -> i32;
     pub fn WindowFromPoint(point: Point) -> Hwnd;
     pub fn GetAncestor(window: Hwnd, flags: u32) -> Hwnd;
+    /// Asks `window` to set the pointer it wants, without waiting on a
+    /// thread that is not pumping past `timeout` milliseconds.
+    pub fn SendMessageTimeoutW(
+        window: Hwnd,
+        message: u32,
+        wparam: Wparam,
+        lparam: Lparam,
+        flags: u32,
+        timeout: u32,
+        result: *mut usize,
+    ) -> Lresult;
     pub fn GetWindowRect(window: Hwnd, rect: *mut Rect) -> Bool;
     pub fn GetDC(window: Hwnd) -> Hdc;
     pub fn ReleaseDC(window: Hwnd, dc: Hdc) -> i32;
@@ -192,6 +219,43 @@ unsafe extern "system" {
         callback: MonitorProc,
         data: isize,
     ) -> i32;
+}
+
+/// Ask `window` to put its own cursor on screen, as a pointer move over it
+/// would; `false` when it did not answer.
+///
+/// The shape on screen is whatever the last `WM_SETCURSOR` set, so destroying
+/// an overlay that had the desktop draw its cursor does not undo that shape:
+/// it stays until the pointer reaches a window Windows asks again. Asking the
+/// window now under the pointer is what hands the cursor back at once.
+///
+/// A thread that is not pumping is abandoned after a short wait rather than
+/// blocking the caller; the next move asks it again anyway. So is a window
+/// this process may not message at all: Windows drops messages sent to a
+/// higher-integrity one, which answers nothing, and the caller has to put the
+/// shape on screen itself.
+pub fn request_cursor(window: Hwnd) -> bool {
+    // `WM_SETCURSOR`'s `lParam`: the hit test code in the low word, the mouse
+    // message that prompted it in the high word — a move, as the pointer
+    // arriving over the window would answer.
+    const MOVE: Lparam = 0x0200 << 16;
+    const _: () = assert!(WM_MOUSEMOVE == 0x0200);
+    let lparam = MOVE | HTCLIENT;
+    let mut answered = 0usize;
+    // SAFETY: a message the platform defines; `window` is only asked, and the
+    // result pointer is a live local. A zero answer is the failure and the
+    // timeout alike, which is all the caller needs to know.
+    unsafe {
+        SendMessageTimeoutW(
+            window,
+            WM_SETCURSOR,
+            window as Wparam,
+            lparam,
+            SMTO_ABORTIFHUNG,
+            100,
+            &raw mut answered,
+        ) != 0
+    }
 }
 
 #[link(name = "kernel32")]
@@ -251,6 +315,31 @@ pub struct Point {
 
 // SAFETY-free proof: this layout contract is checked below.
 pin_layout!(Point, 8; x = 0, y = 4);
+
+/// `CURSOR_SHOWING` and `CURSOR_SUPPRESSED` (winuser.h): whether the shell is
+/// drawing the pointer, and whether something (a touch session) hid it.
+pub const CURSOR_SHOWING: u32 = 0x0000_0001;
+pub const CURSOR_SUPPRESSED: u32 = 0x0000_0002;
+
+/// `CURSORINFO` (winuser.h): the pointer the desktop is drawing right now.
+///
+/// The shape on screen is the one chosen by the window under the pointer, so
+/// this is the only way to ask what a person actually sees, as opposed to what
+/// this process last installed.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct CursorInfo {
+    /// Structure size; must be set before the call.
+    pub size: u32,
+    /// [`CURSOR_SHOWING`] and [`CURSOR_SUPPRESSED`].
+    pub flags: u32,
+    /// The handle of the shape being drawn.
+    pub cursor: Hcursor,
+    /// Its screen position.
+    pub point: Point,
+}
+
+pin_layout!(CursorInfo, 24; size = 0, flags = 4, cursor = 8, point = 16);
 
 /// `RECT`.
 #[repr(C)]

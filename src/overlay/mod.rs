@@ -25,14 +25,10 @@ use crate::winapi::{
 pub(super) use crate::winapi::{kept_wide, module_handle, wide};
 
 mod bar;
-mod crosshair;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use crosshair::Crosshair;
-
 use bar::show_bar;
-use crosshair::{CROSSHAIR_BLACK, CROSSHAIR_WHITE};
 
 /// Window class registered for the frame.
 const CLASS_NAME: &str = "screencapture.recording.frame";
@@ -66,6 +62,11 @@ pub(super) const WM_TIMER: u32 = 0x0113;
 /// Selection outline dot pattern, in physical pixels.
 pub(super) const SELECTION_DOT: i32 = 2;
 const SELECTION_PITCH: i32 = 6;
+
+// The selection outline's two tones: black dots with white between them, so
+// the dotted frame stays visible on light and dark content alike.
+const DOT_BLACK: u32 = 0x0000_0000;
+const DOT_WHITE: u32 = 0x00FF_FFFF;
 
 pub(super) type StopAction = fn();
 
@@ -689,8 +690,8 @@ unsafe fn paint_selection(window: Hwnd) {
             FillRect(dc, &raw const client, key);
             DeleteObject(key);
         }
-        let black = CreateSolidBrush(CROSSHAIR_BLACK);
-        let white = CreateSolidBrush(CROSSHAIR_WHITE);
+        let black = CreateSolidBrush(DOT_BLACK);
+        let white = CreateSolidBrush(DOT_WHITE);
         if !black.is_null() || !white.is_null() {
             for (dot, is_white) in selection_dots(client.right, client.bottom) {
                 let brush = if is_white { white } else { black };

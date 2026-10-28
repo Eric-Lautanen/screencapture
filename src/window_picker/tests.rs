@@ -3,21 +3,23 @@ use std::sync::Mutex;
 use std::sync::PoisonError;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use super::grabber::{CLASS_NAME as GRABBER_CLASS, handles};
 use super::{
     Action, DRAG_THRESHOLD_PX, Hover, Input, Pick, Rect, Region, TRACK, Track, WM_LBUTTONDOWN,
     WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, abandon, beyond_threshold, confirm_click,
-    confirm_drag, consumed, drag_geometry, pick_within, region_from_rect, step,
+    confirm_drag, drag_geometry, pick_within, region_from_rect, step,
 };
 use crate::overlay::{WS_EX_NOACTIVATE, WS_VISIBLE};
 use crate::screen::win::window_bounds;
 use crate::screen::window_region;
 use crate::winapi::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GA_ROOT, GetAncestor, GetCursorPos,
-    GetSystemMetrics, GetWindowRect, Hwnd, Point, RegisterClassExW, SM_CXVIRTUALSCREEN,
+    CURSOR_SHOWING, CreateWindowExW, CursorInfo, DefWindowProcW, DestroyWindow, GA_ROOT,
+    GetAncestor, GetCursorInfo, GetCursorPos, GetDC, GetSystemMetrics, GetWindowRect, Hcursor, Hdc,
+    Hwnd, Msg, PeekMessageW, Point, RegisterClassExW, ReleaseDC, SM_CXVIRTUALSCREEN,
     SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP, WindowFromPoint, WndClassExW, kept_wide, module_handle, wide,
+    WS_POPUP, WindowFromPoint, WndClassExW, kept_wide, module_handle, pump_until, wide,
 };
 
 #[link(name = "kernel32")]
@@ -34,7 +36,27 @@ unsafe extern "system" {
     fn SendInput(count: u32, inputs: *const InjectedInput, size: i32) -> u32;
     /// Parks the pointer without synthesizing any event.
     fn SetCursorPos(x: i32, y: i32) -> i32;
+    /// Raises a window over the always-on-top band, the way an
+    /// always-on-top application brings itself back to the front.
+    fn SetWindowPos(
+        window: Hwnd,
+        insert_after: Hwnd,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        flags: u32,
+    ) -> i32;
+    /// Puts a shape on the desktop's pointer, as a cursor-setting window
+    /// does; the handle is a shared stock resource, nothing freed here.
+    fn SetCursor(cursor: *mut c_void) -> *mut c_void;
 }
+
+/// `HWND_TOPMOST` and the `SWP_*` flags one raise needs (winuser.h).
+const HWND_TOPMOST_RAISE: isize = -1;
+const SWP_NOSIZE_RAISE: u32 = 0x0001;
+const SWP_NOMOVE_RAISE: u32 = 0x0002;
+const SWP_NOACTIVATE_RAISE: u32 = 0x0010;
 
 /// `INPUT_MOUSE` and the `MOUSEEVENTF_*` flags (winuser.h).
 const INPUT_MOUSE: u32 = 0;
@@ -79,8 +101,8 @@ static INJECTED: AtomicBool = AtomicBool::new(false);
 /// How long an injected session may idle: long enough for hook
 /// installation and a click, short enough to fail rather than hang.
 const INJECTED_IDLE: Duration = Duration::from_secs(5);
-/// Time the hooks have to install before the pointer starts moving.
-const HOOK_SETTLE: Duration = Duration::from_millis(250);
+/// Time the session's window has to exist before the pointer starts moving.
+const SETTLE: Duration = Duration::from_millis(250);
 /// A real click on the desktop can end a session early, so a scenario
 /// runs until it resolves. A deterministic mistake resolves the same
 /// wrong way every time, so retries cannot hide one.
@@ -125,12 +147,39 @@ fn release_at(point: Point) -> bool {
     send(MOUSEEVENTF_MOVE | MOUSEEVENTF_LEFTUP, point)
 }
 
+/// One pointer event where the pointer already is.
+///
+/// No absolute coordinates and no motion flag, so the event carries the
+/// position and moves nothing: a button pressed and released "here" stays
+/// over whatever window the test parked the pointer on.
+fn send_here(flags: u32) -> bool {
+    let event = InjectedInput {
+        kind: INPUT_MOUSE,
+        padding: 0,
+        mouse: MouseInput {
+            dx: 0,
+            dy: 0,
+            mouse_data: 0,
+            flags,
+            time: 0,
+            extra: 0,
+        },
+    };
+    let size = i32::try_from(std::mem::size_of::<InjectedInput>()).unwrap_or(0);
+    // SAFETY: one fully initialized INPUT described by its own size.
+    let sent = unsafe { SendInput(1, &raw const event, size) } == 1;
+    if sent {
+        INJECTED.store(true, Ordering::SeqCst);
+    }
+    sent
+}
+
 fn press_here() -> bool {
-    send(MOUSEEVENTF_LEFTDOWN, Point::default())
+    send_here(MOUSEEVENTF_LEFTDOWN)
 }
 
 fn release_here() -> bool {
-    send(MOUSEEVENTF_LEFTUP, Point::default())
+    send_here(MOUSEEVENTF_LEFTUP)
 }
 
 /// Desktop coordinates as the `0..=65535` absolute range the flags ask
@@ -173,6 +222,34 @@ struct Target {
 
 impl Target {
     fn show(class: &'static str, x: i32, y: i32, width: i32, height: i32) -> Option<Self> {
+        Self::shown(class, std::ptr::null_mut(), x, y, width, height)
+    }
+
+    /// A target that asks for a pointer of its own, the way a text field asks
+    /// for the I-beam: the shape on screen is that one unless the pick's own
+    /// window is what the pointer is over.
+    fn with_cursor(
+        class: &'static str,
+        id: usize,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> Option<Self> {
+        // SAFETY: a shared stock cursor resource; nothing is freed here and
+        // the handle outlives the class that carries it.
+        let cursor = unsafe { LoadCursorW(std::ptr::null_mut(), id as *const u16) };
+        Self::shown(class, cursor, x, y, width, height)
+    }
+
+    fn shown(
+        class: &'static str,
+        cursor: Hcursor,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+    ) -> Option<Self> {
         let instance = module_handle();
         let name = kept_wide(class);
         let definition = WndClassExW {
@@ -183,7 +260,7 @@ impl Target {
             wnd_extra: 0,
             instance,
             icon: std::ptr::null_mut(),
-            cursor: std::ptr::null_mut(),
+            cursor,
             background: std::ptr::null_mut(),
             menu_name: std::ptr::null(),
             class_name: name,
@@ -279,9 +356,9 @@ impl Drop for PointerGuard {
 /// because the session thread is busy pumping its own messages.
 fn pick_with(inject: impl Fn() + Send + Copy + 'static) -> Option<Pick> {
     let injector = std::thread::spawn(move || {
-        // The hooks install before the pump starts; let that happen
-        // instead of racing `SetWindowsHookEx`.
-        sleep(HOOK_SETTLE);
+        // The session's window exists before the pump starts; let that happen
+        // instead of racing it.
+        sleep(SETTLE);
         inject();
     });
     let answer = pick_within(INJECTED_IDLE).expect("the picker installs its hooks");
@@ -304,11 +381,15 @@ fn quiet(points: &[(Point, usize)]) -> bool {
 
 /// Whether the pointer actually reached `point`: a session without an
 /// interactive desktop takes injected events and delivers none.
+///
+/// Absolute pointer input is quantized to 0..=65535, so a position can land a
+/// pixel away from the one asked for; the test is about the pointer having
+/// travelled, not about the last bit of the rounding.
 fn cursor_at(point: Point) -> bool {
     let mut at = Point::default();
     // SAFETY: writes only the local point.
     let found = unsafe { GetCursorPos(&raw mut at) } != 0;
-    found && (at.x, at.y) == (point.x, point.y)
+    found && (at.x - point.x).abs() <= 2 && (at.y - point.y).abs() <= 2
 }
 
 /// The exact regression, end to end: the session starts with the
@@ -372,10 +453,15 @@ fn injected_input_records_the_window_under_the_click() {
         decoy.frame(),
         "and it is not the window the session started on"
     );
+    assert_eq!(
+        root_at(clicked),
+        target.handle,
+        "the pick's overlay is gone, so what a capture sees there is the window it answered"
+    );
 }
 
-/// A real drag through the same hooks answers the rectangle it drew, so
-/// the press, motion and release path stays wired to the state machine.
+/// A real drag through the same session answers the rectangle it drew, so the
+/// press, motion and release path stays wired to the state machine.
 #[test]
 fn injected_input_records_the_dragged_rectangle() {
     let _desktop = DESKTOP.lock().unwrap_or_else(PoisonError::into_inner);
@@ -460,6 +546,186 @@ fn injected_input_records_the_dragged_rectangle() {
     );
 }
 
+/// The regression that came back from Task Manager: an always-on-top
+/// application that raises itself while the pick is live lands over the
+/// pick's own surface, and the session then hears nothing at all — no move,
+/// no click — until the idle limit ends it, which reads as a hang. The
+/// session claims the top of the band back while it runs.
+#[test]
+fn a_pick_survives_a_window_raising_itself_over_the_surface() {
+    let _desktop = DESKTOP.lock().unwrap_or_else(PoisonError::into_inner);
+    let _pointer = PointerGuard::take();
+    let Some(target) = Target::show("screencapture.test.raised", 300, 200, 520, 380) else {
+        return;
+    };
+    let at = target.center();
+    if !quiet(&[(at, target.handle)]) {
+        eprintln!("skipping: another window covers the test target");
+        return;
+    }
+    INJECTED.store(false, Ordering::SeqCst);
+    let raised = target.handle;
+    let mut answer = None;
+    for _ in 0..ATTEMPTS {
+        answer = pick_with(move || {
+            // The raise an always-on-top application performs on its own,
+            // with the session already running.
+            // SAFETY: a live window this process owns; z-order only.
+            unsafe {
+                SetWindowPos(
+                    std::ptr::with_exposed_provenance_mut::<c_void>(raised),
+                    HWND_TOPMOST_RAISE as Hwnd,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOSIZE_RAISE | SWP_NOMOVE_RAISE | SWP_NOACTIVATE_RAISE,
+                );
+            }
+            // Long enough for the session's own pump to notice the raise and
+            // claim the band back before the click is aimed.
+            sleep(Duration::from_millis(400));
+            move_to(at);
+            sleep(Duration::from_millis(120));
+            press_at(at);
+            sleep(Duration::from_millis(80));
+            release_at(at);
+        });
+        if matches!(answer, Some(Pick::Window(handle)) if handle == raised) {
+            break;
+        }
+    }
+    if !cursor_at(at) || (answer.is_none() && !INJECTED.load(Ordering::SeqCst)) {
+        eprintln!("skipping: this desktop does not take synthetic input");
+        return;
+    }
+    assert_eq!(
+        answer,
+        Some(Pick::Window(target.handle)),
+        "a session a window raised itself over still hears the click and answers the window under it"
+    );
+}
+
+/// A window whose thread never pumps: the stand-in for one this process may
+/// not send messages to. Windows drops a message aimed at a window of a
+/// higher integrity before any pump could see it, so such a window answers
+/// exactly as this one does — nothing.
+struct Unpumped {
+    /// The window, as plain bits.
+    handle: usize,
+    /// Released when the guard drops, so the thread destroys the window.
+    release: Option<std::sync::mpsc::Sender<()>>,
+    /// The thread that owns it.
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Unpumped {
+    /// Show one offscreen on a thread of its own, which then waits without
+    /// pumping anything; `None` when the desktop refuses the window.
+    fn show(class: &'static str, cursor: usize) -> Option<Self> {
+        let (ready, shown) = std::sync::mpsc::channel();
+        let (release, hold) = std::sync::mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let target = Target::with_cursor(class, cursor, -600, -600, 120, 90);
+            let _ = ready.send(target.as_ref().map(|target| target.handle));
+            let _ = hold.recv();
+            drop(target);
+        });
+        let handle = shown.recv().ok().flatten()?;
+        Some(Self {
+            handle,
+            release: Some(release),
+            thread: Some(thread),
+        })
+    }
+
+    fn window(&self) -> Hwnd {
+        std::ptr::with_exposed_provenance_mut::<c_void>(self.handle)
+    }
+}
+
+impl Drop for Unpumped {
+    fn drop(&mut self) {
+        self.release = None;
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// A window that cannot answer a cursor request would leave the session's own
+/// pointer on screen: the shape stays what the last `WM_SETCURSOR` set, and
+/// nothing asks this one again. The hand-back installs the shape itself.
+#[test]
+fn a_window_that_cannot_answer_gets_its_pointer_back_anyway() {
+    let _desktop = DESKTOP.lock().unwrap_or_else(PoisonError::into_inner);
+    let _pointer = PointerGuard::take();
+    let (Some(arrow), Some(crosshair), Some(beam)) = (
+        stock_shape(ARROW),
+        stock_shape(CROSSHAIR),
+        stock_shape(IDC_IBEAM),
+    ) else {
+        eprintln!("skipping: this desktop cannot render a cursor");
+        return;
+    };
+    let Some(unpumped) = Unpumped::show("screencapture.test.unpumped", IDC_IBEAM) else {
+        eprintln!("skipping: the desktop refuses a window for the stand-in");
+        return;
+    };
+    let window = unpumped.window();
+    assert!(
+        !crate::winapi::request_cursor(window),
+        "a window whose thread never pumps cannot answer a cursor request"
+    );
+    // Park the pointer over a window of this process: another application's
+    // window re-asks for its own shape while the test runs, and the sample
+    // below is about the shape this one leaves behind.
+    let Some(holder) = Target::show("screencapture.test.holder", 200, 200, 400, 300) else {
+        return;
+    };
+    let at = holder.center();
+    if !quiet(&[(at, holder.handle)]) {
+        eprintln!("skipping: another window covers the test window");
+        return;
+    }
+    move_to(at);
+    sleep(Duration::from_millis(200));
+    // Put the session's own pointer up, the shape a pick over that window
+    // would leave behind.
+    // SAFETY: a shared stock resource; nothing is freed here.
+    let cross = unsafe { LoadCursorW(std::ptr::null_mut(), CROSSHAIR as *const u16) };
+    // SAFETY: the shape is a live stock handle.
+    unsafe { SetCursor(cross) };
+    if wait_for_cursor(&crosshair).as_deref() != Some(crosshair.as_slice()) {
+        eprintln!("skipping: the desktop did not keep the shape a test set");
+        return;
+    }
+    super::grabber::restore_cursor(window);
+    let drawn = drawn_cursor();
+    // Put the desktop's ordinary pointer back, whatever the answer was, so a
+    // failure here is not a stuck I-beam for whoever is using the machine.
+    // SAFETY: a shared stock resource; nothing is freed here.
+    let plain = unsafe { LoadCursorW(std::ptr::null_mut(), ARROW as *const u16) };
+    // SAFETY: the shape is a live stock handle.
+    unsafe { SetCursor(plain) };
+    // Counted rather than printed: a whole cursor is thousands of pixels of
+    // assertion noise, and the count tells the two shapes apart just as well.
+    let pixels = |shape: &Option<Vec<bool>>| {
+        shape
+            .as_ref()
+            .map_or(0, |shape| shape.iter().filter(|on| **on).count())
+    };
+    assert!(
+        drawn.as_deref() == Some(beam.as_slice()),
+        "a window that cannot be asked still gets its own pointer back: the desktop drew {} pixels, its own pointer is {}",
+        pixels(&drawn),
+        beam.iter().filter(|on| **on).count()
+    );
+    // `arrow` is the shape the cleanup put back; nothing is asserted about it,
+    // so a window that answers late cannot fail the case on its way out.
+    drop(arrow);
+}
+
 /// A window at a known frame, as the hook resolves it.
 fn window(handle: usize, x: i32, y: i32, width: u32, height: u32) -> Hover {
     Hover {
@@ -478,13 +744,17 @@ fn point(x: i32, y: i32) -> super::Point {
 }
 
 #[test]
-fn motion_passes_through_to_the_cursor() {
-    // The pointer must keep moving while a pick is live; a consumed
-    // move is a move the system never applies to the cursor.
-    assert!(!consumed(WM_MOUSEMOVE));
-    assert!(consumed(WM_LBUTTONDOWN));
-    assert!(consumed(WM_LBUTTONUP));
-    assert!(consumed(WM_RBUTTONDOWN));
+fn every_pointer_message_reaches_the_session() {
+    // The overlay is the window under the pointer for the whole session, so
+    // all of these are delivered to it, and the desktop moves the cursor
+    // itself: nothing has to be passed through to keep the pointer moving.
+    for message in [WM_MOUSEMOVE, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_RBUTTONDOWN] {
+        assert!(
+            handles(message),
+            "message {message:#06x} has to reach the picker"
+        );
+    }
+    assert!(!handles(0), "and nothing else is a pointer event");
 }
 
 /// The regression that put the taskbar in recordings: Windows skips a
@@ -957,4 +1227,635 @@ fn pick_variants_stay_exhaustive() {
             height: 1,
         })
     );
+}
+
+// ---------------------------------------------------------------------
+// The pointer a pick shows: one crosshair, drawn by Windows itself.
+//
+// The regression here is the "crosshairs *and* the pointer" report. The
+// session used to paint a crosshair marker of its own around the arrow, so
+// two pointers were on screen — and the painted one only moved when a hook
+// callback ran, so a slow callback left it standing where it last was, which
+// read as a frozen crosshair. Both symptoms had the same root, a crosshair
+// of ours, so both are pinned the same way: what the desktop draws while a
+// pick is live must be the stock crosshair, and our process must own no
+// window that could paint a second one.
+//
+// The shape is measured through `GetCursorInfo`, which answers the cursor of
+// the window under the pointer — exactly the thing that chose the shape in
+// the first place, and the reason a text field's I-beam used to win over
+// anything the session installed system-wide. A pick is right when that
+// window is ours and the shape it asks for is the crosshair.
+// ---------------------------------------------------------------------
+
+/// The stock pointers, by resource id (`MAKEINTRESOURCE(IDC_*)`).
+const ARROW: usize = crate::winapi::IDC_ARROW;
+const CROSSHAIR: usize = crate::winapi::IDC_CROSS;
+/// `IDC_IBEAM` (winuser.h): the text-field pointer, listed only by the test
+/// that needs the pick to win over it.
+const IDC_IBEAM: usize = 32513;
+
+/// `BLACKNESS` (wingdi.h): fill a region with the stock black brush.
+const BLACKNESS: u32 = 0x0042;
+/// `DIB_RGB_COLORS` (wingdi.h): the pixel data is literal colour.
+const DIB_RGB_COLORS: u32 = 0;
+/// `DI_NORMAL` (winuser.h): draw a cursor the way the desktop shows it.
+const DI_NORMAL: u32 = 3;
+/// The square a cursor is rendered onto, the box its body is drawn in, and
+/// the margin that keeps the whole cursor inside whatever its hotspot is.
+const CANVAS: i32 = 64;
+const BODY: i32 = 32;
+const MARGIN: i32 = 16;
+/// The selection outline's window class: the frame a pick paints over its
+/// pointer surface (`GRABBER_CLASS`).
+const OUTLINE_CLASS: &str = "screencapture.selection.frame";
+/// `MOUSEEVENTF_RIGHTDOWN` and `MOUSEEVENTF_RIGHTUP` (winuser.h): the
+/// picker's cancel press and the release that leaves no button held.
+const MOUSEEVENTF_RIGHTDOWN: u32 = 0x0008;
+const MOUSEEVENTF_RIGHTUP: u32 = 0x0010;
+
+/// `BITMAPINFOHEADER` (wingdi.h).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct BitmapHeader {
+    size: u32,
+    width: i32,
+    height: i32,
+    planes: u16,
+    bit_count: u16,
+    compression: u32,
+    image_size: u32,
+    pixels_per_meter_x: i32,
+    pixels_per_meter_y: i32,
+    used: u32,
+    important: u32,
+}
+
+/// `RGBQUAD` (wingdi.h).
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct RgbQuad {
+    blue: u8,
+    green: u8,
+    red: u8,
+    reserved: u8,
+}
+
+/// `BITMAPINFO` (wingdi.h): a header and a palette the 32-bit layout ignores.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct BitmapInfo {
+    header: BitmapHeader,
+    colors: [RgbQuad; 3],
+}
+
+#[link(name = "user32")]
+unsafe extern "system" {
+    /// A stock cursor resource: `MAKEINTRESOURCE(IDC_*)` is the id itself.
+    fn LoadCursorW(instance: *mut c_void, cursor: *const u16) -> *mut c_void;
+    /// Paints an icon or cursor into a device context.
+    fn DrawIconEx(
+        dc: Hdc,
+        x: i32,
+        y: i32,
+        icon: *mut c_void,
+        width: i32,
+        height: i32,
+        step: u32,
+        brush: *mut c_void,
+        flags: u32,
+    ) -> i32;
+    /// Visits every top-level window until the callback answers `0`.
+    fn EnumWindows(visit: unsafe extern "system" fn(Hwnd, isize) -> i32, data: isize) -> i32;
+    /// The window's process, and its answer is the thread that created it.
+    fn GetWindowThreadProcessId(window: Hwnd, process: *mut u32) -> u32;
+    fn GetClassNameW(window: Hwnd, name: *mut u16, size: i32) -> i32;
+    fn IsWindowVisible(window: Hwnd) -> i32;
+}
+
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetCurrentThreadId() -> u32;
+}
+
+#[link(name = "gdi32")]
+unsafe extern "system" {
+    fn CreateCompatibleDC(dc: Hdc) -> Hdc;
+    fn CreateCompatibleBitmap(dc: Hdc, width: i32, height: i32) -> *mut c_void;
+    fn DeleteDC(dc: Hdc) -> i32;
+    fn SelectObject(dc: Hdc, object: *mut c_void) -> *mut c_void;
+    fn DeleteObject(object: *mut c_void) -> i32;
+    fn PatBlt(dc: Hdc, x: i32, y: i32, width: i32, height: i32, operation: u32) -> i32;
+    /// Copies a bitmap's pixels out as a DIB laid out as `info` asks. The
+    /// bitmap must not be selected into a device context.
+    fn GetDIBits(
+        dc: Hdc,
+        bitmap: *mut c_void,
+        first: u32,
+        lines: u32,
+        bits: *mut c_void,
+        info: *mut BitmapInfo,
+        usage: u32,
+    ) -> i32;
+}
+
+/// The pixels `cursor` paints, one bit per cell of a [`CANVAS`] square drawn
+/// on black. Two cursors are the same pointer when every bit agrees, which is
+/// what "the desktop draws the crosshair, not an arrow" has to mean: a handle
+/// number proves nothing, because Windows hands out a fresh handle for every
+/// cursor it installs.
+fn shape(cursor: usize) -> Option<Vec<bool>> {
+    if cursor == 0 {
+        return None;
+    }
+    let mut info = BitmapInfo {
+        header: BitmapHeader {
+            size: u32::try_from(std::mem::size_of::<BitmapHeader>()).ok()?,
+            width: CANVAS,
+            height: CANVAS,
+            planes: 1,
+            bit_count: 32,
+            ..BitmapHeader::default()
+        },
+        ..BitmapInfo::default()
+    };
+    let mut pixels = vec![0u32; usize::try_from(CANVAS * CANVAS).ok()?];
+    // SAFETY: every handle created here is released before returning, and the
+    // pixel buffer is a live local of exactly the size asked for.
+    unsafe {
+        let screen = GetDC(std::ptr::null_mut());
+        if screen.is_null() {
+            return None;
+        }
+        let canvas = CreateCompatibleDC(screen);
+        let bitmap = CreateCompatibleBitmap(screen, CANVAS, CANVAS);
+        if canvas.is_null() || bitmap.is_null() {
+            if !bitmap.is_null() {
+                DeleteObject(bitmap);
+            }
+            if !canvas.is_null() {
+                DeleteDC(canvas);
+            }
+            ReleaseDC(std::ptr::null_mut(), screen);
+            return None;
+        }
+        let previous = SelectObject(canvas, bitmap);
+        PatBlt(canvas, 0, 0, CANVAS, CANVAS, BLACKNESS);
+        let drawn = DrawIconEx(
+            canvas,
+            MARGIN,
+            MARGIN,
+            cursor as *mut c_void,
+            BODY,
+            BODY,
+            0,
+            std::ptr::null_mut(),
+            DI_NORMAL,
+        ) != 0;
+        // The bitmap leaves the device context before its pixels are read.
+        SelectObject(canvas, previous);
+        let read = drawn
+            && GetDIBits(
+                canvas,
+                bitmap,
+                0,
+                u32::try_from(CANVAS).unwrap_or(0),
+                pixels.as_mut_ptr().cast(),
+                &raw mut info,
+                DIB_RGB_COLORS,
+            ) != 0;
+        DeleteObject(bitmap);
+        DeleteDC(canvas);
+        ReleaseDC(std::ptr::null_mut(), screen);
+        read.then(|| pixels.iter().map(|pixel| *pixel != 0).collect())
+    }
+}
+
+/// The shape of one of the stock pointers, loaded the way the desktop loads
+/// it for a window that shows the ordinary pointer.
+fn stock_shape(id: usize) -> Option<Vec<bool>> {
+    // SAFETY: a shared stock cursor resource; nothing is freed.
+    let loaded = unsafe { LoadCursorW(std::ptr::null_mut(), id as *const u16) };
+    shape(loaded as usize)
+}
+
+/// Every visible top-level window `thread` created, as handle, class name and
+/// measured frame, minus the handles `ignore` names (the test's own targets).
+/// The thread is the one that runs the session, so windows other tests own
+/// from their own threads cannot wander into the answer, and the frame is
+/// measured during the walk because the session's windows are gone by the time
+/// a caller gets the answer back.
+fn own_windows(ignore: &[usize], thread: u32) -> Vec<(usize, String, Option<Rect>)> {
+    /// The windows found so far, and the thread to keep.
+    type Walk = (Vec<(usize, String, Option<Rect>)>, u32);
+    /// The `EnumWindows` callback; `data` is the caller's [`Walk`].
+    unsafe extern "system" fn visit(window: Hwnd, data: isize) -> i32 {
+        // SAFETY: `data` is the `Walk` lent for this walk and the callback
+        // runs on this thread while it is alive.
+        let (found, wanted) = unsafe { &mut *(data as *mut Walk) };
+        let mut process = 0u32;
+        // SAFETY: writes only the local `process`; the window is inspected.
+        let creator = unsafe { GetWindowThreadProcessId(window, &raw mut process) };
+        // SAFETY: a visibility query about the window asked about.
+        if creator != *wanted
+            || process != std::process::id()
+            || unsafe { IsWindowVisible(window) } == 0
+        {
+            return 1;
+        }
+        let mut name = [0u16; 128];
+        // SAFETY: the buffer is a live local of the size passed.
+        let len = unsafe { GetClassNameW(window, name.as_mut_ptr(), 128) };
+        let len = usize::try_from(len.max(0)).unwrap_or(0).min(name.len());
+        let mut rect = Rect::default();
+        // SAFETY: the handle is the window being visited and is inspected
+        // only; `rect` is a live local.
+        let measured = (unsafe { GetWindowRect(window, &raw mut rect) } != 0).then_some(rect);
+        found.push((
+            window as usize,
+            String::from_utf16_lossy(&name[..len]),
+            measured,
+        ));
+        1
+    }
+    let mut walk: Walk = (Vec::new(), thread);
+    // SAFETY: the callback only touches the `walk` lent for this call.
+    unsafe { EnumWindows(visit, (&raw mut walk) as isize) };
+    walk.0
+        .into_iter()
+        .filter(|(handle, _, _)| !ignore.contains(handle))
+        .collect()
+}
+
+/// The right click a pick cancels on, at `point` — the press and its release.
+///
+/// The release matters even though the pick is over by then: a button left
+/// held sends the next window's input back to the window that received the
+/// press, and that window is gone.
+fn right_click_at(point: Point) -> bool {
+    send(MOUSEEVENTF_RIGHTDOWN, point) & send(MOUSEEVENTF_RIGHTUP, point)
+}
+
+/// How long a pointer change may take to reach the screen.
+///
+/// The window under the pointer answers `WM_SETCURSOR` on the thread that owns
+/// it, and only once that message is dispatched does the desktop draw the new
+/// shape; an injected move reaches that point a moment after it was queued, and
+/// on a busy desktop a moment is more than a single pump slice.
+const CURSOR_SETTLE: Duration = Duration::from_millis(800);
+
+/// Pump this thread's queue until the desktop draws `expected`, and answer
+/// whatever is on screen when [`CURSOR_SETTLE`] runs out — a wrong shape is
+/// reported as the shape it is, without a fixed sleep guessing at the delay.
+fn wait_for_cursor(expected: &[bool]) -> Option<Vec<bool>> {
+    let deadline = Instant::now() + CURSOR_SETTLE;
+    loop {
+        let drawn = drawn_cursor();
+        if drawn.as_deref() == Some(expected) || Instant::now() >= deadline {
+            return drawn;
+        }
+        let _ = pump_until(Duration::from_millis(20), || false);
+    }
+}
+
+/// The pointer the desktop is drawing, as pixels; `None` when none is up.
+///
+/// This is the shape a person actually sees, not one this process installed:
+/// it is the cursor of the window under the pointer, which is the whole point
+/// of the test below.
+fn drawn_cursor() -> Option<Vec<bool>> {
+    let mut info = CursorInfo {
+        size: u32::try_from(std::mem::size_of::<CursorInfo>()).ok()?,
+        ..CursorInfo::default()
+    };
+    // SAFETY: `info` is a live local that carries its own size.
+    let read = unsafe { GetCursorInfo(&raw mut info) } != 0;
+    (read && info.flags & CURSOR_SHOWING != 0)
+        .then(|| shape(info.cursor as usize))
+        .flatten()
+}
+
+/// The pick's crosshair is the pointer over *every* window, not only over the
+/// ones that never ask for a pointer of their own.
+///
+/// The shape on screen is chosen by the window under the pointer, so a pick
+/// that swapped the system's ordinary pointer lost to a text field's I-beam.
+/// The pick now covers the desktop with a window of its own, and that window's
+/// class cursor is the crosshair: one pointer, moved by the window manager, on
+/// any surface — and nothing left installed afterwards.
+#[test]
+fn a_pick_shows_the_crosshair_over_every_window() {
+    let _desktop = DESKTOP.lock().unwrap_or_else(PoisonError::into_inner);
+    let _pointer = PointerGuard::take();
+    let (Some(arrow), Some(crosshair), Some(beam)) = (
+        stock_shape(ARROW),
+        stock_shape(CROSSHAIR),
+        stock_shape(IDC_IBEAM),
+    ) else {
+        eprintln!("skipping: this desktop cannot render a cursor");
+        return;
+    };
+    assert_ne!(
+        arrow, crosshair,
+        "the ordinary pointer and the crosshair are told apart"
+    );
+    assert_ne!(
+        beam, crosshair,
+        "a text field's pointer is told apart from the crosshair"
+    );
+    let Some(target) = Target::show("screencapture.test.crosshair", 120, 120, 460, 340) else {
+        return;
+    };
+    let Some(field) =
+        Target::with_cursor("screencapture.test.field", IDC_IBEAM, 700, 200, 380, 260)
+    else {
+        return;
+    };
+    let over_target = target.center();
+    let over_field = field.center();
+    if !quiet(&[(over_target, target.handle), (over_field, field.handle)]) {
+        eprintln!("skipping: another window covers the test windows");
+        return;
+    }
+    // Park on the plain window first, where the desktop's own pointer is the
+    // arrow, so the samples below start from a shape that is not the pick's.
+    move_to(over_target);
+    // The plain window, the text field that wants its own pointer, and back:
+    // the crosshair is the one drawn at all three, so the sample does not
+    // depend on one spot and the pointer is asked to travel.
+    let spots = [over_target, over_field, over_target];
+    let samples = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&samples);
+    let wanted = crosshair.clone();
+    let injector = std::thread::spawn(move || {
+        sleep(SETTLE);
+        for spot in spots {
+            move_to(spot);
+            sink.lock().expect("clean samples").push((
+                spot,
+                wait_for_cursor(&wanted),
+                cursor_at(spot),
+            ));
+        }
+        right_click_at(over_target);
+    });
+    let answer = pick_within(INJECTED_IDLE).expect("the picker holds the pointer");
+    let _ = injector.join();
+    let drawn = samples.lock().expect("clean samples").clone();
+    if !INJECTED.load(Ordering::SeqCst) {
+        eprintln!("skipping: this desktop does not take synthetic input");
+        return;
+    }
+    assert_eq!(answer, None, "the right click cancels the pick");
+    assert_eq!(drawn.len(), spots.len(), "every position was sampled");
+    for (spot, sampled, reached) in &drawn {
+        assert!(*reached, "the pointer reached ({}, {})", spot.x, spot.y);
+        assert!(
+            sampled.as_deref() == Some(crosshair.as_slice()),
+            "the pointer the desktop draws at ({}, {}) is the crosshair, with no second pointer beside it",
+            spot.x,
+            spot.y
+        );
+    }
+    // Nothing of the pick is left installed: over the plain window the desktop
+    // draws its arrow again, and over the text field the field's own I-beam.
+    let back = wait_for_cursor(&arrow);
+    assert!(
+        back.as_deref() == Some(arrow.as_slice()),
+        "the window's own pointer is back when the session ends"
+    );
+    move_to(over_field);
+    let after = wait_for_cursor(&beam);
+    assert!(
+        after.as_deref() == Some(beam.as_slice()),
+        "a text field's pointer comes back when the session ends"
+    );
+}
+
+/// The other half of the same regression: the frozen crosshair was a window
+/// of ours, placed from hook callbacks, so it only moved when one ran. A pick
+/// may paint the selection outline and hold the pointer with one fullscreen
+/// window at a fixed place — nothing of ours may follow the pointer, because
+/// anything that has to be moved for every mouse event is a crosshair that
+/// can fall behind one, and anything small that trails the pointer is a second
+/// pointer however it is named.
+#[test]
+fn a_pick_paints_only_the_selection_outline() {
+    let _desktop = DESKTOP.lock().unwrap_or_else(PoisonError::into_inner);
+    let _pointer = PointerGuard::take();
+    let Some(target) = Target::show("screencapture.test.outline", 200, 160, 520, 380) else {
+        return;
+    };
+    let from = Point {
+        x: target.rect.left + 60,
+        y: target.rect.top + 60,
+    };
+    let to = target.center();
+    if !quiet(&[(from, target.handle), (to, target.handle)]) {
+        eprintln!("skipping: another window covers the test target");
+        return;
+    }
+    let ignore = [target.handle];
+    // SAFETY: parameterless question about this thread.
+    let session = unsafe { GetCurrentThreadId() };
+    assert!(
+        own_windows(&ignore, session).is_empty(),
+        "the session thread starts with nothing but its target"
+    );
+    let walks = std::sync::Arc::new(Mutex::new(Vec::new()));
+    let sink = std::sync::Arc::clone(&walks);
+    let injector = std::thread::spawn(move || {
+        sleep(SETTLE);
+        for spot in [from, to] {
+            move_to(spot);
+            sleep(Duration::from_millis(150));
+            sink.lock()
+                .expect("clean walks")
+                .push(own_windows(&ignore, session));
+        }
+        right_click_at(to);
+    });
+    let answer = pick_within(INJECTED_IDLE).expect("the picker holds the pointer");
+    let _ = injector.join();
+    let walked = walks.lock().expect("clean walks").clone();
+    assert_eq!(answer, None, "the right click cancels the pick");
+    assert_eq!(walked.len(), 2, "both positions were sampled");
+    let (left, top, width, height) = virtual_desktop();
+    // The outline is the pick's own announcement of what a click would take,
+    // so it follows the pointer; the pointer surface is the one window that
+    // must not.
+    for (index, windows) in walked.iter().enumerate() {
+        let painted: Vec<&str> = windows.iter().map(|(_, name, _)| name.as_str()).collect();
+        assert_eq!(
+            painted.len(),
+            2,
+            "sample {index} painted {painted:?}, which is not one outline beside the pointer surface"
+        );
+        assert!(
+            painted.contains(&OUTLINE_CLASS) && painted.contains(&GRABBER_CLASS),
+            "sample {index} painted {painted:?}, which is not one outline beside the pointer surface"
+        );
+        let rect = windows
+            .iter()
+            .find(|(_, name, _)| name == GRABBER_CLASS)
+            .and_then(|(_, _, rect)| *rect)
+            .expect("sample {index} cannot measure the pointer surface");
+        assert_eq!(
+            (rect.left, rect.top, rect.right, rect.bottom),
+            (left, top, left + width, top + height),
+            "sample {index} found the pointer surface somewhere other than the desktop: a window of ours is following the pointer"
+        );
+    }
+}
+
+/// The whole desktop, as the pick's own window covers it.
+fn virtual_desktop() -> (i32, i32, i32, i32) {
+    // SAFETY: parameterless metric queries.
+    unsafe {
+        (
+            GetSystemMetrics(SM_XVIRTUALSCREEN),
+            GetSystemMetrics(SM_YVIRTUALSCREEN),
+            GetSystemMetrics(SM_CXVIRTUALSCREEN),
+            GetSystemMetrics(SM_CYVIRTUALSCREEN),
+        )
+    }
+}
+
+/// A window some of which another window covers is still the window a pick
+/// answers, over the part of it a person can see.
+///
+/// The overlay must not flatten the stack: the pick resolves the window at the
+/// pointer, at whichever depth it sits, and the frame it answers is the whole
+/// window — the part behind the cover included — so a capture of it is the
+/// window's own content (see the covered-window capture tests) rather than the
+/// strip left visible.
+#[test]
+fn a_pick_answers_a_window_another_one_covers() {
+    let _desktop = DESKTOP.lock().unwrap_or_else(PoisonError::into_inner);
+    let _pointer = PointerGuard::take();
+    let Some(target) = Target::show("screencapture.test.under", 260, 200, 560, 400) else {
+        return;
+    };
+    let Some(cover) = Target::show("screencapture.test.cover", 600, 400, 400, 320) else {
+        return;
+    };
+    let exposed = Point {
+        x: target.rect.left + 80,
+        y: target.rect.top + 80,
+    };
+    let hidden = Point {
+        x: target.rect.right - 60,
+        y: target.rect.bottom - 60,
+    };
+    if !quiet(&[(exposed, target.handle), (hidden, cover.handle)]) {
+        eprintln!("skipping: the test windows are not stacked as needed");
+        return;
+    }
+    INJECTED.store(false, Ordering::SeqCst);
+    let mut answer = None;
+    for _ in 0..ATTEMPTS {
+        answer = pick_with(move || {
+            move_to(exposed);
+            sleep(Duration::from_millis(80));
+            press_at(exposed);
+            sleep(Duration::from_millis(60));
+            release_at(exposed);
+        });
+        if matches!(answer, Some(Pick::Window(handle)) if handle == target.handle) {
+            break;
+        }
+    }
+    if answer.is_none() && !INJECTED.load(Ordering::SeqCst) {
+        eprintln!("skipping: this desktop does not take synthetic input");
+        return;
+    }
+    assert_eq!(
+        answer,
+        Some(Pick::Window(target.handle)),
+        "the click answers the covered window, not the one covering it"
+    );
+    assert_eq!(
+        target.recorded(),
+        target.frame(),
+        "the frame a capture saves is the whole window, the covered part included"
+    );
+    assert_ne!(
+        target.recorded(),
+        cover.frame(),
+        "and it is not the covering window's frame"
+    );
+    assert_eq!(
+        root_at(exposed),
+        target.handle,
+        "the pick's overlay is gone, so what is on screen there is the window it answered"
+    );
+}
+
+/// Whether a `WM_QUIT` is pending on this thread: a pick that posts one and
+/// returns leaves the loop behind it — the tray's — one message from
+/// exiting, taking the icon and a recording the pick just started with it.
+fn quit_pending() -> bool {
+    /// `PM_NOREMOVE` (winuser.h): look at the message, leave it queued.
+    const PM_NOREMOVE: u32 = 0;
+    const WM_QUIT: u32 = 0x0012;
+    let mut message = Msg {
+        hwnd: std::ptr::null_mut(),
+        message: 0,
+        w_param: 0,
+        l_param: 0,
+        time: 0,
+        point: Point::default(),
+    };
+    // SAFETY: writes only the local message; the queue is only peeked.
+    unsafe {
+        PeekMessageW(&raw mut message, std::ptr::null_mut(), 0, 0, PM_NOREMOVE) != 0
+            && message.message == WM_QUIT
+    }
+}
+
+/// A pick that resolves or cancels must leave no `WM_QUIT` behind on this
+/// thread: the tray's own loop runs behind the pick's pump, and a stale
+/// quit ends it one message after the pick returns.
+#[test]
+fn a_resolved_pick_leaves_no_quit_behind() {
+    let _desktop = DESKTOP.lock().unwrap_or_else(PoisonError::into_inner);
+    let _pointer = PointerGuard::take();
+    let Some(target) = Target::show("screencapture.test.quit", 300, 200, 520, 380) else {
+        return;
+    };
+    let at = target.center();
+    if !quiet(&[(at, target.handle)]) {
+        eprintln!("skipping: another window covers the test target");
+        return;
+    }
+    INJECTED.store(false, Ordering::SeqCst);
+    let mut answer = None;
+    for _ in 0..ATTEMPTS {
+        answer = pick_with(move || {
+            move_to(at);
+            sleep(Duration::from_millis(80));
+            press_at(at);
+            sleep(Duration::from_millis(60));
+            release_at(at);
+        });
+        if matches!(answer, Some(Pick::Window(handle)) if handle == target.handle) {
+            break;
+        }
+    }
+    if answer.is_none() && !INJECTED.load(Ordering::SeqCst) {
+        eprintln!("skipping: this desktop does not take synthetic input");
+        return;
+    }
+    assert_eq!(
+        answer,
+        Some(Pick::Window(target.handle)),
+        "the click resolves the pick"
+    );
+    assert!(!quit_pending(), "a resolved pick leaves no stale quit");
+    // A cancelled pick answers the same rule.
+    let cancelled = pick_with(move || {
+        right_click_at(at);
+    });
+    assert_eq!(cancelled, None, "the right click cancels the pick");
+    assert!(!quit_pending(), "a cancelled pick leaves no stale quit");
 }

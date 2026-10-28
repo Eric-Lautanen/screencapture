@@ -199,13 +199,14 @@ pub struct Feed {
 impl Feed {
     /// Spawn ffmpeg with `args`, stdin piped for frame writes.
     ///
-    /// All three streams are named here, stderr included. A tray detaches
-    /// its console with `FreeConsole`, which leaves the process's standard
-    /// handles pointing at something that no longer exists; a child that
-    /// inherited one of those failed to spawn at all (Windows reports
-    /// `ERROR_NOT_SUPPORTED`, os error 50), so a photo wrote nothing and a
-    /// recording flashed its border and vanished. Nothing reads the
-    /// engine's stderr in a tray anyway.
+    /// All three streams are named here, stderr included. A tray has no
+    /// console — Explorer and the autostart entry start it without one, and a
+    /// launch from a terminal hands the inherited one back with `FreeConsole`
+    /// — which leaves the process's standard handles pointing at something
+    /// that no longer exists; a child that inherited one of those failed to
+    /// spawn at all (Windows reports `ERROR_NOT_SUPPORTED`, os error 50), so a
+    /// photo wrote nothing and a recording flashed its border and vanished.
+    /// Nothing reads the engine's stderr in a tray anyway.
     ///
     /// # Errors
     /// Fails when the engine cannot be spawned or its stdin is unavailable.

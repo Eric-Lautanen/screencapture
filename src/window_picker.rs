@@ -5,46 +5,46 @@
 //! press answers two ways — release without meaningful movement records
 //! the highlighted window; press-and-drag past the threshold instead
 //! draws the same dotted outline around that desktop rectangle. Escape
-//! or right click cancels either way. Input arrives through low-level
-//! mouse and keyboard hooks (see [`EscapeWatch`]) and the outline is a
-//! click-through topmost window painted with the picker's dotted style.
+//! or right click cancels either way.
 //!
-//! A hook callback that runs long is skipped rather than queued, so the
-//! session never assumes it saw every event: a release is answered from
-//! the point it arrives at (never the highlight it left behind), and a
-//! press always starts a fresh gesture, so a swallowed release cannot stop
-//! a later click from resolving. The gesture is tracked from these events
-//! alone: the picker consumes the press, so the system's own button state
-//! never sees it (which is why `GetAsyncKeyState` cannot answer for it).
+//! The pointer belongs to a fullscreen window of ours for the session (see
+//! [`grabber`]). Because the window under the pointer is the window whose
+//! cursor the desktop draws, that window's class cursor makes the crosshair
+//! the single pointer on every surface — a text field's I-beam included —
+//! with the window manager moving it. Its messages are also where the gesture
+//! comes from, so no pointer event is skipped for running late; the outline is
+//! a separate click-through window over it, and Escape still arrives through
+//! its own low-level watch (see [`EscapeWatch`]).
+//!
+//! Because a message can still be lost (a modal loop elsewhere, or capture
+//! taken by another process), the session never assumes it saw every event: a
+//! release is answered from the point it arrives at (never the highlight it
+//! left behind), and a press always starts a fresh gesture, so a swallowed
+//! release cannot stop a later click from resolving. The gesture is tracked
+//! from these events alone: the picker consumes the press, so the system's own
+//! button state never sees it (which is why `GetAsyncKeyState` cannot answer
+//! for it).
 
-use crate::pin_layout;
 use std::cell::{Cell, RefCell};
-use std::ffi::c_void;
 use std::thread_local;
 use std::time::Duration;
 
 use crate::capture::Region;
-use crate::guard::{EscapeWatch, Hook};
-use crate::overlay::{Border, Crosshair, Style};
+use crate::guard::{EscapeWatch, MouseCapture};
+use crate::overlay::{Border, Style};
 use crate::screen::win::window_bounds;
 use crate::winapi::{
-    GA_ROOT, GetAncestor, GetCursorPos, Point, PostQuitMessage, PumpEnd, Rect,
-    SELECTION_IDLE_LIMIT, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN,
-    WindowFromPoint, module_handle, pump_until,
+    GA_ROOT, GetAncestor, GetAsyncKeyState, GetCursorPos, Point, PumpEnd, Rect,
+    SELECTION_IDLE_LIMIT, VK_LBUTTON, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN,
+    module_handle, pump_until,
 };
 
-/// `WH_MOUSE_LL` (winuser.h): the low-level mouse hook.
-const MOUSE_HOOK: i32 = 14;
+use grabber::Grabber;
+
+mod grabber;
+
 /// Chebyshev distance (px) separating a click from a drag.
 const DRAG_THRESHOLD_PX: i32 = 8;
-
-/// Hook handle (`HHOOK`, winuser.h).
-type Hhook = *mut c_void;
-
-#[link(name = "user32")]
-unsafe extern "system" {
-    fn CallNextHookEx(hook: Hhook, code: i32, wparam: usize, lparam: isize) -> isize;
-}
 
 /// What one session answers: the highlighted window's handle, or the
 /// rectangle the user dragged out (physical pixels).
@@ -55,18 +55,6 @@ pub enum Pick {
     /// The dragged desktop rectangle.
     Region(Region),
 }
-
-/// `MSLLHOOKSTRUCT` (winuser.h): the low-level mouse event payload.
-#[repr(C)]
-struct MsllHook {
-    pt: Point,
-    mouse_data: u32,
-    flags: u32,
-    time: u32,
-    extra: usize,
-}
-
-pin_layout!(MsllHook, 32; pt = 0, mouse_data = 8, flags = 12, time = 16, extra = 24);
 
 /// Live picker state on the pump thread.
 #[derive(Default)]
@@ -85,12 +73,18 @@ struct Track {
     done: bool,
     /// The confirmed answer: window or dragged region, `None` on cancel.
     picked: Option<Pick>,
-    /// Live hook guard; `Drop` uninstalls on teardown.
-    mouse: Option<Hook>,
-    /// The Escape watch; `Drop` unhooks it with the mouse hook above.
+    /// The fullscreen window holding the pointer and feeding this session;
+    /// `Drop` destroys it, returning the desktop.
+    grab: Option<Grabber>,
+    /// Capture held from a press to its release, so a drag still ends when
+    /// the pointer crosses a window above the overlay.
+    capture: Option<MouseCapture>,
+    /// Set when the session took over a press that was already down: the
+    /// system replays that press to the new capture window, and it is not a
+    /// gesture this session began.
+    inherited: bool,
+    /// The Escape watch; `Drop` unhooks it.
     escape: Option<EscapeWatch>,
-    /// The drawn crosshair marker shown for this session.
-    cursor: Option<Crosshair>,
 }
 
 thread_local! {
@@ -142,20 +136,28 @@ fn pick_within(budget: Duration) -> std::io::Result<Option<Pick>> {
     TRACK.with_borrow_mut(|track| *track = Track::default());
     let instance = module_handle();
     TRACK.with_borrow_mut(|track| {
-        // SAFETY: global hooks installed for this thread's pump; the
-        // guards uninstall in their `Drop` on teardown or the next pick.
-        track.mouse = unsafe { Hook::install(MOUSE_HOOK, on_mouse, instance) };
+        track.grab = Some(Grabber::show()?);
+        // SAFETY: a global watch installed for this thread's pump; the guard
+        // uninstalls it in its `Drop` on teardown or the next pick.
         track.escape = unsafe { EscapeWatch::install(cancel, instance) };
-        if track.mouse.is_none() || track.escape.is_none() {
+        if track.escape.is_none() {
             teardown(track);
-            return Err(std::io::Error::other("the input hooks did not install"));
+            return Err(std::io::Error::other("the Escape watch did not install"));
         }
         let mut cursor = Point::default();
         // SAFETY: writes only the local `cursor` point.
         unsafe { GetCursorPos(&raw mut cursor) };
-        let aimed_at = aimed(track, hover_at(cursor).as_ref());
+        // A pick can start with the button already down: a hotkey pressed in
+        // the middle of a drag. Windows keeps that gesture with the window
+        // that received the press, so without capture the release would go
+        // there as well and the session would hear nothing until the idle
+        // limit. The state machine already answers a release with no press.
+        if button_down() {
+            track.inherited = capture(track);
+        }
+        let under = track.grab.as_ref().and_then(|grab| hover_at(grab, cursor));
+        let aimed_at = aimed(track, under.as_ref());
         apply(track, aimed_at);
-        track.cursor = Crosshair::show(cursor);
         Ok(())
     })?;
     pump(budget);
@@ -166,11 +168,12 @@ fn pick_within(budget: Duration) -> std::io::Result<Option<Pick>> {
     Ok(answer)
 }
 
-/// Clear the hook guards and drop the outline before the caller captures.
+/// Clear the guards, the pointer surface and the outline before the caller
+/// captures: nothing of the pick may be on screen when the shutter opens.
 fn teardown(track: &mut Track) {
-    track.mouse = None;
+    track.capture = None;
     track.escape = None;
-    track.cursor = None;
+    track.grab = None;
     track.highlight = None;
 }
 
@@ -180,11 +183,27 @@ fn teardown(track: &mut Track) {
 /// window never reaches a low-level hook — ends at the idle limit instead
 /// of hanging the tray with no way to cancel.
 fn pump(budget: Duration) {
-    let end = pump_until(budget, || TRACK.with_borrow(|track| track.done));
+    let end = pump_until(budget, || {
+        // Something can land over the surface while the session runs, and the
+        // session then hears nothing at all: no move, no click, and only the
+        // idle limit ends it. Claiming the top of the band back is what keeps
+        // the pointer ours for as long as the pick is live.
+        raise_surface();
+        TRACK.with_borrow(|track| track.done)
+    });
     if end == PumpEnd::Idle {
         abandon();
         crate::log::note("warn", "selection cancelled after sitting idle");
     }
+}
+
+/// Put the pick's surface back over whatever has landed on top of it.
+fn raise_surface() {
+    TRACK.with_borrow(|track| {
+        if let Some(grab) = &track.grab {
+            grab.raise_if_covered();
+        }
+    });
 }
 
 /// The root window under the pointer and its frame as a capture region.
@@ -335,11 +354,9 @@ fn apply(track: &mut Track, action: Action) {
     }
 }
 
-/// Resolve `point` against the desktop.
-fn hover_at(point: Point) -> Option<Hover> {
-    // SAFETY: point lookup and handle walk; the returned windows are
-    // inspected only.
-    let hovered = unsafe { WindowFromPoint(point) };
+/// Resolve `point` against the desktop, past the pick's own overlay.
+fn hover_at(grab: &Grabber, point: Point) -> Option<Hover> {
+    let hovered = grab.beneath(point);
     if hovered.is_null() {
         return None;
     }
@@ -354,69 +371,88 @@ fn hover_at(point: Point) -> Option<Hover> {
     })
 }
 
-/// Low-level mouse hook: resolve each event against the desktop, let the
-/// gesture state machine answer it, and draw what it asked for. Presses and
-/// releases are consumed; motion passes through so the cursor keeps moving.
-unsafe extern "system" fn on_mouse(code: i32, wparam: usize, lparam: isize) -> isize {
-    let mut consume = false;
-    if code >= 0 {
-        // SAFETY: the payload pointer is valid per the hook contract.
-        let event = unsafe { &*(lparam as *const MsllHook) };
-        let message = u32::try_from(wparam).unwrap_or(0);
-        TRACK.with_borrow_mut(|track| {
-            consume = consumed(message);
-            // The marker stays glued to the pointer for the whole session,
-            // including the event that ends it.
-            if let Some(cursor) = &track.cursor {
-                cursor.place(event.pt);
+/// One pointer message from the grabber: resolve it against the desktop, let
+/// the gesture state machine answer it, and draw what it asked for.
+///
+/// `point` is where the event happened, taken from the message, so a queued
+/// release answers where the button came up rather than where the pointer has
+/// moved on to since.
+fn pointer(message: u32, point: Point) {
+    TRACK.with_borrow_mut(|track| {
+        if track.done {
+            return;
+        }
+        let input = match message {
+            // A press replayed from a gesture that was already running when
+            // the session started is not this session's: it only aims the
+            // outline, and the release still answers the window it came up
+            // over.
+            WM_LBUTTONDOWN => {
+                let inherited = std::mem::take(&mut track.inherited);
+                if inherited {
+                    Input::Move {
+                        point,
+                        under: resolve(track, point),
+                    }
+                } else {
+                    capture(track);
+                    Input::Press {
+                        point,
+                        under: resolve(track, point),
+                    }
+                }
             }
-            if track.done {
-                return;
+            WM_LBUTTONUP => {
+                track.capture = None;
+                Input::Release {
+                    point,
+                    under: resolve(track, point),
+                }
             }
-            // A live marquee answers the pointer alone, so the window
-            // lookup is skipped wherever it cannot change the outcome.
-            let input = match message {
-                WM_LBUTTONDOWN => Input::Press {
-                    point: event.pt,
-                    under: hover_at(event.pt),
-                },
-                WM_LBUTTONUP => Input::Release {
-                    point: event.pt,
-                    under: if track.dragging {
-                        None
-                    } else {
-                        hover_at(event.pt)
-                    },
-                },
-                WM_MOUSEMOVE => Input::Move {
-                    point: event.pt,
-                    under: if track.dragging {
-                        None
-                    } else {
-                        hover_at(event.pt)
-                    },
-                },
-                WM_RBUTTONDOWN => Input::Cancel,
-                _ => return,
-            };
-            let action = step(track, input);
-            apply(track, action);
-            if track.done {
-                finish();
-            }
-        });
-    }
-    if consume {
-        return 1;
-    }
-    // SAFETY: default pass-through chain.
-    unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+            WM_MOUSEMOVE => Input::Move {
+                point,
+                under: resolve(track, point),
+            },
+            WM_RBUTTONDOWN => Input::Cancel,
+            _ => return,
+        };
+        let action = step(track, input);
+        apply(track, action);
+        if track.done {
+            track.capture = None;
+        }
+    });
 }
 
-/// Presses and releases are swallowed; motion passes through so the OS
-/// cursor moves naturally.
-fn consumed(message: u32) -> bool {
-    matches!(message, WM_LBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONDOWN)
+/// Whether the left button is down right now: `GetAsyncKeyState`'s high bit
+/// is set while it is, and the pick has no earlier press to rely on.
+fn button_down() -> bool {
+    // SAFETY: parameterless query about the desktop's input state.
+    unsafe { GetAsyncKeyState(VK_LBUTTON) < 0 }
+}
+
+/// The window under `point` as this pick sees it: a live marquee answers the
+/// pointer alone, so the lookup is skipped wherever it cannot change the
+/// outcome.
+fn resolve(track: &Track, point: Point) -> Option<Hover> {
+    if track.dragging {
+        return None;
+    }
+    track.grab.as_ref().and_then(|grab| hover_at(grab, point))
+}
+
+/// Hold capture on the grabber from the press to its release: without it a
+/// topmost window above ours could take the release and leave the marquee
+/// live until the idle limit.
+fn capture(track: &mut Track) -> bool {
+    let Some(grab) = track.grab.as_ref() else {
+        return false;
+    };
+    // SAFETY: the grabber is this thread's own live window.
+    let held = unsafe { MouseCapture::capture(grab.window()) };
+    let taken = held.is_some();
+    track.capture = held;
+    taken
 }
 
 /// Confirm a plain click: the highlighted window is the answer.
@@ -437,21 +473,18 @@ fn confirm_drag(track: &mut Track) {
     track.picked = dragged.map(Pick::Region);
 }
 
-/// End the session and quit the pump.
-fn finish() {
-    // SAFETY: the pump loop owns the quit sentinel.
-    unsafe { PostQuitMessage(0) }
-}
-
-/// Cancel the pick, drop the outline, and end the pump.
+/// Cancel the pick and drop the outline. The pump's own predicate sees the
+/// finished session and ends within one wake, so no quit message is needed:
+/// a `WM_QUIT` posted from inside the pick's dispatch outlives the pick's
+/// pump and would end the tray loop behind it — the tray, its icon, and a
+/// recording the pick just started.
 fn cancel() {
     abandon();
-    finish();
 }
 
-/// Abandon a session that received no input: the same state as a cancel,
-/// but without the quit message. The pump has already returned here, and
-/// a stray `WM_QUIT` would end the tray loop behind it.
+/// Abandon a session that received no input: the same state as a cancel.
+/// The pump has already returned here, so nothing is posted; the next pick
+/// resets the track anyway.
 fn abandon() {
     TRACK.with_borrow_mut(|track| {
         if track.done {

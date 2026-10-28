@@ -1564,6 +1564,87 @@ Plan of record, in build order. Every session ends with
   the Windows CI smoke, and the launch reporting. A patch release: no
   settings key, capture format, or default changed since 0.2.0.
 
+## Session 43 - One pointer, one surface, no console flash (done, live-verified)
+
+- [x] The picker's low-level mouse hook and its painted crosshair are gone.
+  A pick now covers the virtual desktop with a fullscreen window of its own
+  (`screencapture.selection.grabber`): topmost, never activated, layered at
+  one part in 255, excluded from captures, and painted so it stays
+  hit-testable while invisible. The window under the pointer is ours for the
+  session, so its class cursor — the stock crosshair — is the one pointer on
+  every surface, a text field's I-beam included, moved by the window manager
+  rather than by hook callbacks: the frozen second crosshair that fell
+  behind the pointer cannot recur. Pointer events arrive as the window's own
+  messages, queued instead of skipped, so a busy session can no longer lose
+  a press to a slow callback. The outline stays a separate click-through
+  window; Escape still arrives through its low-level watch.
+- [x] A window that raises itself over the surface mid-session (Task Manager
+  does) is answered: the pump re-claims the top of the always-on-top band
+  whenever the window at the pointer is not ours, so the session keeps
+  hearing the gesture instead of reading as a hang until the idle limit.
+- [x] A press already down when the session starts (a hotkey pressed
+  mid-drag) is taken over with mouse capture and answered as a move, not a
+  new gesture; the release still answers the window it came up over.
+- [x] The pointer is handed back the moment the session ends: the window
+  under it is asked (`WM_SETCURSOR` through `SendMessageTimeout`, abandoned
+  after 100 ms) to put its own shape up, and a window that cannot answer —
+  one Windows will not let this process message, or a thread that never
+  pumps — gets its class cursor installed directly, or the arrow when it
+  has none. The crosshair no longer outlives the pick.
+- [x] A pick that resolves no longer posts `WM_QUIT`. The resolution runs
+  inside the pick's own dispatch, so the flag outlived the pick's pump and
+  ended the tray loop behind it — the tray, its icon, and a recording the
+  pick had just started went with it; a live pass wrote a 0-byte clip and
+  vanished. The pump's own done predicate ends the session, and
+  `a_resolved_pick_leaves_no_quit_behind` pins the queue empty after both a
+  resolved and a cancelled pick.
+- [x] The Windows exe asks for the GUI subsystem: Explorer, the Start Menu,
+  the installer's finish page and the autostart entry no longer flash a
+  console window at every launch. One-shot commands (`--check`, `--version`,
+  a take) attach the parent terminal's console when they have nowhere to
+  write, so a launch from a terminal still prints its report; the tray hands
+  a lent console back with `FreeConsole`. cmd and PowerShell do not wait on
+  a GUI-subsystem program, so the CI smoke and the release checks read the
+  exit code from the process object (`Start-Process -Wait`), and the README
+  says so.
+- [x] Settings marks folders picked in the window (`[media] chosen`): the
+  recovery that migrates an older build's default folder no longer eats a
+  folder somebody deliberately chose — the exact folder the window had just
+  shown them. The template documents the key.
+- [x] A take that fails before a single frame reached the engine takes its
+  empty container with it: the engine writes the file's header before any
+  frame arrives, and a locked desktop refusing the blit used to leave a
+  261-byte unplayable `.mp4` in the folder. `Recorder::stop` removes the
+  file when a failed take wrote nothing, and keeps it when frames were
+  captured.
+- [x] The new unpumped-window test takes the desktop lock like every other
+  pointer-driving test: without it a concurrent session's crosshair answered
+  the shape sample (92 pixels where its own pointer has 26), and the fader
+  test compares floats within epsilon instead of exactly.
+- [x] Verified live through the rebuilt tray: the record hotkey opened the
+  pick (surface up), a click mid-screen answered the maximized window under
+  it (1918x1150 -> 1200x720, the aspect fit holding), the tray survived the
+  pick, the stop hotkey brought the frame down, and the take saved 123
+  frames in 4.07 s (30.2 fps measured, 123 encoded per ffprobe, h264
+  1200x720). The CLI smoke through the GUI-subsystem exe printed `--version`
+  and `--check` into a redirected stdout with exit 0, `--record 2 --rect
+  0,0,640,360` wrote a 2.03 s h264+aac clip, and `--photo --rect
+  0,0,320,200` wrote a 320x200 PNG and copied it to the clipboard. A second
+  `--record` against the locked desktop reported "BitBlt refused the
+  capture" and — with the empty-take fix — left no file behind.
+- [x] Gates: fmt, pedantic clippy `-D warnings`, 255 tests green (the
+  desktop-driving suite included; the cross-target matrix rides the CI).
+
+## Session 44 - 0.2.2 (done)
+
+- [x] 0.2.2 packages session 43: one pointer and one surface in the pick, a
+  window that is asked for the pointer back, a resolved pick that no longer
+  ends the tray behind it, the GUI subsystem with a lent console, and the
+  `[media] chosen` mark that stops a folder picked by hand from being
+  migrated away. A patch release: every key, format, and default that
+  existed in 0.2.1 behaves the same, and `chosen` is an optional key a file
+  written by an older build simply lacks.
+
 ## Deferred backlog
 
 - numbered display names via `EnumDisplayDevices`; mac multi-display
