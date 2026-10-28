@@ -119,6 +119,12 @@ fn store_answers(document: &mut crate::config::Document, answers: &Answers) {
     );
     document.set("media", "videos", Value::Str(videos.display().to_string()));
     document.set("media", "images", Value::Str(images.display().to_string()));
+    // A folder picked here is a choice, not the default an older build
+    // happened to write: without this, a folder that is one of those
+    // defaults (`Videos`, or the `Pictures` copy a redirect left behind) is
+    // migrated to today's answer on the next load, and the window shows a
+    // folder nobody picked.
+    document.set("media", "chosen", Value::Bool(true));
     document.set("hotkeys", "record", Value::Str(answers.record.clone()));
     document.set("hotkeys", "photo", Value::Str(answers.photo.clone()));
     document.set(
@@ -268,6 +274,44 @@ mod tests {
         // the files actually land in.
         assert_eq!(saved.video_dir, media.join("video"));
         assert_eq!(saved.image_dir, media.join("image"));
+    }
+
+    /// A folder the window submitted is a choice, not the default an older
+    /// build wrote: the save has to mark the pair, or the next load migrates
+    /// the choice to another folder and the window shows one nobody picked.
+    #[test]
+    fn a_folder_picked_in_settings_survives_an_old_default() {
+        let legacy = crate::paths::legacy_media_dirs();
+        let (Some(videos), Some(images)) = (legacy.first(), legacy.get(1)) else {
+            return; // no home directory in this environment
+        };
+        let path = std::env::temp_dir().join(format!(
+            "screencapture-apply-legacy-{}.cfg",
+            std::process::id()
+        ));
+        let mut answers = answers(videos);
+        answers.videos = videos.display().to_string();
+        answers.images = images.display().to_string();
+
+        let mut loaded = settings::load(None);
+        store_answers(&mut loaded.document, &answers);
+        loaded
+            .document
+            .persist(&path)
+            .expect("the settings file is written");
+        let reloaded = settings::load(Some(&path));
+        let _ = std::fs::remove_file(&path);
+        assert!(reloaded.problems.is_empty(), "{:?}", reloaded.problems);
+        assert_eq!(
+            reloaded.settings.video_dir,
+            videos.clone(),
+            "the folder the window saved is where recordings land"
+        );
+        assert_eq!(
+            reloaded.settings.image_dir,
+            images.clone(),
+            "and the stills folder too"
+        );
     }
 
     /// An answer with no chosen device must clear the remembered one, not

@@ -482,6 +482,10 @@ fn template(videos: &Path, images: &Path) -> String {
             "[media]\n",
             "# Separate folders for each output.\n",
             "# A legacy `directory` key still answers for recordings.\n",
+            "# chosen marks folders picked in Settings: a folder chosen there\n",
+            "# is used as it stands, even when an older build wrote it as a\n",
+            "# default of its own. The Settings window sets it on every save.\n",
+            "chosen = false\n",
             "videos = \"{videos}\"\n",
             "images = \"{images}\"\n",
         ),
@@ -569,8 +573,7 @@ fn read_document(document: &Document) -> (Settings, Vec<String>) {
         }
         (record, picture, chime) => (record, picture, chime),
     };
-    let (video_dir, image_dir) =
-        split_shared_media(video_directory(document), image_directory(document));
+    let (video_dir, image_dir) = media_folders(document);
     let settings = Settings {
         profile: profile.unwrap_or(recording::DEFAULT),
         codec: codec.unwrap_or(Video::DEFAULT),
@@ -650,15 +653,45 @@ fn still_depth(value: Option<&Value>) -> Option<StillDepth> {
     }
 }
 
-fn video_directory(document: &Document) -> PathBuf {
-    let chosen = document
+/// The effective media folders: both destinations, split when they are the
+/// same folder, with the "an older build wrote this default" recovery applied
+/// only to a folder Settings did not choose (see [`chosen_folders`]).
+fn media_folders(document: &Document) -> (PathBuf, PathBuf) {
+    let chosen = chosen_folders(document);
+    split_shared_media(
+        video_directory(document, chosen),
+        image_directory(document, chosen),
+    )
+}
+
+/// Whether the `[media]` folders were picked in the Settings window.
+///
+/// The two folders a file names are read as a choice, except when a value is
+/// one an older build wrote as its own default: such a file never chose
+/// anything, and following today's answer is what keeps screenshots out of a
+/// `Pictures` copy that a `OneDrive` redirect left behind. Settings records
+/// that it picked them — the window always submits both fields — because that
+/// rule cannot tell a default apart from a folder somebody deliberately
+/// chose, which is exactly the folder the window then showed as something
+/// else on its next open.
+fn chosen_folders(document: &Document) -> bool {
+    document
+        .value("media", "chosen")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// The recordings folder from the document, with the recovery for a legacy
+/// default applied unless Settings chose it.
+fn video_directory(document: &Document, chosen: bool) -> PathBuf {
+    let stored = document
         .value("media", "videos")
         .and_then(Value::as_str)
         .or_else(|| document.value("media", "directory").and_then(Value::as_str))
         .filter(|directory| !directory.trim().is_empty())
         .map(PathBuf::from);
-    match chosen {
-        Some(directory) if !is_legacy_media_default(&directory) => directory,
+    match stored {
+        Some(directory) if chosen || !is_legacy_media_default(&directory) => directory,
         // Unset, or a folder recordings used to land in by default: adopt
         // the `Videos/Screencapture` default so recordings get their own
         // folder like stills already do.
@@ -812,8 +845,8 @@ fn endpoint(
     })
 }
 
-fn image_directory(document: &Document) -> PathBuf {
-    let chosen = document
+fn image_directory(document: &Document, chosen: bool) -> PathBuf {
+    let stored = document
         .value("media", "images")
         .and_then(Value::as_str)
         .filter(|directory| !directory.trim().is_empty())
@@ -821,8 +854,8 @@ fn image_directory(document: &Document) -> PathBuf {
     // The legacy `directory` key deliberately does NOT answer here:
     // existing configs pointed it at the recordings folder, and the user
     // asked for photos to keep their own (Pictures) default.
-    match chosen {
-        Some(directory) if !is_legacy_media_default(&directory) => directory,
+    match stored {
+        Some(directory) if chosen || !is_legacy_media_default(&directory) => directory,
         _ => paths::image_dir().unwrap_or_else(|| PathBuf::from(DEFAULT_DIRECTORY)),
     }
 }

@@ -362,6 +362,10 @@ audio_quality = high
 autostart = true
 
 [media]
+# Separate folders for each output. The Settings window records what it
+# picked here, so a folder chosen there stays put even when an earlier
+# build wrote it as a default of its own.
+chosen = true
 videos = "C:\Users\you\Videos\Screencapture"
 images = "C:\Users\you\Pictures\Screencapture"
 ```

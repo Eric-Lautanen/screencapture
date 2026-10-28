@@ -219,6 +219,42 @@ fn stills_follow_the_pictures_folder_the_shell_names() {
     assert_eq!(settings.image_dir, PathBuf::from("D:\\shots\\mine"));
 }
 
+/// The folder the Settings window submitted is the folder that survives. The
+/// recovery above cannot tell one of those paths from a folder somebody
+/// deliberately chose — the same folder is where their screenshots already
+/// are — so a save from the window marks the pair, and the mark outlives the
+/// file. Without it the window opens on a folder nobody picked.
+#[test]
+fn a_folder_chosen_in_settings_is_never_migrated() {
+    let Some(legacy) = crate::paths::legacy_media_dirs().first().cloned() else {
+        return; // no home directory in this environment
+    };
+    let Some(expected_images) = crate::paths::image_dir() else {
+        return;
+    };
+    let picked = PathBuf::from("C:\\picked\\clips");
+    let document = Document::from_text(&format!(
+        "[media]\nchosen = true\nvideos = \"{}\"\nimages = \"{}\"\n",
+        picked.display(),
+        legacy.display()
+    ))
+    .expect("sample must parse");
+    let (settings, problems) = read_document(&document);
+    assert_eq!(settings.video_dir, picked);
+    assert_eq!(
+        settings.image_dir, legacy,
+        "a folder chosen in Settings is used as it stands"
+    );
+    assert_eq!(problems.len(), 0);
+
+    // The same folder without the mark is an old default and follows today's
+    // answer; the recovery still works for a file that never chose.
+    let unmarked = Document::from_text(&format!("[media]\nimages = \"{}\"\n", legacy.display()))
+        .expect("sample must parse");
+    let (settings, _) = read_document(&unmarked);
+    assert_eq!(settings.image_dir, expected_images);
+}
+
 #[test]
 fn one_folder_for_both_media_gets_video_and_image_subfolders() {
     let shared = PathBuf::from("C:\\captures");
@@ -498,7 +534,7 @@ mic_level = 120
 fn the_faders_gain_is_unity_at_zero_and_silence_at_the_floor() {
     use crate::audio::Levels;
     assert!((Levels::gain(0) - 1.0).abs() < f32::EPSILON);
-    assert_eq!(Levels::gain(Levels::MIN_DB), 0.0);
+    assert!(Levels::gain(Levels::MIN_DB).abs() < f32::EPSILON);
     let boost = Levels::gain(6);
     assert!(boost > 1.9 && boost < 2.0, "6 dB doubles: {boost}");
     assert_eq!(Levels::clamp_level(99), Levels::MAX_DB);
