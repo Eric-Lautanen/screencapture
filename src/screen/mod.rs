@@ -135,6 +135,15 @@ pub fn window_region(preferred: Option<usize>) -> Result<Region, io::Error> {
     return mac::window_region(preferred);
 }
 
+/// Whether a picked window handle names the shell's desktop itself (the
+/// wallpaper layer behind every application) rather than a window of its
+/// own. Windows only: no other platform captures a window's own paint.
+#[cfg(windows)]
+#[must_use]
+pub fn is_desktop_window(handle: usize) -> bool {
+    win::is_desktop_window(handle)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{display_at, displays, primary};

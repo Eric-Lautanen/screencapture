@@ -229,10 +229,12 @@ fn pick_region() -> Option<io::Result<Selection>> {
     match crate::window_picker::pick() {
         Ok(Some(crate::window_picker::Pick::Window(handle))) => {
             let region = screen::window_region(Some(handle));
-            Some(region.map(|region| Selection {
-                region,
-                window: Some(handle),
-            }))
+            // A pick on the desktop means the screen in front of the user,
+            // so it saves the way a display selection does. Asking that
+            // window to paint itself instead returns the wallpaper layer:
+            // icons on a bare background, with no taskbar and no windows.
+            let window = (!screen::is_desktop_window(handle)).then_some(handle);
+            Some(region.map(|region| Selection { region, window }))
         }
         Ok(Some(crate::window_picker::Pick::Region(region))) => Some(Ok(Selection::region(region))),
         Ok(None) => {
