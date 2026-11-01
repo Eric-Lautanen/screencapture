@@ -5,8 +5,11 @@
 
 .DESCRIPTION
     Uses only Windows PowerShell and .NET - no curl, tar, or 7-Zip needed.
-    The archive is pinned by URL, byte count, and SHA-256; a mismatch stops
-    before anything is extracted. Only ffmpeg.exe, ffprobe.exe, and the
+    The archive is pinned by release, asset name, and the SHA-256 the release
+    publishes in its own checksums.sha256; a mismatch stops before anything
+    is extracted. A dated autobuild URL is deliberately not pinned: upstream
+    prunes those releases, and one rotted into a 404 that failed a release
+    build (the archive it named is gone, not the one it describes). Only ffmpeg.exe, ffprobe.exe, and the
     license text are installed. The engine integrity record is left for
     `screencapture --check` to write, so a deliberate engine update can
     re-record it.
@@ -41,11 +44,13 @@ trap {
     exit 1
 }
 
-$ArchiveName = 'ffmpeg-n9.0.2-28-g669f5ab083-win64-gpl-9.0.zip'
-$ArchiveUrl = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-10-18-13-01/' + $ArchiveName
-$ArchiveBytes = 193978993
-$ArchiveSha256 = 'a38198cc130ed3fa02097d0baebcea9c1b8a9d9d3d1d8161d691d1f03709158b'
-$EngineVersion = 'FFmpeg 9.0.2 (BtbN autobuild 2026-10-18, win64 GPL)'
+$ReleaseTag = 'latest'
+$ArchiveName = 'ffmpeg-n9.0-latest-win64-gpl-9.0.zip'
+$ArchiveUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$ReleaseTag/" + $ArchiveName
+$ChecksumsUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/$ReleaseTag/checksums.sha256"
+# A sanity floor only: the release's checksum is what proves the bytes.
+$MinimumBytes = 50MB
+$EngineVersion = 'FFmpeg 9.0 (BtbN win64 GPL, latest 9.0 build)'
 
 function Write-Step {
     param([string]$Message)
@@ -57,12 +62,49 @@ function Get-Sha256 {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
+function Get-ExpectedHash {
+    param([string]$Name)
+
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
+        try {
+            Write-Step "Reading the release checksums (attempt $attempt of 3)"
+            $client = New-Object System.Net.Http.HttpClient
+            $client.Timeout = [TimeSpan]::FromMinutes(5)
+            $client.DefaultRequestHeaders.UserAgent.ParseAdd('screencapture-fetch-ffmpeg/1.0')
+            try {
+                $text = $client.GetStringAsync($ChecksumsUrl).GetAwaiter().GetResult()
+            } finally {
+                $client.Dispose()
+            }
+            foreach ($line in ($text -split "`n")) {
+                # "<sha256>  <name>", where a `*` may mark binary mode: the
+                # digest is matched positionally rather than by splitting, so
+                # no separator surprise can turn some other field into the
+                # expected hash.
+                if ($line -match '^\s*([0-9a-fA-F]{64})\s+\*?(.+?)\s*$' -and $matches[2] -eq $Name) {
+                    return $matches[1].ToLowerInvariant()
+                }
+            }
+            throw "$ChecksumsUrl has no entry for $Name"
+        } catch {
+            if ($attempt -eq 3) {
+                throw
+            }
+            Write-Warning "Checksum fetch failed: $($_.Exception.Message)"
+            Start-Sleep -Seconds (2 * $attempt)
+        }
+    }
+}
+
 function Get-Archive {
-    param([string]$Path)
+    # Not `$Expected`: PowerShell names are case-insensitive, and the
+    # Content-Length note below used that name too, so the download size
+    # silently replaced the digest this check compares against.
+    param([string]$Path, [string]$ExpectedSha256)
 
     if (Test-Path -LiteralPath $Path) {
         $existing = Get-Sha256 $Path
-        if ($existing -eq $ArchiveSha256) {
+        if ($existing -eq $ExpectedSha256) {
             Write-Step "Using verified archive in $Path"
             return
         }
@@ -88,7 +130,7 @@ function Get-Archive {
                     [System.Net.Http.HttpCompletionOption]::ResponseHeadersRead
                 ).GetAwaiter().GetResult()
                 $null = $response.EnsureSuccessStatusCode()
-                $expected = $response.Content.Headers.ContentLength
+                $declaredLength = $response.Content.Headers.ContentLength
                 $source = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
                 $target = [System.IO.File]::Open(
                     $part,
@@ -102,10 +144,10 @@ function Get-Archive {
                     while (($read = $source.Read($buffer, 0, $buffer.Length)) -gt 0) {
                         $target.Write($buffer, 0, $read)
                         $written += $read
-                        if ($expected -and $expected -gt 0) {
-                            $percent = [Math]::Min(100, [int](100 * $written / $expected))
+                        if ($declaredLength -and $declaredLength -gt 0) {
+                            $percent = [Math]::Min(100, [int](100 * $written / $declaredLength))
                             Write-Progress -Activity 'Downloading FFmpeg' `
-                                -Status "$([Math]::Round($written / 1MB)) MB of $([Math]::Round($expected / 1MB)) MB" `
+                                -Status "$([Math]::Round($written / 1MB)) MB of $([Math]::Round($declaredLength / 1MB)) MB" `
                                 -PercentComplete $percent
                         } else {
                             Write-Progress -Activity 'Downloading FFmpeg' `
@@ -123,20 +165,20 @@ function Get-Archive {
             }
 
             $length = (Get-Item -LiteralPath $part).Length
-            if ($expected -and $length -ne [long]$expected) {
-                throw "download ended at $length bytes, expected $expected"
+            if ($declaredLength -and $length -ne [long]$declaredLength) {
+                throw "download ended at $length bytes, expected $declaredLength"
             }
-            if ($length -ne $ArchiveBytes) {
-                throw "archive is $length bytes, expected $ArchiveBytes"
+            if ($length -lt $MinimumBytes) {
+                throw "archive is only $length bytes; the download is truncated"
             }
 
             $actual = Get-Sha256 $part
-            if ($actual -ne $ArchiveSha256) {
-                throw "SHA-256 mismatch: got $actual, expected $ArchiveSha256"
+            if ($actual -ne $ExpectedSha256) {
+                throw "SHA-256 mismatch: got $actual, the release checksums say $ExpectedSha256"
             }
 
             Move-Item -LiteralPath $part -Destination $Path -Force
-            Write-Step "Download verified: $ArchiveSha256"
+            Write-Step "Download verified: $ExpectedSha256"
             return
         } catch {
             Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
@@ -172,7 +214,8 @@ Write-Step "Preparing $Destination"
 New-Item -ItemType Directory -Path $Destination -Force | Out-Null
 
 $archive = Join-Path ([System.IO.Path]::GetTempPath()) $ArchiveName
-Get-Archive $archive
+$expectedSha256 = Get-ExpectedHash $ArchiveName
+Get-Archive $archive $expectedSha256
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $staging = Join-Path ([System.IO.Path]::GetTempPath()) ('screencapture-ffmpeg-' + [Guid]::NewGuid().ToString('N'))
