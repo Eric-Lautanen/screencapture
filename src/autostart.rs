@@ -51,6 +51,13 @@ mod native {
             result: *mut Hkey,
             disposition: *mut u32,
         ) -> Status;
+        fn RegOpenKeyExW(
+            key: Hkey,
+            sub_key: *const u16,
+            options: u32,
+            sam_desired: u32,
+            result: *mut Hkey,
+        ) -> Status;
         fn RegQueryValueExW(
             key: Hkey,
             value_name: *const u16,
@@ -102,6 +109,25 @@ mod native {
         }
     }
 
+    /// Open the `Run` key for reading only, without creating it: a status
+    /// check must never write to the registry, and on a profile where
+    /// creating it is refused the old create-based read answered "not
+    /// registered" instead of what the key actually holds.
+    fn open_for_read() -> io::Result<Hkey> {
+        let name = wide(SUB_KEY);
+        let mut key = std::ptr::null_mut();
+        let status = {
+            // SAFETY: `name` is a null-terminated local buffer; `result`
+            // receives a registry key handle owned by this call.
+            unsafe { RegOpenKeyExW(run_key(), name.as_ptr(), 0, KEY_QUERY_VALUE, &raw mut key) }
+        };
+        if status == ERROR_SUCCESS {
+            Ok(key)
+        } else {
+            Err(io::Error::from_raw_os_error(status))
+        }
+    }
+
     fn exe_command() -> Option<String> {
         let path: PathBuf = std::env::current_exe().ok()?;
         let display = path.display().to_string();
@@ -116,7 +142,7 @@ mod native {
     /// `false`, so the startup sync rewrites it instead of silently
     /// starting the old path (or nothing, once that path is gone).
     pub(super) fn registered() -> bool {
-        let Ok(key) = open_for_access(KEY_QUERY_VALUE) else {
+        let Ok(key) = open_for_read() else {
             return false;
         };
         let name = wide(VALUE_NAME);
@@ -141,7 +167,7 @@ mod native {
             None
         };
         let _ = {
-            // SAFETY: closing the key opened by `open_for_access`.
+            // SAFETY: closing the key opened by `open_for_read`.
             unsafe { RegCloseKey(key) }
         };
         stored.is_some_and(|command| launches_this_exe(&command))

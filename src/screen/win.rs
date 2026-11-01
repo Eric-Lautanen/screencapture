@@ -9,9 +9,9 @@ use crate::capture::Region;
 use crate::screen::Display;
 use crate::winapi::{
     DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_VISIBLE_FRAME_BORDER_THICKNESS, DwmGetWindowAttribute,
-    EnumDisplayMonitors, GA_ROOT, GetAncestor, GetCursorPos, GetSystemMetrics, GetWindowRect, Hwnd,
-    Point, Rect, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
-    WindowFromPoint,
+    EnumDisplayMonitors, GA_ROOT, GetAncestor, GetClassNameW, GetCursorPos, GetSystemMetrics,
+    GetWindowRect, Hwnd, Point, Rect, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, WindowFromPoint,
 };
 
 /// All attached displays in enumeration order.
@@ -60,6 +60,10 @@ unsafe extern "system" fn push_display(
 /// names the window the picker session chose (pointer bits); otherwise
 /// the window under the cursor answers.
 ///
+/// A pick on the desktop answers the display under the pointer instead:
+/// the desktop window is the wallpaper layer, so its own bounds are not
+/// the screen the user is pointing at.
+///
 /// # Errors
 /// Returns an error when no window bounds can be resolved.
 pub fn window_region(preferred: Option<usize>) -> Result<Region, io::Error> {
@@ -67,8 +71,56 @@ pub fn window_region(preferred: Option<usize>) -> Result<Region, io::Error> {
         Some(value) => window_from_value(value),
         None => window_at_cursor().ok_or_else(|| io::Error::other("no window under the cursor"))?,
     };
+    if is_desktop(handle) {
+        let display = super::under_cursor();
+        return Ok(Region {
+            x: display.x,
+            y: display.y,
+            width: display.width,
+            height: display.height,
+        });
+    }
     region_for_window(handle)
         .ok_or_else(|| io::Error::other("the target window has no usable bounds"))
+}
+
+/// Window classes of the shell's desktop: `Progman` normally, `WorkerW`
+/// when a slideshow moves the icon host up one level, and `#32769` for
+/// the desktop window those two live in. All three are the wallpaper
+/// layer every application sits on.
+const DESKTOP_CLASSES: [&str; 3] = ["Progman", "WorkerW", "#32769"];
+
+/// Whether the picker's `handle` names the shell's desktop window rather
+/// than an application's own.
+pub(crate) fn is_desktop_window(handle: usize) -> bool {
+    let window = window_from_value(handle);
+    // The picker hands over the root of whatever was under the pointer; a
+    // child that reached here (the icon list) is still the desktop.
+    // SAFETY: a root walk from a handle this process already published.
+    let root = unsafe { GetAncestor(window, GA_ROOT) };
+    is_desktop(if root.is_null() { window } else { root })
+}
+
+/// Whether `window` is one of the desktop classes above.
+fn is_desktop(window: Hwnd) -> bool {
+    if window.is_null() {
+        return false;
+    }
+    let mut name = [0u16; 64];
+    let size = i32::try_from(name.len()).unwrap_or(0);
+    // SAFETY: the buffer is a live local sized by the count passed, and
+    // the call only writes into it.
+    let len = unsafe { GetClassNameW(window, name.as_mut_ptr(), size) };
+    if len <= 0 {
+        return false;
+    }
+    let len = usize::try_from(len).unwrap_or(0).min(name.len());
+    desktop_class(&crate::winapi::wide_to_string(&name[..len]))
+}
+
+/// Whether a window's class name is the shell's desktop.
+fn desktop_class(name: &str) -> bool {
+    DESKTOP_CLASSES.contains(&name)
 }
 
 fn window_from_value(value: usize) -> *mut c_void {
@@ -225,8 +277,21 @@ fn virtual_desktop() -> (i32, i32, i32, i32) {
 
 #[cfg(test)]
 mod tests {
-    use super::{inset, nonempty};
-    use crate::winapi::Rect;
+    use super::{desktop_class, inset, nonempty, window_region};
+    use crate::winapi::{Hwnd, Rect};
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        /// The shell's desktop window; null when no shell is running.
+        fn GetShellWindow() -> Hwnd;
+    }
+
+    /// The live desktop window, or `None` on a desktop with no shell.
+    fn shell_desktop() -> Option<Hwnd> {
+        // SAFETY: a parameterless query about the current shell.
+        let window = unsafe { GetShellWindow() };
+        (!window.is_null()).then_some(window)
+    }
 
     const FRAME: Rect = Rect {
         left: 240,
@@ -254,5 +319,34 @@ mod tests {
         assert!(inset(FRAME, 5_000).is_none());
         assert!(inset(Rect::default(), 1).is_none());
         assert!(nonempty(Rect::default()).is_none());
+    }
+
+    /// The wallpaper layer answers the screen, never its own paint: a
+    /// capture of the desktop window saved icons on an empty background
+    /// with no taskbar and no application windows in the frame.
+    #[test]
+    fn only_the_shells_desktop_classes_are_the_desktop() {
+        assert!(desktop_class("Progman"));
+        assert!(desktop_class("WorkerW"));
+        assert!(desktop_class("#32769"));
+        for other in ["Shell_TrayWnd", "Notepad", "Chrome_WidgetWin_1", ""] {
+            assert!(!desktop_class(other), "{other}");
+        }
+    }
+
+    /// Against the live desktop: the picker's own answer for this window
+    /// is the display it sits on, not the 1 px-inset desktop frame.
+    #[test]
+    fn the_desktop_window_answers_the_display() {
+        let Some(handle) = shell_desktop() else {
+            return; // no shell desktop in this environment
+        };
+        assert!(super::is_desktop_window(handle as usize));
+        let region = window_region(Some(handle as usize)).expect("the desktop is recordable");
+        let display = crate::screen::under_cursor();
+        assert_eq!(
+            (region.x, region.y, region.width, region.height),
+            (display.x, display.y, display.width, display.height)
+        );
     }
 }

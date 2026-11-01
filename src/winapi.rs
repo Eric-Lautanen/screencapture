@@ -211,6 +211,9 @@ unsafe extern "system" {
         result: *mut usize,
     ) -> Lresult;
     pub fn GetWindowRect(window: Hwnd, rect: *mut Rect) -> Bool;
+    /// The class name Windows registered a window under, as a count of
+    /// UTF-16 units copied (excluding the terminator, zero on refusal).
+    pub fn GetClassNameW(window: Hwnd, name: *mut u16, size: i32) -> i32;
     pub fn GetDC(window: Hwnd) -> Hdc;
     pub fn ReleaseDC(window: Hwnd, dc: Hdc) -> i32;
     pub fn EnumDisplayMonitors(

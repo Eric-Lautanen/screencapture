@@ -57,12 +57,14 @@ impl Drop for Session {
     }
 }
 
-/// A window's capture region: the client rectangle of the window under
-/// the cursor, translated into root coordinates and clamped to the
-/// root's extent. The window under the desktop itself names the whole
-/// root, matching the Windows desktop-handle answer. `preferred` (a
-/// picked Windows handle) is a Windows notion; Linux answers from the
-/// cursor either way.
+/// A window's capture region: the rectangle of the window under the
+/// cursor, translated into root coordinates and clamped to the root's
+/// extent. The pointer names a child of the root, so under a reparenting
+/// window manager that window is the frame and the region carries its
+/// decorations; resolving the client window inside the frame is still
+/// open. The desktop itself (a zero child) names the whole root, matching
+/// the Windows desktop-handle answer. `preferred` (a picked Windows
+/// handle) is a Windows notion; Linux answers from the cursor either way.
 ///
 /// # Errors
 /// Fails when no X server/pointer answer, or when the window has no

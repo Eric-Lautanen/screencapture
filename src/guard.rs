@@ -79,6 +79,12 @@ unsafe extern "system" {
     fn CallNextHookEx(hook: Hhook, code: i32, wparam: usize, lparam: isize) -> isize;
 }
 
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn SetLastError(error: u32);
+    fn GetLastError() -> u32;
+}
+
 /// Hand an event from a hook procedure to the next hook in the chain.
 ///
 /// # Safety
@@ -128,16 +134,30 @@ impl MouseCapture {
     /// `window` must be owned by the calling thread.
     #[must_use]
     pub(crate) unsafe fn capture(window: Hwnd) -> Option<Self> {
+        // `SetCapture` answers the window that held the capture before, so
+        // null is its ordinary answer when nothing did: the answer alone
+        // cannot say whether the call worked, and Windows reports a real
+        // refusal through the error slot instead. That slot has to be
+        // cleared first — a stale code from earlier work made a working
+        // capture look refused, and the drag that asked for it never
+        // tracked. The caller treats `None` as "no drag this press".
+        // SAFETY: plain thread-local last-error slot.
+        unsafe { SetLastError(0) };
         // SAFETY: upheld by the caller contract above.
         let previous = unsafe { SetCapture(window) };
-        // Windows answers the previous capture window on success; a null
-        // answer with `GetLastError` set means the capture failed. The
-        // caller treats `None` as "no drag tracking this press".
-        if previous.is_null() && std::io::Error::last_os_error().raw_os_error() != Some(0) {
+        // SAFETY: reading the slot this thread just cleared.
+        let error = unsafe { GetLastError() };
+        if capture_refused(previous, error) {
             return None;
         }
         Some(Self)
     }
+}
+
+/// Whether one `SetCapture` answer is a refusal. A null answer with a clear
+/// error slot is the ordinary "nothing had the capture", not a failure.
+fn capture_refused(previous: Hwnd, error: u32) -> bool {
+    previous.is_null() && error != 0
 }
 
 impl Drop for MouseCapture {
@@ -277,7 +297,9 @@ pub(crate) fn restore_system_cursors() {
 
 #[cfg(test)]
 mod tests {
-    use super::{ESCAPE_KEY, KEY_UP, KbllHook, MouseCapture, ScreenDc, escape_down};
+    use super::{
+        ESCAPE_KEY, KEY_UP, KbllHook, MouseCapture, ScreenDc, capture_refused, escape_down,
+    };
     use crate::winapi::GetModuleHandleW;
 
     /// A payload with every field set explicitly, so the test describes
@@ -326,6 +348,32 @@ mod tests {
         };
         assert!(!guard.dc().is_null());
         // The release happens in `Drop`; nothing else to assert here.
+    }
+
+    /// A capture that worked must never be reported as refused: the caller
+    /// answers `None` by not tracking the drag at all, so a wrong answer
+    /// costs the gesture silently.
+    #[test]
+    fn a_refused_capture_is_told_from_a_free_one() {
+        let none: super::Hwnd = std::ptr::null_mut();
+        assert!(!capture_refused(none, 0));
+        assert!(capture_refused(none, 5));
+        // A previous owner answers non-null, whatever the slot held.
+        let owned: super::Hwnd = std::ptr::without_provenance_mut(0x1000);
+        assert!(!capture_refused(owned, 5));
+    }
+
+    #[test]
+    fn a_stale_error_slot_does_not_refuse_a_real_capture() {
+        let window = console_window();
+        if window.is_null() {
+            return; // no console window in this environment
+        }
+        // SAFETY: plain thread-local last-error slot.
+        unsafe { super::SetLastError(5) };
+        // SAFETY: the test thread owns the console window.
+        let guard = unsafe { MouseCapture::capture(window) };
+        assert!(guard.is_some(), "a stale error must not refuse the capture");
     }
 
     #[test]

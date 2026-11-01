@@ -46,9 +46,10 @@ impl std::fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// Whether Windows would accept `combo` as a global hotkey right now.
-/// The app's own registrations are lifted for the probe, so a combo
-/// already used by screencapture answers free; another process holding
-/// it answers taken. Used by the settings window while a field records
+/// A combo this process already holds answers free without asking, and
+/// the live bindings are never lifted for the probe; anything else is a
+/// real registration attempt on a spare id, so a combo another process
+/// holds answers taken. Used by the settings window while a field records
 /// the keys the user presses.
 #[must_use]
 pub fn hotkey_available(combo: Hotkey) -> bool {
